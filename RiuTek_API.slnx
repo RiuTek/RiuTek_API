@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/SRC/">
+    <Project Path="RiuTek.Core/RiuTek.Core.csproj" Id="37a9e6f1-7760-4783-a323-36582c7fc150" />
+    <Project Path="RiuTek.Infrastructure/RiuTek.Infrastructure.csproj" Id="ed83d0ce-fd07-4c59-9a4f-69e40364621d" />
+    <Project Path="RiuTek_Application/RiuTek.Application.csproj" Id="899da05e-5f9e-4862-913f-6e28b147d8ab" />
+    <Project Path="RiuTek_WedAPI/RiuTek.API.csproj" />
+  </Folder>
+</Solution>
