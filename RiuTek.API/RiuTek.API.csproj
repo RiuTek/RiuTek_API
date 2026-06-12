@@ -14,8 +14,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Folder Include="Controllers\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\RiuTek.Application\RiuTek.Application.csproj" />
     <ProjectReference Include="..\RiuTek.Infrastructure\RiuTek.Infrastructure.csproj" />
-    <ProjectReference Include="..\RiuTek_Application\RiuTek.Application.csproj" />
   </ItemGroup>
 
 </Project>
