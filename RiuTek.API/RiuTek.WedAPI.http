@@ -1,6 +1,0 @@
-@RiuTek_WedAPI_HostAddress = http://localhost:5251
-
-GET {{RiuTek_WedAPI_HostAddress}}/weatherforecast/
-Accept: application/json
-
-###

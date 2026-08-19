@@ -5,4 +5,7 @@
     <Project Path="RiuTek.Core/RiuTek.Core.csproj" Id="37a9e6f1-7760-4783-a323-36582c7fc150" />
     <Project Path="RiuTek.Infrastructure/RiuTek.Infrastructure.csproj" Id="ed83d0ce-fd07-4c59-9a4f-69e40364621d" />
   </Folder>
+  <Folder Name="/test/">
+    <Project Path="RiuTek.Application.Test/RiuTek.Application.Test.csproj" Id="2f9a11f1-42f9-429d-af2b-aa30cb3d1bc1" />
+  </Folder>
 </Solution>
