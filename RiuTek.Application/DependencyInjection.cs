@@ -9,7 +9,12 @@ public static class DependencyInjection
     {
         var assembly = typeof(DependencyInjection).Assembly;
 
-        services.AddMediatR(cfg => cfg.RegisterServicesFromAssembly(assembly));
+        services.AddMediatR(cfg =>
+        {
+            cfg.RegisterServicesFromAssembly(assembly);
+            cfg.AddOpenBehavior(typeof(RiuTek.Application.Common.Behaviors.LoggingBehavior<,>));
+            cfg.AddOpenBehavior(typeof(RiuTek.Application.Common.Behaviors.ValidationBehavior<,>));
+        });
         services.AddValidatorsFromAssembly(assembly);
 
         return services;
