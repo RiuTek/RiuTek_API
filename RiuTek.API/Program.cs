@@ -13,8 +13,8 @@ namespace RiuTek.API
             // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
             builder.Services.AddOpenApi();
 
-            //add DI wedapp
-            builder.Services.AddAppDI();
+            // Register Application, Infrastructure, and Core services
+            builder.Services.AddAppDI(builder.Configuration);
 
             var app = builder.Build();
 

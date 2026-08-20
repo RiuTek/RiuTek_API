@@ -1,17 +1,20 @@
-﻿using RiuTek.Application;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using RiuTek.Application;
+using RiuTek.Core;
 using RiuTek.Infrastructure;
 
-namespace RiuTek.API
+namespace RiuTek.API;
+
+public static class DependencyInjection
 {
-    public static class DependencyInjection
+    public static IServiceCollection AddAppDI(this IServiceCollection services, IConfiguration configuration)
     {
-        public static IServiceCollection AddAppDI(this IServiceCollection services)
-        {
-            services.AddApplicationDI().AddInfrastructureDI();
-                
+        services
+            .AddCoreDI()
+            .AddApplicationDI()
+            .AddInfrastructureDI(configuration);
 
-
-            return services;
-        }
+        return services;
     }
 }

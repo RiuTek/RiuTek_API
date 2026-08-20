@@ -1,15 +1,17 @@
-﻿using Microsoft.Extensions.DependencyInjection;
-using System;
-using System.Collections.Generic;
-using System.Text;
+using FluentValidation;
+using Microsoft.Extensions.DependencyInjection;
 
-namespace RiuTek.Application
+namespace RiuTek.Application;
+
+public static class DependencyInjection
 {
-    public static class DependencyInjection
+    public static IServiceCollection AddApplicationDI(this IServiceCollection services)
     {
-        public static IServiceCollection AddApplicationDI(this IServiceCollection services)
-        {
-            return services;
-        }
+        var assembly = typeof(DependencyInjection).Assembly;
+
+        services.AddMediatR(cfg => cfg.RegisterServicesFromAssembly(assembly));
+        services.AddValidatorsFromAssembly(assembly);
+
+        return services;
     }
 }
