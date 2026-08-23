@@ -111,6 +111,8 @@ public record WishlistDto(
 
 public record CompatibilityCheckResultDto(
     bool IsCompatible,
+    bool IsCompleteSystem,
+    List<string> MissingComponents,
     int EstimatedWattage,
     int RecommendedPsuWattage,
     List<CompatibilityIssueDto> Issues

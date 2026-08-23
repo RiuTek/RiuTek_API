@@ -17,6 +17,9 @@ public static class DependencyInjection
         });
         services.AddValidatorsFromAssembly(assembly);
 
+        // Core Domain & Application Services
+        services.AddScoped<Common.Interfaces.IHardwareCompatibilityService, Services.HardwareCompatibilityService>();
+
         return services;
     }
 }
