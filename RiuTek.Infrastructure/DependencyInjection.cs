@@ -28,6 +28,10 @@ public static class DependencyInjection
         services.AddScoped<IUnitOfWork>(sp => sp.GetRequiredService<ApplicationDbContext>());
         services.AddScoped(typeof(IRepository<>), typeof(Repository<>));
 
+        // Security & Auth Services
+        services.AddSingleton<IPasswordHasher, Services.PasswordHasher>();
+        services.AddScoped<IJwtTokenGenerator, Services.JwtTokenGenerator>();
+
         return services;
     }
 }
