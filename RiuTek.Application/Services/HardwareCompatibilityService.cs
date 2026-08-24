@@ -17,7 +17,7 @@ public class HardwareCompatibilityService : IHardwareCompatibilityService
 
         return ValidateSpecifications(specs);
     }
-
+//test
     public CompatibilityCheckResultDto ValidateSpecifications(IReadOnlyList<ComponentSpecification> specifications)
     {
         var issues = new List<CompatibilityIssueDto>();

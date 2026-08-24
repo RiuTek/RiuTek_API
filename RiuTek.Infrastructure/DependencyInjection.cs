@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using RiuTek.Application.Common.Interfaces;
 using RiuTek.Core.Interfaces;
 using RiuTek.Infrastructure.Data;
 using RiuTek.Infrastructure.Repositories;
@@ -23,6 +24,7 @@ public static class DependencyInjection
             });
         });
 
+        services.AddScoped<IApplicationDbContext>(sp => sp.GetRequiredService<ApplicationDbContext>());
         services.AddScoped<IUnitOfWork>(sp => sp.GetRequiredService<ApplicationDbContext>());
         services.AddScoped(typeof(IRepository<>), typeof(Repository<>));
 

@@ -1,10 +1,11 @@
 using Microsoft.EntityFrameworkCore;
+using RiuTek.Application.Common.Interfaces;
 using RiuTek.Core.Entities;
 using RiuTek.Core.Interfaces;
 
 namespace RiuTek.Infrastructure.Data;
 
-public class ApplicationDbContext : DbContext, IUnitOfWork
+public class ApplicationDbContext : DbContext, IUnitOfWork, IApplicationDbContext
 {
     public ApplicationDbContext(DbContextOptions<ApplicationDbContext> options)
         : base(options)
