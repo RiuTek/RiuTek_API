@@ -26,6 +26,7 @@ namespace RiuTek.API
 
             app.UseHttpsRedirection();
 
+            app.UseAuthentication();
             app.UseAuthorization();
 
 

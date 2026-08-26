@@ -29,8 +29,10 @@ public static class DependencyInjection
         services.AddScoped(typeof(IRepository<>), typeof(Repository<>));
 
         // Security & Auth Services
+        services.AddHttpContextAccessor();
         services.AddSingleton<IPasswordHasher, Services.PasswordHasher>();
         services.AddScoped<IJwtTokenGenerator, Services.JwtTokenGenerator>();
+        services.AddScoped<ICurrentUserService, Services.CurrentUserService>();
 
         return services;
     }
