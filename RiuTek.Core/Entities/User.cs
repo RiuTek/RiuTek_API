@@ -21,6 +21,8 @@ public class User : BaseEntity, IAggregateRoot
     public ICollection<Review> Reviews { get; set; } = new List<Review>();
     public ICollection<Comment> Comments { get; set; } = new List<Comment>();
     public ICollection<Wishlist> Wishlists { get; set; } = new List<Wishlist>();
+    public ICollection<Post> Posts { get; set; } = new List<Post>();
+    public ICollection<PostComment> PostComments { get; set; } = new List<PostComment>();
 
     protected User() { }
 

@@ -16,6 +16,8 @@ public interface IApplicationDbContext
     DbSet<Review> Reviews { get; }
     DbSet<Comment> Comments { get; }
     DbSet<Wishlist> Wishlists { get; }
+    DbSet<Post> Posts { get; }
+    DbSet<PostComment> PostComments { get; }
 
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
 }

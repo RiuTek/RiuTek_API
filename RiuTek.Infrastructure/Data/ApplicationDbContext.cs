@@ -23,6 +23,8 @@ public class ApplicationDbContext : DbContext, IUnitOfWork, IApplicationDbContex
     public DbSet<Review> Reviews => Set<Review>();
     public DbSet<Comment> Comments => Set<Comment>();
     public DbSet<Wishlist> Wishlists => Set<Wishlist>();
+    public DbSet<Post> Posts => Set<Post>();
+    public DbSet<PostComment> PostComments => Set<PostComment>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
