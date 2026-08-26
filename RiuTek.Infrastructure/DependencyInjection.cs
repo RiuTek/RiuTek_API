@@ -1,6 +1,9 @@
+using System.Text;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.IdentityModel.Tokens;
 using RiuTek.Application.Common.Interfaces;
 using RiuTek.Core.Interfaces;
 using RiuTek.Infrastructure.Data;
@@ -33,6 +36,33 @@ public static class DependencyInjection
         services.AddSingleton<IPasswordHasher, Services.PasswordHasher>();
         services.AddScoped<IJwtTokenGenerator, Services.JwtTokenGenerator>();
         services.AddScoped<ICurrentUserService, Services.CurrentUserService>();
+
+        // Configure JWT Authentication
+        var secretKey = configuration["JwtSettings:SecretKey"] 
+            ?? "RiuTek_Default_Secret_Key_For_Development_Must_Be_Long_And_Secure_123456";
+        var issuer = configuration["JwtSettings:Issuer"] ?? "RiuTek.API";
+        var audience = configuration["JwtSettings:Audience"] ?? "RiuTek.Client";
+
+        services.AddAuthentication(options =>
+        {
+            options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
+            options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
+        })
+        .AddJwtBearer(options =>
+        {
+            options.TokenValidationParameters = new TokenValidationParameters
+            {
+                ValidateIssuer = true,
+                ValidateAudience = true,
+                ValidateLifetime = true,
+                ValidateIssuerSigningKey = true,
+                ValidIssuer = issuer,
+                ValidAudience = audience,
+                IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secretKey))
+            };
+        });
+
+        services.AddAuthorization();
 
         return services;
     }
