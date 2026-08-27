@@ -5,7 +5,7 @@ using RiuTek.Application.Common.Mappings;
 using RiuTek.Application.DTOs;
 using RiuTek.Core.Common;
 
-namespace RiuTek.Application.Features.Posts.Queries;
+namespace RiuTek.Application.Features.Comments.Queries;
 
 public record GetPostCommentsQuery(Guid PostId) : IRequest<Result<List<PostCommentDto>>>;
 

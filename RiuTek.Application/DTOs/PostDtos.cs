@@ -30,15 +30,3 @@ public record PostSummaryDto(
     DateTime? PublishedAt,
     DateTime CreatedAt
 );
-
-public record PostCommentDto(
-    Guid Id,
-    Guid PostId,
-    Guid UserId,
-    string UserName,
-    string Content,
-    Guid? ParentCommentId,
-    DateTime CreatedAt,
-    DateTime? UpdatedAt,
-    List<PostCommentDto>? Replies = null
-);

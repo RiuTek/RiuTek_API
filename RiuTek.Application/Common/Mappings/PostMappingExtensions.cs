@@ -41,19 +41,4 @@ public static class PostMappingExtensions
             post.CreatedAt
         );
     }
-
-    public static PostCommentDto ToDto(this PostComment comment)
-    {
-        return new PostCommentDto(
-            comment.Id,
-            comment.PostId,
-            comment.UserId,
-            comment.User?.FullName ?? string.Empty,
-            comment.Content,
-            comment.ParentCommentId,
-            comment.CreatedAt,
-            comment.UpdatedAt,
-            comment.Replies?.Select(x => x.ToDto()).ToList()
-        );
-    }
 }

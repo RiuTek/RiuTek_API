@@ -6,9 +6,8 @@ using RiuTek.Application.Common.Mappings;
 using RiuTek.Application.DTOs;
 using RiuTek.Core.Common;
 using RiuTek.Core.Entities;
-using RiuTek.Core.Enums;
 
-namespace RiuTek.Application.Features.Posts.Commands;
+namespace RiuTek.Application.Features.Comments.Commands;
 
 public record CreatePostCommentCommand(
     Guid PostId,
@@ -100,59 +99,5 @@ public class CreatePostCommentCommandHandler : IRequestHandler<CreatePostComment
         await _context.SaveChangesAsync(cancellationToken);
 
         return Result.Success(comment.ToDto());
-    }
-}
-
-public record DeletePostCommentCommand(Guid Id) : IRequest<Result<Unit>>;
-
-public class DeletePostCommentCommandHandler : IRequestHandler<DeletePostCommentCommand, Result<Unit>>
-{
-    private readonly IApplicationDbContext _context;
-    private readonly ICurrentUserService _currentUserService;
-
-    public DeletePostCommentCommandHandler(
-        IApplicationDbContext context,
-        ICurrentUserService currentUserService)
-    {
-        _context = context;
-        _currentUserService = currentUserService;
-    }
-
-    public async Task<Result<Unit>> Handle(
-        DeletePostCommentCommand request,
-        CancellationToken cancellationToken)
-    {
-        if (!_currentUserService.IsAuthenticated || _currentUserService.UserId == null)
-        {
-            return Result.Failure<Unit>(Error.Unauthorized(
-                "Auth.Unauthorized",
-                "Bạn cần đăng nhập để xóa bình luận."));
-        }
-
-        var comment = await _context.PostComments
-            .FirstOrDefaultAsync(c => c.Id == request.Id, cancellationToken);
-
-        if (comment == null)
-        {
-            return Result.Failure<Unit>(Error.NotFound(
-                "PostComment.NotFound",
-                "Không tìm thấy bình luận cần xóa."));
-        }
-
-        var currentUserId = _currentUserService.UserId.Value;
-        var userRole = _currentUserService.UserRole;
-        var isAdminOrStaff = userRole == UserRole.Admin.ToString() || userRole == UserRole.Staff.ToString();
-
-        if (comment.UserId != currentUserId && !isAdminOrStaff)
-        {
-            return Result.Failure<Unit>(Error.Forbidden(
-                "PostComment.Forbidden",
-                "Bạn không có quyền xóa bình luận này."));
-        }
-
-        _context.PostComments.Remove(comment);
-        await _context.SaveChangesAsync(cancellationToken);
-
-        return Result.Success(Unit.Value);
     }
 }
