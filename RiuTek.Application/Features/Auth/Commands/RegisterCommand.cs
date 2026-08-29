@@ -108,7 +108,7 @@ public class RegisterCommandHandler : IRequestHandler<RegisterCommand, Result<Au
         return Result.Success(new AuthResponseDto(
             AccessToken: accessToken,
             RefreshToken: refreshToken,
-            ExpiresInSeconds: 3600,
+            ExpiresInSeconds: _jwtTokenGenerator.ExpiryInSeconds,
             User: userDto
         ));
     }

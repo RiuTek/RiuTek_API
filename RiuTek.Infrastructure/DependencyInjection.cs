@@ -5,9 +5,12 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.IdentityModel.Tokens;
 using RiuTek.Application.Common.Interfaces;
+using RiuTek.Core.Constants;
+using RiuTek.Core.Enums;
 using RiuTek.Core.Interfaces;
 using RiuTek.Infrastructure.Data;
 using RiuTek.Infrastructure.Repositories;
+using RiuTek.Infrastructure.Security;
 
 namespace RiuTek.Infrastructure;
 
@@ -31,6 +34,12 @@ public static class DependencyInjection
         services.AddScoped<IUnitOfWork>(sp => sp.GetRequiredService<ApplicationDbContext>());
         services.AddScoped(typeof(IRepository<>), typeof(Repository<>));
 
+        // JWT Settings Configuration & Fail-Fast Validation
+        var jwtSettings = new JwtSettings();
+        configuration.GetSection(JwtSettings.SectionName).Bind(jwtSettings);
+        jwtSettings.Validate();
+        services.AddSingleton(jwtSettings);
+
         // Security & Auth Services
         services.AddHttpContextAccessor();
         services.AddSingleton<IPasswordHasher, Services.PasswordHasher>();
@@ -38,11 +47,6 @@ public static class DependencyInjection
         services.AddScoped<ICurrentUserService, Services.CurrentUserService>();
 
         // Configure JWT Authentication
-        var secretKey = configuration["JwtSettings:SecretKey"] 
-            ?? "RiuTek_Default_Secret_Key_For_Development_Must_Be_Long_And_Secure_123456";
-        var issuer = configuration["JwtSettings:Issuer"] ?? "RiuTek.API";
-        var audience = configuration["JwtSettings:Audience"] ?? "RiuTek.Client";
-
         services.AddAuthentication(options =>
         {
             options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
@@ -56,13 +60,18 @@ public static class DependencyInjection
                 ValidateAudience = true,
                 ValidateLifetime = true,
                 ValidateIssuerSigningKey = true,
-                ValidIssuer = issuer,
-                ValidAudience = audience,
-                IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secretKey))
+                ValidIssuer = jwtSettings.Issuer,
+                ValidAudience = jwtSettings.Audience,
+                IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSettings.SecretKey))
             };
         });
 
-        services.AddAuthorization();
+        // Configure Authorization Policies
+        services.AddAuthorization(options =>
+        {
+            options.AddPolicy(Policies.ContentManager, policy =>
+                policy.RequireRole(UserRole.Admin.ToString(), UserRole.Staff.ToString()));
+        });
 
         return services;
     }

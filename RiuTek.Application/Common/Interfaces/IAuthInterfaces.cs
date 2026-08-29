@@ -12,6 +12,7 @@ public interface IJwtTokenGenerator
 {
     string GenerateAccessToken(User user);
     string GenerateRefreshToken();
+    int ExpiryInSeconds { get; }
 }
 
 public interface ICurrentUserService

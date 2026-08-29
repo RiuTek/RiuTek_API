@@ -95,7 +95,7 @@ public class LoginCommandHandler : IRequestHandler<LoginCommand, Result<AuthResp
         return Result.Success(new AuthResponseDto(
             AccessToken: accessToken,
             RefreshToken: refreshToken,
-            ExpiresInSeconds: 3600,
+            ExpiresInSeconds: _jwtTokenGenerator.ExpiryInSeconds,
             User: userDto
         ));
     }

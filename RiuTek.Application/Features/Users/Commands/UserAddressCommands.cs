@@ -68,27 +68,21 @@ public class AddUserAddressCommandHandler : IRequestHandler<AddUserAddressComman
 
         var userId = _currentUserService.UserId.Value;
 
-        // Nếu đặt làm địa chỉ mặc định, reset các địa chỉ cũ của User về false
-        if (request.IsDefault)
+        var hasAnyAddress = await _context.UserAddresses
+            .AnyAsync(a => a.UserId == userId, cancellationToken);
+
+        // First address always becomes default. Otherwise, follow request.IsDefault.
+        var isDefault = !hasAnyAddress || request.IsDefault;
+
+        if (isDefault && hasAnyAddress)
         {
-            var existingAddresses = await _context.UserAddresses
+            var existingDefaultAddresses = await _context.UserAddresses
                 .Where(a => a.UserId == userId && a.IsDefault)
                 .ToListAsync(cancellationToken);
 
-            foreach (var addr in existingAddresses)
+            foreach (var addr in existingDefaultAddresses)
             {
                 addr.IsDefault = false;
-            }
-        }
-        else
-        {
-            // Nếu đây là địa chỉ đầu tiên của User, tự động đặt làm mặc định
-            var hasAnyAddress = await _context.UserAddresses
-                .AnyAsync(a => a.UserId == userId, cancellationToken);
-
-            if (!hasAnyAddress)
-            {
-                // First address becomes default automatically
             }
         }
 
@@ -100,7 +94,7 @@ public class AddUserAddressCommandHandler : IRequestHandler<AddUserAddressComman
             ward: request.Ward?.Trim() ?? string.Empty,
             district: request.District?.Trim() ?? string.Empty,
             city: request.City.Trim(),
-            isDefault: request.IsDefault
+            isDefault: isDefault
         );
 
         _context.UserAddresses.Add(newAddress);

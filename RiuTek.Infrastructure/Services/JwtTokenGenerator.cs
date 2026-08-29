@@ -2,31 +2,27 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
-using Microsoft.Extensions.Configuration;
 using Microsoft.IdentityModel.Tokens;
 using RiuTek.Application.Common.Interfaces;
 using RiuTek.Core.Entities;
+using RiuTek.Infrastructure.Security;
 
 namespace RiuTek.Infrastructure.Services;
 
 public class JwtTokenGenerator : IJwtTokenGenerator
 {
-    private readonly IConfiguration _configuration;
+    private readonly JwtSettings _jwtSettings;
 
-    public JwtTokenGenerator(IConfiguration configuration)
+    public JwtTokenGenerator(JwtSettings jwtSettings)
     {
-        _configuration = configuration;
+        _jwtSettings = jwtSettings;
     }
+
+    public int ExpiryInSeconds => _jwtSettings.ExpiryMinutes * 60;
 
     public string GenerateAccessToken(User user)
     {
-        var secretKey = _configuration["JwtSettings:SecretKey"] 
-            ?? "RiuTek_Super_Secret_Key_For_Jwt_Authentication_2026_Key_Must_Be_Long";
-        var issuer = _configuration["JwtSettings:Issuer"] ?? "RiuTek.API";
-        var audience = _configuration["JwtSettings:Audience"] ?? "RiuTek.Client";
-        var expiryMinutes = int.TryParse(_configuration["JwtSettings:ExpiryMinutes"], out var minutes) ? minutes : 60;
-
-        var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secretKey));
+        var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_jwtSettings.SecretKey));
         var credentials = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
 
         var claims = new List<Claim>
@@ -44,9 +40,9 @@ public class JwtTokenGenerator : IJwtTokenGenerator
         var tokenDescriptor = new SecurityTokenDescriptor
         {
             Subject = new ClaimsIdentity(claims),
-            Expires = DateTime.UtcNow.AddMinutes(expiryMinutes),
-            Issuer = issuer,
-            Audience = audience,
+            Expires = DateTime.UtcNow.AddMinutes(_jwtSettings.ExpiryMinutes),
+            Issuer = _jwtSettings.Issuer,
+            Audience = _jwtSettings.Audience,
             SigningCredentials = credentials
         };
 

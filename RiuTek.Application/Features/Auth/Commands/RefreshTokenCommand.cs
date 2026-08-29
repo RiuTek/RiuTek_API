@@ -83,7 +83,7 @@ public class RefreshTokenCommandHandler : IRequestHandler<RefreshTokenCommand, R
         return Result.Success(new AuthResponseDto(
             AccessToken: newAccessToken,
             RefreshToken: newRefreshToken,
-            ExpiresInSeconds: 3600,
+            ExpiresInSeconds: _jwtTokenGenerator.ExpiryInSeconds,
             User: userDto
         ));
     }
