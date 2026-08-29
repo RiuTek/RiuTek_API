@@ -11,11 +11,23 @@ public class RedisSettings
     public int ConnectTimeoutMs { get; set; } = 5000;
     public int SyncTimeoutMs { get; set; } = 3000;
 
+    private static readonly char[] GlobMetacharacters = ['*', '?', '[', ']'];
+
     public void Validate()
     {
         if (DefaultExpirationMinutes <= 0)
         {
             throw new InvalidOperationException("Redis DefaultExpirationMinutes must be greater than 0.");
+        }
+
+        if (ConnectTimeoutMs <= 0)
+        {
+            throw new InvalidOperationException("Redis ConnectTimeoutMs must be greater than 0.");
+        }
+
+        if (SyncTimeoutMs <= 0)
+        {
+            throw new InvalidOperationException("Redis SyncTimeoutMs must be greater than 0.");
         }
 
         if (!Enabled)
@@ -36,6 +48,21 @@ public class RedisSettings
         {
             throw new InvalidOperationException(
                 "Redis is enabled but ConnectionString contains placeholder text. Please provide a valid Redis connection string via environment variables or user secrets.");
+        }
+
+        if (string.IsNullOrWhiteSpace(InstanceName))
+        {
+            throw new InvalidOperationException("Redis is enabled but InstanceName is missing or empty.");
+        }
+
+        if (InstanceName.IndexOfAny(GlobMetacharacters) >= 0)
+        {
+            throw new InvalidOperationException("Redis InstanceName must not contain wildcard characters ('*', '?', '[', ']').");
+        }
+
+        if (!InstanceName.EndsWith(':'))
+        {
+            InstanceName += ":";
         }
     }
 }

@@ -71,9 +71,9 @@ public class RedisCacheService : ICacheService
             {
                 return JsonSerializer.Deserialize<T>((string)value!, JsonOptions);
             }
-            catch (JsonException jsonEx)
+            catch (Exception ex) when (ex is JsonException or NotSupportedException)
             {
-                _logger.LogWarning("Failed to deserialize cached value for key '{Key}': {Message}. Removing invalid entry.", key, jsonEx.Message);
+                _logger.LogWarning("Failed to deserialize cached value for key '{Key}': {Message}. Removing invalid entry.", key, ex.Message);
                 try
                 {
                     await db.KeyDeleteAsync(fullKey);
@@ -113,8 +113,18 @@ public class RedisCacheService : ICacheService
                 return;
             }
 
+            string json;
+            try
+            {
+                json = JsonSerializer.Serialize(value, JsonOptions);
+            }
+            catch (Exception ex) when (ex is JsonException or NotSupportedException)
+            {
+                _logger.LogWarning("Failed to serialize value for key '{Key}': {Message}", key, ex.Message);
+                return;
+            }
+
             var fullKey = GetFullKey(key);
-            var json = JsonSerializer.Serialize(value, JsonOptions);
             var ttl = expiration ?? TimeSpan.FromMinutes(_settings.DefaultExpirationMinutes);
 
             await db.StringSetAsync(fullKey, json, ttl);
@@ -123,7 +133,7 @@ public class RedisCacheService : ICacheService
         {
             throw;
         }
-        catch (Exception ex) when (ex is RedisException or RedisTimeoutException or SocketException or TimeoutException or JsonException)
+        catch (Exception ex) when (ex is RedisException or RedisTimeoutException or SocketException or TimeoutException)
         {
             _logger.LogWarning("Redis error while caching key '{Key}': {Message}", key, ex.Message);
         }
@@ -183,7 +193,7 @@ public class RedisCacheService : ICacheService
 
                     var keysBatch = new List<RedisKey>(250);
 
-                    await foreach (var key in server.KeysAsync(pattern: fullPattern, pageSize: 250))
+                    await foreach (var key in server.KeysAsync(pattern: fullPattern, pageSize: 250).WithCancellation(cancellationToken))
                     {
                         cancellationToken.ThrowIfCancellationRequested();
                         keysBatch.Add(key);

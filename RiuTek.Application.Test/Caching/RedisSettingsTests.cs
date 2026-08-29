@@ -12,7 +12,9 @@ public class RedisSettingsTests
         {
             Enabled = false,
             ConnectionString = string.Empty,
-            DefaultExpirationMinutes = 10
+            DefaultExpirationMinutes = 10,
+            ConnectTimeoutMs = 5000,
+            SyncTimeoutMs = 3000
         };
 
         var act = () => settings.Validate();
@@ -72,6 +74,89 @@ public class RedisSettingsTests
             .WithMessage("*DefaultExpirationMinutes*");
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-100)]
+    public void Validate_WhenConnectTimeoutMsIsZeroOrNegative_Throws(int timeout)
+    {
+        var settings = new RedisSettings
+        {
+            Enabled = false,
+            ConnectTimeoutMs = timeout
+        };
+
+        var act = () => settings.Validate();
+        act.Should().Throw<InvalidOperationException>()
+            .WithMessage("*ConnectTimeoutMs*");
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-100)]
+    public void Validate_WhenSyncTimeoutMsIsZeroOrNegative_Throws(int timeout)
+    {
+        var settings = new RedisSettings
+        {
+            Enabled = false,
+            SyncTimeoutMs = timeout
+        };
+
+        var act = () => settings.Validate();
+        act.Should().Throw<InvalidOperationException>()
+            .WithMessage("*SyncTimeoutMs*");
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData(null)]
+    public void Validate_WhenEnabledAndInstanceNameIsMissingOrEmpty_Throws(string? instanceName)
+    {
+        var settings = new RedisSettings
+        {
+            Enabled = true,
+            ConnectionString = "localhost:6379",
+            InstanceName = instanceName!
+        };
+
+        var act = () => settings.Validate();
+        act.Should().Throw<InvalidOperationException>()
+            .WithMessage("*InstanceName*");
+    }
+
+    [Theory]
+    [InlineData("riutek*")]
+    [InlineData("riu?tek")]
+    [InlineData("riutek[1]:")]
+    [InlineData("riutek]:")]
+    public void Validate_WhenEnabledAndInstanceNameContainsGlobMetacharacters_Throws(string invalidInstanceName)
+    {
+        var settings = new RedisSettings
+        {
+            Enabled = true,
+            ConnectionString = "localhost:6379",
+            InstanceName = invalidInstanceName
+        };
+
+        var act = () => settings.Validate();
+        act.Should().Throw<InvalidOperationException>()
+            .WithMessage("*wildcard*");
+    }
+
+    [Fact]
+    public void Validate_WhenEnabledAndInstanceNameDoesNotEndWithColon_NormalizesWithColon()
+    {
+        var settings = new RedisSettings
+        {
+            Enabled = true,
+            ConnectionString = "localhost:6379",
+            InstanceName = "myprefix"
+        };
+
+        settings.Validate();
+        settings.InstanceName.Should().Be("myprefix:");
+    }
+
     [Fact]
     public void Validate_WhenEnabledAndValid_Succeeds()
     {
@@ -79,7 +164,10 @@ public class RedisSettingsTests
         {
             Enabled = true,
             ConnectionString = "localhost:6379,abortConnect=false",
-            DefaultExpirationMinutes = 15
+            InstanceName = "riutek:",
+            DefaultExpirationMinutes = 15,
+            ConnectTimeoutMs = 5000,
+            SyncTimeoutMs = 3000
         };
 
         var act = () => settings.Validate();
