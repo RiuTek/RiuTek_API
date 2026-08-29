@@ -39,12 +39,12 @@ public class CreatePostCommandHandler : IRequestHandler<CreatePostCommand, Resul
 {
     private readonly IApplicationDbContext _context;
     private readonly ICurrentUserService _currentUserService;
-    private readonly ICacheService? _cacheService;
+    private readonly ICacheService _cacheService;
 
     public CreatePostCommandHandler(
         IApplicationDbContext context,
         ICurrentUserService currentUserService,
-        ICacheService? cacheService = null)
+        ICacheService cacheService)
     {
         _context = context;
         _currentUserService = currentUserService;
@@ -101,10 +101,7 @@ public class CreatePostCommandHandler : IRequestHandler<CreatePostCommand, Resul
         _context.Posts.Add(post);
         await _context.SaveChangesAsync(cancellationToken);
 
-        if (_cacheService != null)
-        {
-            await _cacheService.RemoveByPrefixAsync("posts_", cancellationToken);
-        }
+        await _cacheService.RemoveByPrefixAsync(PostCacheKeys.PostListPrefix, cancellationToken);
 
         return Result.Success(post.ToDto());
     }

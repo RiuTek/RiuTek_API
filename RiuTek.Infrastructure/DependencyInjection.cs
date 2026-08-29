@@ -8,9 +8,11 @@ using RiuTek.Application.Common.Interfaces;
 using RiuTek.Core.Constants;
 using RiuTek.Core.Enums;
 using RiuTek.Core.Interfaces;
+using RiuTek.Infrastructure.Caching;
 using RiuTek.Infrastructure.Data;
 using RiuTek.Infrastructure.Repositories;
 using RiuTek.Infrastructure.Security;
+using StackExchange.Redis;
 
 namespace RiuTek.Infrastructure;
 
@@ -39,6 +41,27 @@ public static class DependencyInjection
         configuration.GetSection(JwtSettings.SectionName).Bind(jwtSettings);
         jwtSettings.Validate();
         services.AddSingleton(jwtSettings);
+
+        // Redis & Caching Configuration
+        var redisSettings = new RedisSettings();
+        configuration.GetSection(RedisSettings.SectionName).Bind(redisSettings);
+        redisSettings.Validate();
+        services.AddSingleton(redisSettings);
+
+        if (redisSettings.Enabled)
+        {
+            var redisOptions = ConfigurationOptions.Parse(redisSettings.ConnectionString);
+            redisOptions.AbortOnConnectFail = false;
+            redisOptions.ConnectTimeout = redisSettings.ConnectTimeoutMs;
+            redisOptions.SyncTimeout = redisSettings.SyncTimeoutMs;
+
+            services.AddSingleton<IConnectionMultiplexer>(_ => ConnectionMultiplexer.Connect(redisOptions));
+            services.AddSingleton<ICacheService, RedisCacheService>();
+        }
+        else
+        {
+            services.AddSingleton<ICacheService, NoOpCacheService>();
+        }
 
         // Security & Auth Services
         services.AddHttpContextAccessor();

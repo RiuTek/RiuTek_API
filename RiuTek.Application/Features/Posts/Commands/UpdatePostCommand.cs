@@ -44,12 +44,12 @@ public class UpdatePostCommandHandler : IRequestHandler<UpdatePostCommand, Resul
 {
     private readonly IApplicationDbContext _context;
     private readonly ICurrentUserService _currentUserService;
-    private readonly ICacheService? _cacheService;
+    private readonly ICacheService _cacheService;
 
     public UpdatePostCommandHandler(
         IApplicationDbContext context,
         ICurrentUserService currentUserService,
-        ICacheService? cacheService = null)
+        ICacheService cacheService)
     {
         _context = context;
         _currentUserService = currentUserService;
@@ -120,11 +120,7 @@ public class UpdatePostCommandHandler : IRequestHandler<UpdatePostCommand, Resul
 
         await _context.SaveChangesAsync(cancellationToken);
 
-        if (_cacheService != null)
-        {
-            await _cacheService.RemoveAsync($"post_{post.Slug}", cancellationToken);
-            await _cacheService.RemoveByPrefixAsync("posts_", cancellationToken);
-        }
+        await _cacheService.RemoveByPrefixAsync(PostCacheKeys.PostListPrefix, cancellationToken);
 
         return Result.Success(post.ToDto());
     }

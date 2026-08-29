@@ -19,11 +19,11 @@ public record GetPostsQuery(
 public class GetPostsQueryHandler : IRequestHandler<GetPostsQuery, Result<PagedResult<PostSummaryDto>>>
 {
     private readonly IApplicationDbContext _context;
-    private readonly ICacheService? _cacheService;
+    private readonly ICacheService _cacheService;
 
     public GetPostsQueryHandler(
         IApplicationDbContext context,
-        ICacheService? cacheService = null)
+        ICacheService cacheService)
     {
         _context = context;
         _cacheService = cacheService;
@@ -35,17 +35,19 @@ public class GetPostsQueryHandler : IRequestHandler<GetPostsQuery, Result<PagedR
     {
         var pageIndex = request.PageIndex < 1 ? 1 : request.PageIndex;
         var pageSize = request.PageSize < 1 ? 10 : (request.PageSize > 50 ? 50 : request.PageSize);
-        var searchTerm = request.SearchTerm?.Trim().ToLower();
+        var searchTerm = request.SearchTerm?.Trim();
 
-        var cacheKey = $"posts_{pageIndex}_{pageSize}_{request.IsFeaturedOnly}_{request.IsPublishedOnly}_{searchTerm}";
+        var cacheKey = PostCacheKeys.GetListKey(
+            pageIndex,
+            pageSize,
+            request.IsFeaturedOnly,
+            request.IsPublishedOnly,
+            searchTerm);
 
-        if (_cacheService != null)
+        var cachedData = await _cacheService.GetAsync<PagedResult<PostSummaryDto>>(cacheKey, cancellationToken);
+        if (cachedData != null)
         {
-            var cachedData = await _cacheService.GetAsync<PagedResult<PostSummaryDto>>(cacheKey, cancellationToken);
-            if (cachedData != null)
-            {
-                return Result.Success(cachedData);
-            }
+            return Result.Success(cachedData);
         }
 
         var query = _context.Posts
@@ -65,7 +67,8 @@ public class GetPostsQueryHandler : IRequestHandler<GetPostsQuery, Result<PagedR
 
         if (!string.IsNullOrWhiteSpace(searchTerm))
         {
-            query = query.Where(p => p.Title.ToLower().Contains(searchTerm) || p.Summary.ToLower().Contains(searchTerm));
+            var lowerSearchTerm = searchTerm.ToLowerInvariant();
+            query = query.Where(p => p.Title.ToLower().Contains(lowerSearchTerm) || p.Summary.ToLower().Contains(lowerSearchTerm));
         }
 
         var totalCount = await query.CountAsync(cancellationToken);
@@ -79,10 +82,7 @@ public class GetPostsQueryHandler : IRequestHandler<GetPostsQuery, Result<PagedR
 
         var result = PagedResult<PostSummaryDto>.Create(items, totalCount, pageIndex, pageSize);
 
-        if (_cacheService != null)
-        {
-            await _cacheService.SetAsync(cacheKey, result, TimeSpan.FromMinutes(10), cancellationToken);
-        }
+        await _cacheService.SetAsync(cacheKey, result, TimeSpan.FromMinutes(10), cancellationToken);
 
         return Result.Success(result);
     }
