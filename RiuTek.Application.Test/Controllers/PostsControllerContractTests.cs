@@ -128,17 +128,18 @@ public class PostsControllerContractTests
     #region Action Behavior & Parameter Mapping Tests
 
     [Fact]
-    public async Task GetPosts_AlwaysSendsIsPublishedOnlyTrue()
+    public async Task GetPosts_AlwaysSendsIsPublishedOnlyTrue_AndForwardsCancellationToken()
     {
         var (controller, senderMock) = CreateController();
         var pagedResult = PagedResult<PostSummaryDto>.Create([], 0, 1, 10);
+        using var cts = new CancellationTokenSource();
 
         senderMock.Setup(s => s.Send(
                 It.Is<GetPostsQuery>(q => q.IsPublishedOnly == true && q.PageIndex == 2 && q.PageSize == 15 && q.SearchTerm == "tech" && q.IsFeaturedOnly == true),
-                It.IsAny<CancellationToken>()))
+                cts.Token))
             .ReturnsAsync(Result.Success(pagedResult));
 
-        var actionResult = await controller.GetPosts(2, 15, "tech", true, CancellationToken.None);
+        var actionResult = await controller.GetPosts(2, 15, "tech", true, cts.Token);
 
         var okResult = actionResult as OkObjectResult;
         okResult.Should().NotBeNull();
@@ -146,7 +147,7 @@ public class PostsControllerContractTests
     }
 
     [Fact]
-    public async Task Create_MapsBodyAndReturnsCreatedAtAction()
+    public async Task Create_MapsBodyAndReturnsCreatedAtAction_WithCorrectMetadataAndPayload()
     {
         var (controller, senderMock) = CreateController();
         var postId = Guid.NewGuid();
@@ -164,7 +165,8 @@ public class PostsControllerContractTests
         createdResult.Should().NotBeNull();
         createdResult!.StatusCode.Should().Be(StatusCodes.Status201Created);
         createdResult.ActionName.Should().Be(nameof(PostsController.GetById));
-        createdResult.RouteValues.Should().ContainKey("id");
+        createdResult.RouteValues.Should().ContainKey("id").WhoseValue.Should().Be(postId);
+        createdResult.Value.Should().Be(postDto);
     }
 
     [Fact]
@@ -203,6 +205,56 @@ public class PostsControllerContractTests
         var noContentResult = actionResult as NoContentResult;
         noContentResult.Should().NotBeNull();
         noContentResult!.StatusCode.Should().Be(StatusCodes.Status204NoContent);
+    }
+
+    [Fact]
+    public async Task GetBySlug_WhenNotFound_ReturnsNotFoundStatus()
+    {
+        var (controller, senderMock) = CreateController();
+        senderMock.Setup(s => s.Send(
+                It.Is<GetPostBySlugQuery>(q => q.Slug == "missing-slug"),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Result.Failure<PostDto>(Error.NotFound("Post.NotFound", "Not found")));
+
+        var actionResult = await controller.GetBySlug("missing-slug", CancellationToken.None);
+
+        var notFoundResult = actionResult as NotFoundObjectResult;
+        notFoundResult.Should().NotBeNull();
+        notFoundResult!.StatusCode.Should().Be(StatusCodes.Status404NotFound);
+    }
+
+    [Fact]
+    public async Task Create_WhenForbidden_ReturnsForbiddenStatus()
+    {
+        var (controller, senderMock) = CreateController();
+        senderMock.Setup(s => s.Send(
+                It.IsAny<CreatePostCommand>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Result.Failure<PostDto>(Error.Forbidden("Post.Forbidden", "Forbidden")));
+
+        var request = new CreatePostRequest("Title", "Summ", "Cont", null, true, false);
+        var actionResult = await controller.Create(request, CancellationToken.None);
+
+        var forbiddenResult = actionResult as ObjectResult;
+        forbiddenResult.Should().NotBeNull();
+        forbiddenResult!.StatusCode.Should().Be(StatusCodes.Status403Forbidden);
+    }
+
+    [Fact]
+    public async Task Create_WhenValidationError_ReturnsBadRequestStatus()
+    {
+        var (controller, senderMock) = CreateController();
+        senderMock.Setup(s => s.Send(
+                It.IsAny<CreatePostCommand>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Result.Failure<PostDto>(Error.Validation("Post.Validation", "Invalid title")));
+
+        var request = new CreatePostRequest("", "Summ", "Cont", null, true, false);
+        var actionResult = await controller.Create(request, CancellationToken.None);
+
+        var badRequestResult = actionResult as BadRequestObjectResult;
+        badRequestResult.Should().NotBeNull();
+        badRequestResult!.StatusCode.Should().Be(StatusCodes.Status400BadRequest);
     }
 
     #endregion

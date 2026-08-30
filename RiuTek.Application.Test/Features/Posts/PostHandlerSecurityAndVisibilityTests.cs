@@ -1,6 +1,7 @@
 using FluentAssertions;
 using Moq;
 using RiuTek.Application.Common.Interfaces;
+using RiuTek.Application.Features.Posts;
 using RiuTek.Application.Features.Posts.Commands;
 using RiuTek.Application.Features.Posts.Queries;
 using RiuTek.Application.Test.Helpers;
@@ -39,7 +40,7 @@ public class PostHandlerSecurityAndVisibilityTests
     [Theory]
     [InlineData(UserRole.Admin)]
     [InlineData(UserRole.Staff)]
-    public async Task CreatePost_WhenUserIsAdminOrStaff_Succeeds(UserRole role)
+    public async Task CreatePost_WhenUserIsAdminOrStaff_SucceedsAndInvalidatesCache(UserRole role)
     {
         // Arrange
         await using var context = TestDbContextFactory.CreateInMemoryDbContext();
@@ -61,6 +62,7 @@ public class PostHandlerSecurityAndVisibilityTests
         // Assert
         result.IsSuccess.Should().BeTrue();
         result.Value.Title.Should().Be("Title Manager");
+        cacheMock.Verify(c => c.RemoveByPrefixAsync(PostCacheKeys.PostListPrefix, It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]
@@ -100,6 +102,47 @@ public class PostHandlerSecurityAndVisibilityTests
         result.Error.Type.Should().Be(Core.Common.ErrorType.Forbidden);
     }
 
+    [Theory]
+    [InlineData(UserRole.Admin)]
+    [InlineData(UserRole.Staff)]
+    public async Task UpdatePost_WhenUserIsAdminOrStaff_SucceedsAndInvalidatesCache(UserRole role)
+    {
+        // Arrange
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var author = new User("author@example.com", "hash", "Author", UserRole.Admin);
+        var manager = new User("manager@example.com", "hash", "Manager", role);
+        context.Users.AddRange(author, manager);
+
+        var post = new Post
+        {
+            Title = "Old Title",
+            Slug = "old-title",
+            Summary = "Old Summ",
+            Content = "Old Cont",
+            AuthorId = author.Id,
+            Author = author,
+            IsPublished = true
+        };
+        context.Posts.Add(post);
+        await context.SaveChangesAsync();
+
+        var currentUserMock = new Mock<ICurrentUserService>();
+        currentUserMock.Setup(u => u.IsAuthenticated).Returns(true);
+        currentUserMock.Setup(u => u.UserId).Returns(manager.Id);
+        currentUserMock.Setup(u => u.UserRole).Returns(role.ToString());
+
+        var cacheMock = new Mock<ICacheService>();
+        var handler = new UpdatePostCommandHandler(context, currentUserMock.Object, cacheMock.Object);
+
+        // Act
+        var result = await handler.Handle(new UpdatePostCommand(post.Id, "New Title", "New Summ", "New Cont", null, true, false), CancellationToken.None);
+
+        // Assert
+        result.IsSuccess.Should().BeTrue();
+        result.Value.Title.Should().Be("New Title");
+        cacheMock.Verify(c => c.RemoveByPrefixAsync(PostCacheKeys.PostListPrefix, It.IsAny<CancellationToken>()), Times.Once);
+    }
+
     [Fact]
     public async Task DeletePost_WhenUserIsCustomer_ReturnsForbidden()
     {
@@ -135,6 +178,46 @@ public class PostHandlerSecurityAndVisibilityTests
         // Assert
         result.IsSuccess.Should().BeFalse();
         result.Error.Type.Should().Be(Core.Common.ErrorType.Forbidden);
+    }
+
+    [Theory]
+    [InlineData(UserRole.Admin)]
+    [InlineData(UserRole.Staff)]
+    public async Task DeletePost_WhenUserIsAdminOrStaff_SucceedsAndInvalidatesCache(UserRole role)
+    {
+        // Arrange
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var author = new User("author@example.com", "hash", "Author", UserRole.Admin);
+        var manager = new User("manager@example.com", "hash", "Manager", role);
+        context.Users.AddRange(author, manager);
+
+        var post = new Post
+        {
+            Title = "To Delete",
+            Slug = "to-delete",
+            Summary = "Summ",
+            Content = "Cont",
+            AuthorId = author.Id,
+            Author = author,
+            IsPublished = true
+        };
+        context.Posts.Add(post);
+        await context.SaveChangesAsync();
+
+        var currentUserMock = new Mock<ICurrentUserService>();
+        currentUserMock.Setup(u => u.IsAuthenticated).Returns(true);
+        currentUserMock.Setup(u => u.UserId).Returns(manager.Id);
+        currentUserMock.Setup(u => u.UserRole).Returns(role.ToString());
+
+        var cacheMock = new Mock<ICacheService>();
+        var handler = new DeletePostCommandHandler(context, currentUserMock.Object, cacheMock.Object);
+
+        // Act
+        var result = await handler.Handle(new DeletePostCommand(post.Id), CancellationToken.None);
+
+        // Assert
+        result.IsSuccess.Should().BeTrue();
+        cacheMock.Verify(c => c.RemoveByPrefixAsync(PostCacheKeys.PostListPrefix, It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]

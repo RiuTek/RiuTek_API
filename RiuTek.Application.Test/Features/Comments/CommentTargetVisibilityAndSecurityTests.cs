@@ -85,6 +85,89 @@ public class CommentTargetVisibilityAndSecurityTests
     }
 
     [Fact]
+    public async Task CreatePostComment_WhenPostIsPublished_CreatesCommentSuccessfully()
+    {
+        // Arrange
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var user = new User("user@example.com", "hash", "Customer User", UserRole.Customer);
+        var post = new Post
+        {
+            Title = "Published Post",
+            Slug = "published-post",
+            Summary = "Summ",
+            Content = "Cont",
+            Author = user,
+            AuthorId = user.Id,
+            IsPublished = true
+        };
+        context.Users.Add(user);
+        context.Posts.Add(post);
+        await context.SaveChangesAsync();
+
+        var currentUserMock = new Mock<ICurrentUserService>();
+        currentUserMock.Setup(u => u.IsAuthenticated).Returns(true);
+        currentUserMock.Setup(u => u.UserId).Returns(user.Id);
+
+        var handler = new CreatePostCommentCommandHandler(context, currentUserMock.Object);
+
+        // Act
+        var result = await handler.Handle(new CreatePostCommentCommand(post.Id, "Great Post Comment"), CancellationToken.None);
+
+        // Assert
+        result.IsSuccess.Should().BeTrue();
+        result.Value.PostId.Should().Be(post.Id);
+        result.Value.UserId.Should().Be(user.Id);
+        result.Value.Content.Should().Be("Great Post Comment");
+        result.Value.ParentCommentId.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task CreatePostComment_WhenReplyingToValidParent_CreatesReplySuccessfully()
+    {
+        // Arrange
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var user = new User("user@example.com", "hash", "Customer User", UserRole.Customer);
+        var post = new Post
+        {
+            Title = "Published Post",
+            Slug = "published-post",
+            Summary = "Summ",
+            Content = "Cont",
+            Author = user,
+            AuthorId = user.Id,
+            IsPublished = true
+        };
+        context.Users.Add(user);
+        context.Posts.Add(post);
+
+        var parentComment = new PostComment
+        {
+            PostId = post.Id,
+            UserId = user.Id,
+            User = user,
+            Content = "Parent Post Comment"
+        };
+        context.PostComments.Add(parentComment);
+        await context.SaveChangesAsync();
+
+        var currentUserMock = new Mock<ICurrentUserService>();
+        currentUserMock.Setup(u => u.IsAuthenticated).Returns(true);
+        currentUserMock.Setup(u => u.UserId).Returns(user.Id);
+
+        var handler = new CreatePostCommentCommandHandler(context, currentUserMock.Object);
+
+        // Act
+        var result = await handler.Handle(new CreatePostCommentCommand(post.Id, "Reply Comment", parentComment.Id), CancellationToken.None);
+
+        // Assert
+        result.IsSuccess.Should().BeTrue();
+        result.Value.PostId.Should().Be(post.Id);
+        result.Value.UserId.Should().Be(user.Id);
+        result.Value.Content.Should().Be("Reply Comment");
+        result.Value.ParentCommentId.Should().Be(parentComment.Id);
+    }
+
+    [Fact]
     public async Task CreatePostComment_WhenPostIsDraft_ReturnsNotFound()
     {
         // Arrange
@@ -194,6 +277,104 @@ public class CommentTargetVisibilityAndSecurityTests
         // Assert
         result.IsSuccess.Should().BeFalse();
         result.Error.Type.Should().Be(ErrorType.NotFound);
+    }
+
+    [Fact]
+    public async Task CreateProductComment_WhenProductIsActive_CreatesCommentSuccessfully()
+    {
+        // Arrange
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var category = new Category("CPU", "cpu", ComponentType.Cpu);
+        context.Categories.Add(category);
+
+        var product = new Product(
+            category.Id,
+            "Intel i9",
+            "intel-i9",
+            "SKU1",
+            "Intel",
+            500,
+            10,
+            "img.png",
+            ComponentType.Cpu,
+            new CpuSpecification()
+        )
+        {
+            IsActive = true
+        };
+        context.Products.Add(product);
+
+        var user = new User("user@example.com", "hash", "Customer User", UserRole.Customer);
+        context.Users.Add(user);
+        await context.SaveChangesAsync();
+
+        var currentUserMock = new Mock<ICurrentUserService>();
+        currentUserMock.Setup(u => u.IsAuthenticated).Returns(true);
+        currentUserMock.Setup(u => u.UserId).Returns(user.Id);
+        currentUserMock.Setup(u => u.UserRole).Returns(UserRole.Customer.ToString());
+
+        var handler = new CreateProductCommentCommandHandler(context, currentUserMock.Object);
+
+        // Act
+        var result = await handler.Handle(new CreateProductCommentCommand(product.Id, "Awesome product comment"), CancellationToken.None);
+
+        // Assert
+        result.IsSuccess.Should().BeTrue();
+        result.Value.ProductId.Should().Be(product.Id);
+        result.Value.UserId.Should().Be(user.Id);
+        result.Value.Content.Should().Be("Awesome product comment");
+        result.Value.ParentCommentId.Should().BeNull();
+        result.Value.IsStaffAnswer.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task CreateProductComment_WhenReplyingToValidParent_CreatesReplySuccessfully()
+    {
+        // Arrange
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var category = new Category("CPU", "cpu", ComponentType.Cpu);
+        context.Categories.Add(category);
+
+        var product = new Product(
+            category.Id,
+            "Intel i9",
+            "intel-i9",
+            "SKU1",
+            "Intel",
+            500,
+            10,
+            "img.png",
+            ComponentType.Cpu,
+            new CpuSpecification()
+        )
+        {
+            IsActive = true
+        };
+        context.Products.Add(product);
+
+        var user = new User("user@example.com", "hash", "Customer User", UserRole.Customer);
+        context.Users.Add(user);
+
+        var parentComment = new Comment(product.Id, user.Id, "Parent comment") { User = user };
+        context.Comments.Add(parentComment);
+        await context.SaveChangesAsync();
+
+        var currentUserMock = new Mock<ICurrentUserService>();
+        currentUserMock.Setup(u => u.IsAuthenticated).Returns(true);
+        currentUserMock.Setup(u => u.UserId).Returns(user.Id);
+        currentUserMock.Setup(u => u.UserRole).Returns(UserRole.Customer.ToString());
+
+        var handler = new CreateProductCommentCommandHandler(context, currentUserMock.Object);
+
+        // Act
+        var result = await handler.Handle(new CreateProductCommentCommand(product.Id, "Product reply comment", parentComment.Id), CancellationToken.None);
+
+        // Assert
+        result.IsSuccess.Should().BeTrue();
+        result.Value.ProductId.Should().Be(product.Id);
+        result.Value.UserId.Should().Be(user.Id);
+        result.Value.Content.Should().Be("Product reply comment");
+        result.Value.ParentCommentId.Should().Be(parentComment.Id);
     }
 
     [Fact]

@@ -124,23 +124,26 @@ public class CommentsControllerContractTests
     #region Action Behavior & Parameter Mapping Tests
 
     [Fact]
-    public async Task CreatePostComment_PassesRoutePostIdAndBodyContent()
+    public async Task CreatePostComment_PassesRoutePostIdBodyContentAndParentCommentId_AndForwardsCancellationToken()
     {
         var (controller, senderMock) = CreateController();
         var postId = Guid.NewGuid();
-        var commentDto = new PostCommentDto(Guid.NewGuid(), postId, Guid.NewGuid(), "User", "Hello Post", null, DateTime.UtcNow, null, []);
+        var parentId = Guid.NewGuid();
+        var commentDto = new PostCommentDto(Guid.NewGuid(), postId, Guid.NewGuid(), "User", "Hello Post", parentId, DateTime.UtcNow, null, []);
+        using var cts = new CancellationTokenSource();
 
         senderMock.Setup(s => s.Send(
-                It.Is<CreatePostCommentCommand>(c => c.PostId == postId && c.Content == "Hello Post"),
-                It.IsAny<CancellationToken>()))
+                It.Is<CreatePostCommentCommand>(c => c.PostId == postId && c.Content == "Hello Post" && c.ParentCommentId == parentId),
+                cts.Token))
             .ReturnsAsync(Result.Success(commentDto));
 
-        var request = new CreateCommentRequest("Hello Post");
-        var actionResult = await controller.CreatePostComment(postId, request, CancellationToken.None);
+        var request = new CreateCommentRequest("Hello Post", parentId);
+        var actionResult = await controller.CreatePostComment(postId, request, cts.Token);
 
         var createdResult = actionResult as ObjectResult;
         createdResult.Should().NotBeNull();
         createdResult!.StatusCode.Should().Be(StatusCodes.Status201Created);
+        createdResult.Value.Should().Be(commentDto);
     }
 
     [Fact]
@@ -162,23 +165,25 @@ public class CommentsControllerContractTests
     }
 
     [Fact]
-    public async Task CreateProductComment_PassesRouteProductIdAndBodyContent()
+    public async Task CreateProductComment_PassesRouteProductIdBodyContentAndParentCommentId()
     {
         var (controller, senderMock) = CreateController();
         var productId = Guid.NewGuid();
-        var commentDto = new ProductCommentDto(Guid.NewGuid(), productId, Guid.NewGuid(), "User", "Hello Product", null, false, DateTime.UtcNow, []);
+        var parentId = Guid.NewGuid();
+        var commentDto = new ProductCommentDto(Guid.NewGuid(), productId, Guid.NewGuid(), "User", "Hello Product", parentId, false, DateTime.UtcNow, []);
 
         senderMock.Setup(s => s.Send(
-                It.Is<CreateProductCommentCommand>(c => c.ProductId == productId && c.Content == "Hello Product"),
+                It.Is<CreateProductCommentCommand>(c => c.ProductId == productId && c.Content == "Hello Product" && c.ParentCommentId == parentId),
                 It.IsAny<CancellationToken>()))
             .ReturnsAsync(Result.Success(commentDto));
 
-        var request = new CreateCommentRequest("Hello Product");
+        var request = new CreateCommentRequest("Hello Product", parentId);
         var actionResult = await controller.CreateProductComment(productId, request, CancellationToken.None);
 
         var createdResult = actionResult as ObjectResult;
         createdResult.Should().NotBeNull();
         createdResult!.StatusCode.Should().Be(StatusCodes.Status201Created);
+        createdResult.Value.Should().Be(commentDto);
     }
 
     [Fact]
@@ -197,6 +202,61 @@ public class CommentsControllerContractTests
         var noContentResult = actionResult as NoContentResult;
         noContentResult.Should().NotBeNull();
         noContentResult!.StatusCode.Should().Be(StatusCodes.Status204NoContent);
+    }
+
+    [Fact]
+    public async Task GetPostComments_WhenNotFound_ReturnsNotFoundStatus()
+    {
+        var (controller, senderMock) = CreateController();
+        var postId = Guid.NewGuid();
+
+        senderMock.Setup(s => s.Send(
+                It.Is<GetPostCommentsQuery>(q => q.PostId == postId),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Result.Failure<List<PostCommentDto>>(Error.NotFound("Post.NotFound", "Post not found")));
+
+        var actionResult = await controller.GetPostComments(postId, CancellationToken.None);
+
+        var notFoundResult = actionResult as NotFoundObjectResult;
+        notFoundResult.Should().NotBeNull();
+        notFoundResult!.StatusCode.Should().Be(StatusCodes.Status404NotFound);
+    }
+
+    [Fact]
+    public async Task DeletePostComment_WhenForbidden_ReturnsForbiddenStatus()
+    {
+        var (controller, senderMock) = CreateController();
+        var commentId = Guid.NewGuid();
+
+        senderMock.Setup(s => s.Send(
+                It.Is<DeleteCommentCommand>(c => c.Id == commentId),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Result.Failure<Unit>(Error.Forbidden("Comment.Forbidden", "Not your comment")));
+
+        var actionResult = await controller.DeletePostComment(commentId, CancellationToken.None);
+
+        var forbiddenResult = actionResult as ObjectResult;
+        forbiddenResult.Should().NotBeNull();
+        forbiddenResult!.StatusCode.Should().Be(StatusCodes.Status403Forbidden);
+    }
+
+    [Fact]
+    public async Task CreatePostComment_WhenValidationError_ReturnsBadRequestStatus()
+    {
+        var (controller, senderMock) = CreateController();
+        var postId = Guid.NewGuid();
+
+        senderMock.Setup(s => s.Send(
+                It.IsAny<CreatePostCommentCommand>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Result.Failure<PostCommentDto>(Error.Validation("Comment.Validation", "Empty content")));
+
+        var request = new CreateCommentRequest("");
+        var actionResult = await controller.CreatePostComment(postId, request, CancellationToken.None);
+
+        var badRequestResult = actionResult as BadRequestObjectResult;
+        badRequestResult.Should().NotBeNull();
+        badRequestResult!.StatusCode.Should().Be(StatusCodes.Status400BadRequest);
     }
 
     #endregion
