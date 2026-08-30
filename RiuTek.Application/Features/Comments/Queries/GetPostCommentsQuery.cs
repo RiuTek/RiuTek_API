@@ -22,10 +22,10 @@ public class GetPostCommentsQueryHandler : IRequestHandler<GetPostCommentsQuery,
         GetPostCommentsQuery request,
         CancellationToken cancellationToken)
     {
-        var postExists = await _context.Posts
-            .AnyAsync(p => p.Id == request.PostId, cancellationToken);
+        var postExistsAndPublished = await _context.Posts
+            .AnyAsync(p => p.Id == request.PostId && p.IsPublished, cancellationToken);
 
-        if (!postExists)
+        if (!postExistsAndPublished)
         {
             return Result.Failure<List<PostCommentDto>>(Error.NotFound(
                 "Post.NotFound",

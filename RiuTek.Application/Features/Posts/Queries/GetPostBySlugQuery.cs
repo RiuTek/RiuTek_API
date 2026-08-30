@@ -22,11 +22,11 @@ public class GetPostBySlugQueryHandler : IRequestHandler<GetPostBySlugQuery, Res
         GetPostBySlugQuery request,
         CancellationToken cancellationToken)
     {
-        var slug = request.Slug.Trim().ToLower();
+        var slug = request.Slug.Trim().ToLowerInvariant();
 
         var post = await _context.Posts
             .Include(p => p.Author)
-            .FirstOrDefaultAsync(p => p.Slug.ToLower() == slug, cancellationToken);
+            .FirstOrDefaultAsync(p => p.Slug.ToLower() == slug && p.IsPublished, cancellationToken);
 
         if (post == null)
         {
@@ -35,7 +35,7 @@ public class GetPostBySlugQueryHandler : IRequestHandler<GetPostBySlugQuery, Res
                 "Không tìm thấy bài viết."));
         }
 
-        // Increment view count
+        // Increment view count for published post
         post.ViewCount++;
         await _context.SaveChangesAsync(cancellationToken);
 

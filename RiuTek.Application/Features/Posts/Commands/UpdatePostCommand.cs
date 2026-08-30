@@ -67,6 +67,16 @@ public class UpdatePostCommandHandler : IRequestHandler<UpdatePostCommand, Resul
                 "Bạn cần đăng nhập để cập nhật bài viết."));
         }
 
+        var userRole = _currentUserService.UserRole;
+        var isAdminOrStaff = userRole == UserRole.Admin.ToString() || userRole == UserRole.Staff.ToString();
+
+        if (!isAdminOrStaff)
+        {
+            return Result.Failure<PostDto>(Error.Forbidden(
+                "Post.Forbidden",
+                "Bạn không có quyền chỉnh sửa bài viết này."));
+        }
+
         var post = await _context.Posts
             .Include(p => p.Author)
             .FirstOrDefaultAsync(p => p.Id == request.Id, cancellationToken);
@@ -76,17 +86,6 @@ public class UpdatePostCommandHandler : IRequestHandler<UpdatePostCommand, Resul
             return Result.Failure<PostDto>(Error.NotFound(
                 "Post.NotFound",
                 "Không tìm thấy bài viết."));
-        }
-
-        var currentUserId = _currentUserService.UserId.Value;
-        var userRole = _currentUserService.UserRole;
-        var isAdminOrStaff = userRole == UserRole.Admin.ToString() || userRole == UserRole.Staff.ToString();
-
-        if (post.AuthorId != currentUserId && !isAdminOrStaff)
-        {
-            return Result.Failure<PostDto>(Error.Forbidden(
-                "Post.Forbidden",
-                "Bạn không có quyền chỉnh sửa bài viết này."));
         }
 
         var newTitle = request.Title.Trim();

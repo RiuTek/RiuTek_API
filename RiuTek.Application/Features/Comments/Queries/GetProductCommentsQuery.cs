@@ -22,10 +22,10 @@ public class GetProductCommentsQueryHandler : IRequestHandler<GetProductComments
         GetProductCommentsQuery request,
         CancellationToken cancellationToken)
     {
-        var productExists = await _context.Products
-            .AnyAsync(p => p.Id == request.ProductId, cancellationToken);
+        var productExistsAndActive = await _context.Products
+            .AnyAsync(p => p.Id == request.ProductId && p.IsActive, cancellationToken);
 
-        if (!productExists)
+        if (!productExistsAndActive)
         {
             return Result.Failure<List<ProductCommentDto>>(Error.NotFound(
                 "Product.NotFound",

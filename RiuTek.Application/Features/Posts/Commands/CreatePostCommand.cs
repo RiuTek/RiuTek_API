@@ -7,6 +7,7 @@ using RiuTek.Application.Common.Utils;
 using RiuTek.Application.DTOs;
 using RiuTek.Core.Common;
 using RiuTek.Core.Entities;
+using RiuTek.Core.Enums;
 
 namespace RiuTek.Application.Features.Posts.Commands;
 
@@ -60,6 +61,15 @@ public class CreatePostCommandHandler : IRequestHandler<CreatePostCommand, Resul
             return Result.Failure<PostDto>(Error.Unauthorized(
                 "Auth.Unauthorized",
                 "Bạn cần đăng nhập để tạo bài viết."));
+        }
+
+        var userRole = _currentUserService.UserRole;
+        var isAdminOrStaff = userRole == UserRole.Admin.ToString() || userRole == UserRole.Staff.ToString();
+        if (!isAdminOrStaff)
+        {
+            return Result.Failure<PostDto>(Error.Forbidden(
+                "Post.Forbidden",
+                "Bạn không có quyền tạo bài viết."));
         }
 
         var authorId = _currentUserService.UserId.Value;

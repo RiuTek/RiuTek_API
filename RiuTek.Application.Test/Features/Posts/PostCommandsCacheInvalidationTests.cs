@@ -23,6 +23,7 @@ public class PostCommandsCacheInvalidationTests
         var currentUserMock = new Mock<ICurrentUserService>();
         currentUserMock.Setup(u => u.IsAuthenticated).Returns(true);
         currentUserMock.Setup(u => u.UserId).Returns(author.Id);
+        currentUserMock.Setup(u => u.UserRole).Returns(UserRole.Admin.ToString());
 
         var cacheMock = new Mock<ICacheService>();
 
@@ -62,6 +63,7 @@ public class PostCommandsCacheInvalidationTests
         var currentUserMock = new Mock<ICurrentUserService>();
         currentUserMock.Setup(u => u.IsAuthenticated).Returns(true);
         currentUserMock.Setup(u => u.UserId).Returns(author.Id);
+        currentUserMock.Setup(u => u.UserRole).Returns(UserRole.Admin.ToString());
 
         var cacheMock = new Mock<ICacheService>();
 
@@ -101,6 +103,7 @@ public class PostCommandsCacheInvalidationTests
         var currentUserMock = new Mock<ICurrentUserService>();
         currentUserMock.Setup(u => u.IsAuthenticated).Returns(true);
         currentUserMock.Setup(u => u.UserId).Returns(author.Id);
+        currentUserMock.Setup(u => u.UserRole).Returns(UserRole.Admin.ToString());
 
         var cacheMock = new Mock<ICacheService>();
 

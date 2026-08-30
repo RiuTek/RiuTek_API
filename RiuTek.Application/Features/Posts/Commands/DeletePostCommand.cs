@@ -35,6 +35,16 @@ public class DeletePostCommandHandler : IRequestHandler<DeletePostCommand, Resul
                 "Bạn cần đăng nhập để xóa bài viết."));
         }
 
+        var userRole = _currentUserService.UserRole;
+        var isAdminOrStaff = userRole == UserRole.Admin.ToString() || userRole == UserRole.Staff.ToString();
+
+        if (!isAdminOrStaff)
+        {
+            return Result.Failure<Unit>(Error.Forbidden(
+                "Post.Forbidden",
+                "Bạn không có quyền xóa bài viết này."));
+        }
+
         var post = await _context.Posts
             .FirstOrDefaultAsync(p => p.Id == request.Id, cancellationToken);
 
@@ -43,17 +53,6 @@ public class DeletePostCommandHandler : IRequestHandler<DeletePostCommand, Resul
             return Result.Failure<Unit>(Error.NotFound(
                 "Post.NotFound",
                 "Không tìm thấy bài viết cần xóa."));
-        }
-
-        var currentUserId = _currentUserService.UserId.Value;
-        var userRole = _currentUserService.UserRole;
-        var isAdminOrStaff = userRole == UserRole.Admin.ToString() || userRole == UserRole.Staff.ToString();
-
-        if (post.AuthorId != currentUserId && !isAdminOrStaff)
-        {
-            return Result.Failure<Unit>(Error.Forbidden(
-                "Post.Forbidden",
-                "Bạn không có quyền xóa bài viết này."));
         }
 
         _context.Posts.Remove(post);
