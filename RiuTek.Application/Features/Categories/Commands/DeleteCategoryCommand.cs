@@ -1,3 +1,4 @@
+using FluentValidation;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 using RiuTek.Application.Common.Authorization;
@@ -7,6 +8,15 @@ using RiuTek.Core.Common;
 namespace RiuTek.Application.Features.Categories.Commands;
 
 public record DeleteCategoryCommand(Guid Id) : IRequest<Result<Unit>>;
+
+public class DeleteCategoryCommandValidator : AbstractValidator<DeleteCategoryCommand>
+{
+    public DeleteCategoryCommandValidator()
+    {
+        RuleFor(x => x.Id)
+            .NotEmpty().WithMessage("Id danh mục không hợp lệ.");
+    }
+}
 
 public class DeleteCategoryCommandHandler : IRequestHandler<DeleteCategoryCommand, Result<Unit>>
 {

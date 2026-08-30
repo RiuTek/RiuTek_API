@@ -59,6 +59,20 @@ public class CategoryCommandTests
             .ShouldNotHaveAnyValidationErrors();
     }
 
+    [Fact]
+    public void DeleteCategoryCommandValidator_ValidatesRulesProperly()
+    {
+        var validator = new DeleteCategoryCommandValidator();
+
+        // Empty Id
+        validator.TestValidate(new DeleteCategoryCommand(Guid.Empty))
+            .ShouldHaveValidationErrorFor(x => x.Id);
+
+        // Valid command
+        validator.TestValidate(new DeleteCategoryCommand(Guid.NewGuid()))
+            .ShouldNotHaveAnyValidationErrors();
+    }
+
     #endregion
 
     #region Authorization Guards
@@ -112,6 +126,147 @@ public class CategoryCommandTests
         result.Value.Slug.Should().Be("intel-cpus");
         result.Value.Description.Should().Be("Intel processors");
         result.Value.ComponentType.Should().Be(ComponentType.Cpu);
+    }
+
+    [Fact]
+    public async Task UpdateCategory_WhenUnauthenticated_ReturnsUnauthorizedAndDoesNotModifyCategory()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var category = new Category("CPU", "cpu", ComponentType.Cpu, "Original");
+        context.Categories.Add(category);
+        await context.SaveChangesAsync();
+
+        var currentUserMock = new Mock<ICurrentUserService>();
+        currentUserMock.Setup(u => u.IsAuthenticated).Returns(false);
+
+        var handler = new UpdateCategoryCommandHandler(context, currentUserMock.Object);
+        var result = await handler.Handle(new UpdateCategoryCommand(category.Id, "CPU Modified", ComponentType.Cpu, "Changed", null), CancellationToken.None);
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Type.Should().Be(ErrorType.Unauthorized);
+
+        var unchanged = await context.Categories.FindAsync(category.Id);
+        unchanged!.Name.Should().Be("CPU");
+        unchanged.Description.Should().Be("Original");
+    }
+
+    [Fact]
+    public async Task UpdateCategory_WhenCustomerRole_ReturnsForbiddenAndDoesNotModifyCategory()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var category = new Category("CPU", "cpu", ComponentType.Cpu, "Original");
+        context.Categories.Add(category);
+        await context.SaveChangesAsync();
+
+        var currentUserMock = new Mock<ICurrentUserService>();
+        currentUserMock.Setup(u => u.IsAuthenticated).Returns(true);
+        currentUserMock.Setup(u => u.UserId).Returns(Guid.NewGuid());
+        currentUserMock.Setup(u => u.UserRole).Returns(UserRole.Customer.ToString());
+
+        var handler = new UpdateCategoryCommandHandler(context, currentUserMock.Object);
+        var result = await handler.Handle(new UpdateCategoryCommand(category.Id, "CPU Modified", ComponentType.Cpu, "Changed", null), CancellationToken.None);
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Type.Should().Be(ErrorType.Forbidden);
+
+        var unchanged = await context.Categories.FindAsync(category.Id);
+        unchanged!.Name.Should().Be("CPU");
+        unchanged.Description.Should().Be("Original");
+    }
+
+    [Theory]
+    [InlineData(UserRole.Admin)]
+    [InlineData(UserRole.Staff)]
+    public async Task UpdateCategory_WhenAdminOrStaff_Succeeds(UserRole role)
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var category = new Category("CPU", "cpu", ComponentType.Cpu, "Original");
+        context.Categories.Add(category);
+        await context.SaveChangesAsync();
+
+        var currentUserMock = new Mock<ICurrentUserService>();
+        currentUserMock.Setup(u => u.IsAuthenticated).Returns(true);
+        currentUserMock.Setup(u => u.UserId).Returns(Guid.NewGuid());
+        currentUserMock.Setup(u => u.UserRole).Returns(role.ToString());
+
+        var handler = new UpdateCategoryCommandHandler(context, currentUserMock.Object);
+        var result = await handler.Handle(new UpdateCategoryCommand(category.Id, "CPU Updated", ComponentType.Cpu, "Updated Desc", null), CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Value.Name.Should().Be("CPU Updated");
+        result.Value.Description.Should().Be("Updated Desc");
+
+        var updated = await context.Categories.FindAsync(category.Id);
+        updated!.Name.Should().Be("CPU Updated");
+        updated.UpdatedAt.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task DeleteCategory_WhenUnauthenticated_ReturnsUnauthorizedAndDoesNotDeleteCategory()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var category = new Category("CPU", "cpu", ComponentType.Cpu);
+        context.Categories.Add(category);
+        await context.SaveChangesAsync();
+
+        var currentUserMock = new Mock<ICurrentUserService>();
+        currentUserMock.Setup(u => u.IsAuthenticated).Returns(false);
+
+        var handler = new DeleteCategoryCommandHandler(context, currentUserMock.Object);
+        var result = await handler.Handle(new DeleteCategoryCommand(category.Id), CancellationToken.None);
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Type.Should().Be(ErrorType.Unauthorized);
+
+        var stillExists = await context.Categories.FindAsync(category.Id);
+        stillExists.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task DeleteCategory_WhenCustomerRole_ReturnsForbiddenAndDoesNotDeleteCategory()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var category = new Category("CPU", "cpu", ComponentType.Cpu);
+        context.Categories.Add(category);
+        await context.SaveChangesAsync();
+
+        var currentUserMock = new Mock<ICurrentUserService>();
+        currentUserMock.Setup(u => u.IsAuthenticated).Returns(true);
+        currentUserMock.Setup(u => u.UserId).Returns(Guid.NewGuid());
+        currentUserMock.Setup(u => u.UserRole).Returns(UserRole.Customer.ToString());
+
+        var handler = new DeleteCategoryCommandHandler(context, currentUserMock.Object);
+        var result = await handler.Handle(new DeleteCategoryCommand(category.Id), CancellationToken.None);
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Type.Should().Be(ErrorType.Forbidden);
+
+        var stillExists = await context.Categories.FindAsync(category.Id);
+        stillExists.Should().NotBeNull();
+    }
+
+    [Theory]
+    [InlineData(UserRole.Admin)]
+    [InlineData(UserRole.Staff)]
+    public async Task DeleteCategory_WhenAdminOrStaff_Succeeds(UserRole role)
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var category = new Category("CPU", "cpu", ComponentType.Cpu);
+        context.Categories.Add(category);
+        await context.SaveChangesAsync();
+
+        var currentUserMock = new Mock<ICurrentUserService>();
+        currentUserMock.Setup(u => u.IsAuthenticated).Returns(true);
+        currentUserMock.Setup(u => u.UserId).Returns(Guid.NewGuid());
+        currentUserMock.Setup(u => u.UserRole).Returns(role.ToString());
+
+        var handler = new DeleteCategoryCommandHandler(context, currentUserMock.Object);
+        var result = await handler.Handle(new DeleteCategoryCommand(category.Id), CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+
+        var deleted = await context.Categories.FindAsync(category.Id);
+        deleted.Should().BeNull();
     }
 
     #endregion
