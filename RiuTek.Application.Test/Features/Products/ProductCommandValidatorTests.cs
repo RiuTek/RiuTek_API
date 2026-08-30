@@ -177,6 +177,26 @@ public class ProductCommandValidatorTests
     }
 
     [Fact]
+    public void CreateProductCommand_WhenCategoryIdIsEmpty_FailsValidation()
+    {
+        var command = new CreateProductCommand(
+            CategoryId: Guid.Empty,
+            Name: "Valid Name",
+            Sku: "SKU1",
+            Brand: "Brand",
+            Price: 100,
+            OriginalPrice: null,
+            StockQuantity: 10,
+            ImageUrl: "img.jpg",
+            AdditionalImages: null,
+            ComponentType: ComponentType.Cpu,
+            Specifications: CreateValidCpuSpec()
+        );
+
+        _createValidator.TestValidate(command).ShouldHaveValidationErrorFor(x => x.CategoryId);
+    }
+
+    [Fact]
     public void UpdateProductCommand_WhenIdIsEmpty_FailsValidation()
     {
         var command = new UpdateProductCommand(
@@ -196,6 +216,28 @@ public class ProductCommandValidatorTests
         );
 
         _updateValidator.TestValidate(command).ShouldHaveValidationErrorFor(x => x.Id);
+    }
+
+    [Fact]
+    public void UpdateProductCommand_WhenCategoryIdIsEmpty_FailsValidation()
+    {
+        var command = new UpdateProductCommand(
+            Id: Guid.NewGuid(),
+            CategoryId: Guid.Empty,
+            Name: "Valid Name",
+            Sku: "SKU1",
+            Brand: "Brand",
+            Price: 100,
+            OriginalPrice: null,
+            StockQuantity: 10,
+            IsActive: true,
+            ImageUrl: "img.jpg",
+            AdditionalImages: null,
+            ComponentType: ComponentType.Cpu,
+            Specifications: CreateValidCpuSpec()
+        );
+
+        _updateValidator.TestValidate(command).ShouldHaveValidationErrorFor(x => x.CategoryId);
     }
 
     [Theory]

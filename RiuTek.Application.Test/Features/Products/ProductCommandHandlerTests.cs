@@ -149,6 +149,37 @@ public class ProductCommandHandlerTests
         unchanged.Price.Should().Be(100);
     }
 
+    [Fact]
+    public async Task UpdateProduct_WhenUserIdIsNull_ReturnsUnauthorizedAndDoesNotModify()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var category = CreateCpuCategory();
+        context.Categories.Add(category);
+
+        var product = new Product(category.Id, "Original", "original", "SKU-ORIG", "Intel", 100, 10, "img.jpg", ComponentType.Cpu, CreateCpuSpec());
+        context.Products.Add(product);
+        await context.SaveChangesAsync();
+
+        var currentUserMock = new Mock<ICurrentUserService>();
+        currentUserMock.Setup(u => u.IsAuthenticated).Returns(true);
+        currentUserMock.Setup(u => u.UserId).Returns((Guid?)null);
+
+        var handler = new UpdateProductCommandHandler(context, currentUserMock.Object);
+        var command = new UpdateProductCommand(
+            product.Id, category.Id, "Modified", "SKU-MOD", "Intel", 200, null, 5, false, "img2.jpg", null, ComponentType.Cpu, CreateCpuSpec());
+
+        var result = await handler.Handle(command, CancellationToken.None);
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Type.Should().Be(ErrorType.Unauthorized);
+        result.Error.Code.Should().Be("Auth.Unauthorized");
+
+        var unchanged = await context.Products.FindAsync(product.Id);
+        unchanged!.Name.Should().Be("Original");
+        unchanged.Price.Should().Be(100);
+        unchanged.IsActive.Should().BeTrue();
+    }
+
     [Theory]
     [InlineData("Customer")]
     [InlineData("Guest")]
@@ -620,6 +651,98 @@ public class ProductCommandHandlerTests
         var inDb = await context.Products.FindAsync(product.Id);
         inDb!.Embedding.Should().NotBeNull();
         inDb.Embedding!.ToArray().Should().BeEquivalentTo(new float[] { 0.1f, 0.2f, 0.3f });
+    }
+
+    [Fact]
+    public async Task UpdateProduct_Success_NormalizesAndPersistsAllFields()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var catOld = CreateCpuCategory("Old Category", "old-category");
+        var catNew = CreateCpuCategory("New Category", "new-category");
+        context.Categories.AddRange(catOld, catNew);
+
+        var initialSpec = CreateCpuSpec();
+        var product = new Product(catOld.Id, "Old Name", "old-name", "OLD-SKU", "Old Brand", 100, 5, "old.jpg", ComponentType.Cpu, initialSpec, 120)
+        {
+            Category = catOld,
+            IsActive = true,
+            CreatedAt = DateTime.UtcNow.AddHours(-2),
+            UpdatedAt = DateTime.UtcNow.AddHours(-1)
+        };
+        context.Products.Add(product);
+        await context.SaveChangesAsync();
+
+        var beforeUpdate = product.UpdatedAt;
+
+        var currentUserMock = new Mock<ICurrentUserService>();
+        currentUserMock.Setup(u => u.IsAuthenticated).Returns(true);
+        currentUserMock.Setup(u => u.UserId).Returns(Guid.NewGuid());
+        currentUserMock.Setup(u => u.UserRole).Returns(UserRole.Admin.ToString());
+
+        var newSpec = new CpuSpecification
+        {
+            Socket = CpuSocket.LGA1700,
+            CoreCount = 24,
+            ThreadCount = 32,
+            BaseClockGhz = 3.2,
+            BoostClockGhz = 6.0,
+            TdpWattage = 150,
+            HasIntegratedGpu = false,
+            SupportedMemoryType = RamType.DDR5,
+            MaxMemorySpeedMhz = 6400
+        };
+
+        var handler = new UpdateProductCommandHandler(context, currentUserMock.Object);
+        var command = new UpdateProductCommand(
+            Id: product.Id,
+            CategoryId: catNew.Id,
+            Name: "  Intel Core i9-14900KS  ",
+            Sku: "  cpu-int-14900ks  ",
+            Brand: "  Intel Extreme  ",
+            Price: 650,
+            OriginalPrice: 700,
+            StockQuantity: 12,
+            IsActive: false,
+            ImageUrl: "  https://example.com/14900ks.png  ",
+            AdditionalImages: ["  https://example.com/box.png  ", "https://example.com/BOX.png", "https://example.com/back.png"],
+            ComponentType: ComponentType.Cpu,
+            Specifications: newSpec
+        );
+
+        var result = await handler.Handle(command, CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Value.CategoryId.Should().Be(catNew.Id);
+        result.Value.CategoryName.Should().Be("New Category");
+        result.Value.Name.Should().Be("Intel Core i9-14900KS");
+        result.Value.Slug.Should().Be("intel-core-i9-14900ks");
+        result.Value.Sku.Should().Be("CPU-INT-14900KS");
+        result.Value.Brand.Should().Be("Intel Extreme");
+        result.Value.Price.Should().Be(650);
+        result.Value.OriginalPrice.Should().Be(700);
+        result.Value.StockQuantity.Should().Be(12);
+        result.Value.IsActive.Should().BeFalse();
+        result.Value.ImageUrl.Should().Be("https://example.com/14900ks.png");
+        result.Value.AdditionalImages.Should().BeEquivalentTo(new[] { "https://example.com/box.png", "https://example.com/back.png" }, options => options.WithStrictOrdering());
+        result.Value.ComponentType.Should().Be(ComponentType.Cpu);
+        result.Value.Specifications.Should().BeEquivalentTo(newSpec);
+
+        var inDb = await context.Products.FindAsync(product.Id);
+        inDb.Should().NotBeNull();
+        inDb!.Name.Should().Be("Intel Core i9-14900KS");
+        inDb.Slug.Should().Be("intel-core-i9-14900ks");
+        inDb.Sku.Should().Be("CPU-INT-14900KS");
+        inDb.Brand.Should().Be("Intel Extreme");
+        inDb.Price.Should().Be(650);
+        inDb.OriginalPrice.Should().Be(700);
+        inDb.StockQuantity.Should().Be(12);
+        inDb.IsActive.Should().BeFalse();
+        inDb.ImageUrl.Should().Be("https://example.com/14900ks.png");
+        inDb.AdditionalImages.Should().BeEquivalentTo(new[] { "https://example.com/box.png", "https://example.com/back.png" }, options => options.WithStrictOrdering());
+        inDb.CategoryId.Should().Be(catNew.Id);
+        inDb.Specifications.Should().BeEquivalentTo(newSpec);
+        inDb.UpdatedAt.Should().NotBeNull();
+        inDb.UpdatedAt.Should().BeAfter(beforeUpdate!.Value);
     }
 
     #endregion
