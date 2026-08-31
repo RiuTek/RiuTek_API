@@ -1,4 +1,5 @@
 using FluentAssertions;
+using Microsoft.EntityFrameworkCore;
 using Moq;
 using RiuTek.Application.Common.Interfaces;
 using RiuTek.Application.Features.Comments.Commands;
@@ -244,7 +245,7 @@ public class CommentTargetVisibilityAndSecurityTests
     }
 
     [Fact]
-    public async Task GetProductComments_WhenProductIsInactive_ReturnsNotFound()
+    public async Task GetProductComments_WhenProductIsInactive_ReturnsCommentsSuccessfully()
     {
         // Arrange
         await using var context = TestDbContextFactory.CreateInMemoryDbContext();
@@ -267,6 +268,16 @@ public class CommentTargetVisibilityAndSecurityTests
             IsActive = false
         };
         context.Products.Add(product);
+
+        var user = new User("user@example.com", "hash", "User");
+        context.Users.Add(user);
+        await context.SaveChangesAsync();
+
+        var comment = new Comment(product.Id, user.Id, "Comment on discontinued product")
+        {
+            User = user
+        };
+        context.Comments.Add(comment);
         await context.SaveChangesAsync();
 
         var handler = new GetProductCommentsQueryHandler(context);
@@ -275,8 +286,9 @@ public class CommentTargetVisibilityAndSecurityTests
         var result = await handler.Handle(new GetProductCommentsQuery(product.Id), CancellationToken.None);
 
         // Assert
-        result.IsSuccess.Should().BeFalse();
-        result.Error.Type.Should().Be(ErrorType.NotFound);
+        result.IsSuccess.Should().BeTrue();
+        result.Value.Should().HaveCount(1);
+        result.Value[0].Content.Should().Be("Comment on discontinued product");
     }
 
     [Fact]
@@ -378,7 +390,7 @@ public class CommentTargetVisibilityAndSecurityTests
     }
 
     [Fact]
-    public async Task CreateProductComment_WhenProductIsInactive_ReturnsNotFound()
+    public async Task CreateProductComment_WhenProductIsInactive_CreatesCommentSuccessfully()
     {
         // Arrange
         await using var context = TestDbContextFactory.CreateInMemoryDbContext();
@@ -414,11 +426,15 @@ public class CommentTargetVisibilityAndSecurityTests
         var handler = new CreateProductCommentCommandHandler(context, currentUserMock.Object);
 
         // Act
-        var result = await handler.Handle(new CreateProductCommentCommand(product.Id, "Great"), CancellationToken.None);
+        var result = await handler.Handle(new CreateProductCommentCommand(product.Id, "Great comment on discontinued product"), CancellationToken.None);
 
         // Assert
-        result.IsSuccess.Should().BeFalse();
-        result.Error.Type.Should().Be(ErrorType.NotFound);
+        result.IsSuccess.Should().BeTrue();
+        result.Value.Content.Should().Be("Great comment on discontinued product");
+
+        var inDb = await context.Comments.FirstOrDefaultAsync(c => c.ProductId == product.Id);
+        inDb.Should().NotBeNull();
+        inDb!.Content.Should().Be("Great comment on discontinued product");
     }
 
     [Fact]

@@ -29,9 +29,21 @@ public class TestApplicationDbContext : DbContext, IApplicationDbContext
     {
         base.OnModelCreating(modelBuilder);
 
-        // Ignore database-provider-specific types for InMemory testing
+        // Ignore pgvector embedding for InMemory testing
         modelBuilder.Entity<Product>().Ignore(p => p.Embedding);
-        modelBuilder.Entity<Product>().Ignore(p => p.Specifications);
+
+        var jsonOptions = new System.Text.Json.JsonSerializerOptions
+        {
+            PropertyNameCaseInsensitive = true
+        };
+
+        var specConverter = new Microsoft.EntityFrameworkCore.Storage.ValueConversion.ValueConverter<RiuTek.Core.Entities.Specifications.ComponentSpecification, string>(
+            v => System.Text.Json.JsonSerializer.Serialize(v, jsonOptions),
+            v => System.Text.Json.JsonSerializer.Deserialize<RiuTek.Core.Entities.Specifications.ComponentSpecification>(v, jsonOptions)!);
+
+        modelBuilder.Entity<Product>()
+            .Property(p => p.Specifications)
+            .HasConversion(specConverter);
     }
 }
 

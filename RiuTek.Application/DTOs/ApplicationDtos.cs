@@ -22,6 +22,23 @@ public record ProductDto(
     DateTime CreatedAt
 );
 
+public record ProductSummaryDto(
+    Guid Id,
+    Guid CategoryId,
+    string CategoryName,
+    string Name,
+    string Slug,
+    string Sku,
+    string Brand,
+    decimal Price,
+    decimal? OriginalPrice,
+    int StockQuantity,
+    bool IsActive,
+    string ImageUrl,
+    ComponentType ComponentType,
+    DateTime CreatedAt
+);
+
 public record CategoryDto(
     Guid Id,
     string Name,
