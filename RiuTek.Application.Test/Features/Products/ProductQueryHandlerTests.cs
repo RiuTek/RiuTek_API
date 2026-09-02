@@ -1,3 +1,4 @@
+using System.Reflection;
 using FluentAssertions;
 using Moq;
 using RiuTek.Application.Common.Interfaces;
@@ -13,9 +14,19 @@ namespace RiuTek.Application.Test.Features.Products;
 public class ProductQueryHandlerTests
 {
     private static CpuSpecification CreateCpuSpec() => ProductCommandValidatorTests.CreateValidCpuSpec();
+    private static GpuSpecification CreateGpuSpec() => ProductCommandValidatorTests.CreateValidGpuSpec();
+    private static RamSpecification CreateRamSpec() => ProductCommandValidatorTests.CreateValidRamSpec();
+    private static PsuSpecification CreatePsuSpec() => ProductCommandValidatorTests.CreateValidPsuSpec();
+    private static MotherboardSpecification CreateMotherboardSpec() => ProductCommandValidatorTests.CreateValidMotherboardSpec();
 
     private static Category CreateCategory(string name, string slug, ComponentType type, Guid? parentId = null) =>
         new(name, slug, type, null, parentId);
+
+    private static T SetEntityId<T>(T entity, Guid id) where T : BaseEntity
+    {
+        typeof(BaseEntity).GetProperty(nameof(BaseEntity.Id))!.GetSetMethod(true)!.Invoke(entity, [id]);
+        return entity;
+    }
 
     #region Public List Tests (GetProductsQueryHandler)
 
@@ -180,8 +191,6 @@ public class ProductQueryHandlerTests
     [Fact]
     public async Task GetProducts_CategoryFilter_IncludesSelfAndAllMultiLevelDescendants()
     {
-        // Hierarchy: Root (CPU) -> Child (Intel) -> GrandChild (Core i9)
-        // Another branch: GPU
         await using var context = TestDbContextFactory.CreateInMemoryDbContext();
         var cpuRoot = CreateCategory("CPU", "cpu", ComponentType.Cpu);
         context.Categories.Add(cpuRoot);
@@ -199,23 +208,20 @@ public class ProductQueryHandlerTests
         var pRoot = new Product(cpuRoot.Id, "Generic CPU", "generic-cpu", "SKU0", "Generic", 100, 10, "img.jpg", ComponentType.Cpu, CreateCpuSpec());
         var pIntel = new Product(intelChild.Id, "Intel Core i5", "intel-core-i5", "SKU1", "Intel", 200, 10, "img.jpg", ComponentType.Cpu, CreateCpuSpec());
         var pI9 = new Product(i9GrandChild.Id, "Intel Core i9", "intel-core-i9", "SKU2", "Intel", 500, 10, "img.jpg", ComponentType.Cpu, CreateCpuSpec());
-        var pGpu = new Product(gpuCategory.Id, "Nvidia RTX 4090", "rtx-4090", "SKU3", "Nvidia", 1500, 5, "img.jpg", ComponentType.Gpu, ProductCommandValidatorTests.CreateValidGpuSpec());
+        var pGpu = new Product(gpuCategory.Id, "Nvidia RTX 4090", "rtx-4090", "SKU3", "Nvidia", 1500, 5, "img.jpg", ComponentType.Gpu, CreateGpuSpec());
         context.Products.AddRange(pRoot, pIntel, pI9, pGpu);
         await context.SaveChangesAsync();
 
         var handler = new GetProductsQueryHandler(context);
 
-        // Filtering by cpuRoot should return pRoot, pIntel, and pI9 (3 items)
         var resultRoot = await handler.Handle(new GetProductsQuery(new ProductFilterOptions(CategoryId: cpuRoot.Id)), CancellationToken.None);
         resultRoot.IsSuccess.Should().BeTrue();
         resultRoot.Value.TotalCount.Should().Be(3);
 
-        // Filtering by intelChild should return pIntel and pI9 (2 items)
         var resultIntel = await handler.Handle(new GetProductsQuery(new ProductFilterOptions(CategoryId: intelChild.Id)), CancellationToken.None);
         resultIntel.IsSuccess.Should().BeTrue();
         resultIntel.Value.TotalCount.Should().Be(2);
 
-        // Filtering by i9GrandChild should return only pI9 (1 item)
         var resultI9 = await handler.Handle(new GetProductsQuery(new ProductFilterOptions(CategoryId: i9GrandChild.Id)), CancellationToken.None);
         resultI9.IsSuccess.Should().BeTrue();
         resultI9.Value.TotalCount.Should().Be(1);
@@ -269,6 +275,290 @@ public class ProductQueryHandlerTests
         // 5. NameZToA (Gamma, Beta, Alpha)
         var resNameDesc = await handler.Handle(new GetProductsQuery(new ProductFilterOptions(SortBy: ProductSortOption.NameZToA)), CancellationToken.None);
         resNameDesc.Value.Items.Select(p => p.Name).Should().ContainInOrder("Gamma", "Beta", "Alpha");
+    }
+
+    [Fact]
+    public async Task GetProducts_SortByName_IsNormalizedCaseInsensitiveWithIdTieBreaker()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var category = CreateCategory("CPU", "cpu", ComponentType.Cpu);
+        context.Categories.Add(category);
+
+        var id1 = Guid.Parse("00000000-0000-0000-0000-000000000001");
+        var id2 = Guid.Parse("00000000-0000-0000-0000-000000000002");
+        var id3 = Guid.Parse("00000000-0000-0000-0000-000000000003");
+        var id4 = Guid.Parse("00000000-0000-0000-0000-000000000004");
+
+        var p1 = SetEntityId(new Product(category.Id, "alpha", "alpha-1", "SKU1", "Brand", 100, 10, "img.jpg", ComponentType.Cpu, CreateCpuSpec()), id1);
+        var p2 = SetEntityId(new Product(category.Id, "ALPHA", "alpha-2", "SKU2", "Brand", 100, 10, "img.jpg", ComponentType.Cpu, CreateCpuSpec()), id2);
+        var p3 = SetEntityId(new Product(category.Id, "Beta", "beta-1", "SKU3", "Brand", 100, 10, "img.jpg", ComponentType.Cpu, CreateCpuSpec()), id3);
+        var p4 = SetEntityId(new Product(category.Id, "beta", "beta-2", "SKU4", "Brand", 100, 10, "img.jpg", ComponentType.Cpu, CreateCpuSpec()), id4);
+
+        context.Products.AddRange(p1, p2, p3, p4);
+        await context.SaveChangesAsync();
+
+        var handler = new GetProductsQueryHandler(context);
+
+        // NameAToZ: alpha/ALPHA first (tied on normalized name, ordered by Id: id1, id2), then Beta/beta (tied, ordered by Id: id3, id4)
+        var resultAsc = await handler.Handle(new GetProductsQuery(new ProductFilterOptions(SortBy: ProductSortOption.NameAToZ)), CancellationToken.None);
+        resultAsc.Value.Items.Select(p => p.Id).Should().Equal(id1, id2, id3, id4);
+
+        // NameZToA: Beta/beta first (tied on normalized name, ordered by Id: id3, id4), then alpha/ALPHA (tied, ordered by Id: id1, id2)
+        var resultDesc = await handler.Handle(new GetProductsQuery(new ProductFilterOptions(SortBy: ProductSortOption.NameZToA)), CancellationToken.None);
+        resultDesc.Value.Items.Select(p => p.Id).Should().Equal(id3, id4, id1, id2);
+    }
+
+    [Fact]
+    public async Task GetProducts_SortByPrice_SortsByPriceThenNormalizedNameThenId()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var category = CreateCategory("CPU", "cpu", ComponentType.Cpu);
+        context.Categories.Add(category);
+
+        var id1 = Guid.Parse("00000000-0000-0000-0000-000000000001");
+        var id2 = Guid.Parse("00000000-0000-0000-0000-000000000002");
+        var id3 = Guid.Parse("00000000-0000-0000-0000-000000000003");
+        var id4 = Guid.Parse("00000000-0000-0000-0000-000000000004");
+
+        var p1 = SetEntityId(new Product(category.Id, "beta", "p1", "SKU1", "Brand", 100, 10, "img.jpg", ComponentType.Cpu, CreateCpuSpec()), id1);
+        var p2 = SetEntityId(new Product(category.Id, "ALPHA", "p2", "SKU2", "Brand", 100, 10, "img.jpg", ComponentType.Cpu, CreateCpuSpec()), id2);
+        var p3 = SetEntityId(new Product(category.Id, "alpha", "p3", "SKU3", "Brand", 100, 10, "img.jpg", ComponentType.Cpu, CreateCpuSpec()), id3);
+        var p4 = SetEntityId(new Product(category.Id, "gamma", "p4", "SKU4", "Brand", 200, 10, "img.jpg", ComponentType.Cpu, CreateCpuSpec()), id4);
+
+        context.Products.AddRange(p1, p2, p3, p4);
+        await context.SaveChangesAsync();
+
+        var handler = new GetProductsQueryHandler(context);
+
+        // PriceLowToHigh: Price 100 (p2, p3: alpha/ALPHA ordered by Id [id2, id3], then p1: beta [id1]), then Price 200 (p4 [id4])
+        var resAsc = await handler.Handle(new GetProductsQuery(new ProductFilterOptions(SortBy: ProductSortOption.PriceLowToHigh)), CancellationToken.None);
+        resAsc.Value.Items.Select(p => p.Id).Should().Equal(id2, id3, id1, id4);
+
+        // PriceHighToLow: Price 200 (p4 [id4]), then Price 100 (p2, p3: alpha/ALPHA ordered by Id [id2, id3], then p1: beta [id1])
+        var resDesc = await handler.Handle(new GetProductsQuery(new ProductFilterOptions(SortBy: ProductSortOption.PriceHighToLow)), CancellationToken.None);
+        resDesc.Value.Items.Select(p => p.Id).Should().Equal(id4, id2, id3, id1);
+    }
+
+    [Fact]
+    public async Task GetProducts_SortByNewest_UsesCreatedAtDescendingThenIdTieBreaker()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var category = CreateCategory("CPU", "cpu", ComponentType.Cpu);
+        context.Categories.Add(category);
+
+        var id1 = Guid.Parse("00000000-0000-0000-0000-000000000001");
+        var id2 = Guid.Parse("00000000-0000-0000-0000-000000000002");
+        var id3 = Guid.Parse("00000000-0000-0000-0000-000000000003");
+
+        var fixedTime = new DateTime(2026, 8, 1, 12, 0, 0, DateTimeKind.Utc);
+
+        var p1 = SetEntityId(new Product(category.Id, "Prod1", "p1", "SKU1", "Brand", 100, 10, "img.jpg", ComponentType.Cpu, CreateCpuSpec()) { CreatedAt = fixedTime }, id1);
+        var p2 = SetEntityId(new Product(category.Id, "Prod2", "p2", "SKU2", "Brand", 100, 10, "img.jpg", ComponentType.Cpu, CreateCpuSpec()) { CreatedAt = fixedTime }, id2);
+        var p3 = SetEntityId(new Product(category.Id, "Prod3", "p3", "SKU3", "Brand", 100, 10, "img.jpg", ComponentType.Cpu, CreateCpuSpec()) { CreatedAt = fixedTime.AddHours(-1) }, id3);
+
+        context.Products.AddRange(p1, p2, p3);
+        await context.SaveChangesAsync();
+
+        var handler = new GetProductsQueryHandler(context);
+        var result = await handler.Handle(new GetProductsQuery(new ProductFilterOptions(SortBy: ProductSortOption.Newest)), CancellationToken.None);
+
+        // p1 and p2 tied on CreatedAt -> ordered by Id ascending: id1, then id2. Followed by older p3: id3.
+        result.Value.Items.Select(p => p.Id).Should().Equal(id1, id2, id3);
+    }
+
+    [Fact]
+    public async Task GetProducts_Pagination_WithDuplicateSortValues_DoesNotOverlapAcrossPages()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var category = CreateCategory("CPU", "cpu", ComponentType.Cpu);
+        context.Categories.Add(category);
+
+        var id1 = Guid.Parse("00000000-0000-0000-0000-000000000001");
+        var id2 = Guid.Parse("00000000-0000-0000-0000-000000000002");
+        var id3 = Guid.Parse("00000000-0000-0000-0000-000000000003");
+        var id4 = Guid.Parse("00000000-0000-0000-0000-000000000004");
+
+        // Identical Price, Name, and CreatedAt
+        var fixedTime = new DateTime(2026, 8, 1, 10, 0, 0, DateTimeKind.Utc);
+        var p1 = SetEntityId(new Product(category.Id, "SameName", "s1", "SKU1", "Brand", 100, 5, "img.jpg", ComponentType.Cpu, CreateCpuSpec()) { CreatedAt = fixedTime }, id1);
+        var p2 = SetEntityId(new Product(category.Id, "SameName", "s2", "SKU2", "Brand", 100, 5, "img.jpg", ComponentType.Cpu, CreateCpuSpec()) { CreatedAt = fixedTime }, id2);
+        var p3 = SetEntityId(new Product(category.Id, "SameName", "s3", "SKU3", "Brand", 100, 5, "img.jpg", ComponentType.Cpu, CreateCpuSpec()) { CreatedAt = fixedTime }, id3);
+        var p4 = SetEntityId(new Product(category.Id, "SameName", "s4", "SKU4", "Brand", 100, 5, "img.jpg", ComponentType.Cpu, CreateCpuSpec()) { CreatedAt = fixedTime }, id4);
+
+        context.Products.AddRange(p1, p2, p3, p4);
+        await context.SaveChangesAsync();
+
+        var handler = new GetProductsQueryHandler(context);
+
+        // Page 1 with size 2 -> should take [id1, id2]
+        var page1 = await handler.Handle(new GetProductsQuery(new ProductFilterOptions(PageIndex: 1, PageSize: 2, SortBy: ProductSortOption.NameAToZ)), CancellationToken.None);
+        page1.Value.Items.Select(p => p.Id).Should().Equal(id1, id2);
+
+        // Page 2 with size 2 -> should take [id3, id4]
+        var page2 = await handler.Handle(new GetProductsQuery(new ProductFilterOptions(PageIndex: 2, PageSize: 2, SortBy: ProductSortOption.NameAToZ)), CancellationToken.None);
+        page2.Value.Items.Select(p => p.Id).Should().Equal(id3, id4);
+
+        var allIds = page1.Value.Items.Select(p => p.Id).Concat(page2.Value.Items.Select(p => p.Id)).ToList();
+        allIds.Should().Equal(id1, id2, id3, id4);
+    }
+
+    [Fact]
+    public async Task GetProducts_WhenOffsetCausesOverflowOrBeyondEnd_ReturnsEmptyItemsWithoutThrowing()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var category = CreateCategory("CPU", "cpu", ComponentType.Cpu);
+        context.Categories.Add(category);
+
+        var p1 = new Product(category.Id, "Prod1", "p1", "SKU1", "Brand", 100, 5, "img.jpg", ComponentType.Cpu, CreateCpuSpec());
+        var p2 = new Product(category.Id, "Prod2", "p2", "SKU2", "Brand", 200, 5, "img.jpg", ComponentType.Cpu, CreateCpuSpec());
+        context.Products.AddRange(p1, p2);
+        await context.SaveChangesAsync();
+
+        var handler = new GetProductsQueryHandler(context);
+
+        // 1. PageIndex = 214748366 with PageSize = 20 -> previously would overflow int offset to 4 and incorrectly return items
+        var overflowQuery = new GetProductsQuery(new ProductFilterOptions(PageIndex: 214748366, PageSize: 20));
+        var overflowResult = await handler.Handle(overflowQuery, CancellationToken.None);
+
+        overflowResult.IsSuccess.Should().BeTrue();
+        overflowResult.Value.Items.Should().BeEmpty();
+        overflowResult.Value.TotalCount.Should().Be(2);
+        overflowResult.Value.PageIndex.Should().Be(214748366);
+        overflowResult.Value.PageSize.Should().Be(20);
+
+        // 2. PageIndex = int.MaxValue with PageSize = 50 -> must not throw OverflowException
+        var maxPageQuery = new GetProductsQuery(new ProductFilterOptions(PageIndex: int.MaxValue, PageSize: 50));
+        var maxPageResult = await handler.Handle(maxPageQuery, CancellationToken.None);
+
+        maxPageResult.IsSuccess.Should().BeTrue();
+        maxPageResult.Value.Items.Should().BeEmpty();
+        maxPageResult.Value.TotalCount.Should().Be(2);
+        maxPageResult.Value.PageIndex.Should().Be(int.MaxValue);
+
+        // 3. Page index directly past last page (Page 3 of size 1 with 2 items -> TotalPages = 2)
+        var pastEndQuery = new GetProductsQuery(new ProductFilterOptions(PageIndex: 3, PageSize: 1));
+        var pastEndResult = await handler.Handle(pastEndQuery, CancellationToken.None);
+
+        pastEndResult.IsSuccess.Should().BeTrue();
+        pastEndResult.Value.Items.Should().BeEmpty();
+        pastEndResult.Value.TotalCount.Should().Be(2);
+        pastEndResult.Value.TotalPages.Should().Be(2);
+        pastEndResult.Value.HasPreviousPage.Should().BeTrue();
+        pastEndResult.Value.HasNextPage.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task GetProducts_ComponentTypeFilter_FiltersIndependentlyAndExcludesOtherTypes()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var catCpu = CreateCategory("CPU", "cpu", ComponentType.Cpu);
+        var catGpu = CreateCategory("GPU", "gpu", ComponentType.Gpu);
+        var catMobo = CreateCategory("Motherboard", "motherboard", ComponentType.Motherboard);
+        context.Categories.AddRange(catCpu, catGpu, catMobo);
+
+        var pCpu = new Product(catCpu.Id, "ASUS ROG CPU", "asus-rog-cpu", "SKU-CPU", "ASUS", 500, 10, "img.jpg", ComponentType.Cpu, CreateCpuSpec());
+        var pGpu = new Product(catGpu.Id, "ASUS ROG GPU", "asus-rog-gpu", "SKU-GPU", "ASUS", 1000, 10, "img.jpg", ComponentType.Gpu, CreateGpuSpec());
+        var pMobo = new Product(catMobo.Id, "ASUS ROG Motherboard", "asus-rog-mobo", "SKU-MOBO", "ASUS", 400, 10, "img.jpg", ComponentType.Motherboard, CreateMotherboardSpec());
+        context.Products.AddRange(pCpu, pGpu, pMobo);
+        await context.SaveChangesAsync();
+
+        var handler = new GetProductsQueryHandler(context);
+        var query = new GetProductsQuery(new ProductFilterOptions(ComponentType: ComponentType.Gpu));
+        var result = await handler.Handle(query, CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Value.TotalCount.Should().Be(1);
+        result.Value.Items.Should().ContainSingle(p => p.Id == pGpu.Id);
+        result.Value.Items.Should().NotContain(p => p.Id == pCpu.Id);
+        result.Value.Items.Should().NotContain(p => p.Id == pMobo.Id);
+    }
+
+    [Fact]
+    public async Task GetProducts_CombinedFilters_EnforcesAndSemanticsAcrossAllConditions()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var catRam = CreateCategory("RAM", "ram", ComponentType.Ram);
+        var catPsu = CreateCategory("PSU", "psu", ComponentType.Psu);
+        context.Categories.AddRange(catRam, catPsu);
+
+        // Filter Target: Brand="Corsair", ComponentType=Ram, MinPrice=100, MaxPrice=200, InStock=true, IsActive=true
+
+        // 1. Matches all
+        var pTarget = new Product(catRam.Id, "Corsair Vengeance", "c-v", "SKU1", "Corsair", 150, 5, "img.jpg", ComponentType.Ram, CreateRamSpec()) { IsActive = true };
+
+        // 2. Fails Brand
+        var pFailBrand = new Product(catRam.Id, "Kingston Fury", "k-f", "SKU2", "Kingston", 150, 5, "img.jpg", ComponentType.Ram, CreateRamSpec()) { IsActive = true };
+
+        // 3. Fails ComponentType
+        var pFailType = new Product(catPsu.Id, "Corsair RM850", "c-rm", "SKU3", "Corsair", 150, 5, "img.jpg", ComponentType.Psu, CreatePsuSpec()) { IsActive = true };
+
+        // 4. Fails Price (> MaxPrice)
+        var pFailPrice = new Product(catRam.Id, "Corsair Dominator", "c-d", "SKU4", "Corsair", 250, 5, "img.jpg", ComponentType.Ram, CreateRamSpec()) { IsActive = true };
+
+        // 5. Fails InStock (StockQuantity = 0)
+        var pFailStock = new Product(catRam.Id, "Corsair LPX", "c-lpx", "SKU5", "Corsair", 150, 0, "img.jpg", ComponentType.Ram, CreateRamSpec()) { IsActive = true };
+
+        // 6. Fails IsActive (IsActive = false)
+        var pFailActive = new Product(catRam.Id, "Corsair Old", "c-old", "SKU6", "Corsair", 150, 5, "img.jpg", ComponentType.Ram, CreateRamSpec()) { IsActive = false };
+
+        context.Products.AddRange(pTarget, pFailBrand, pFailType, pFailPrice, pFailStock, pFailActive);
+        await context.SaveChangesAsync();
+
+        var handler = new GetProductsQueryHandler(context);
+        var query = new GetProductsQuery(new ProductFilterOptions(
+            Brand: "corsair",
+            ComponentType: ComponentType.Ram,
+            MinPrice: 100,
+            MaxPrice: 200,
+            InStock: true,
+            IsActive: true
+        ));
+
+        var result = await handler.Handle(query, CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Value.TotalCount.Should().Be(1);
+        result.Value.Items.Should().ContainSingle(p => p.Id == pTarget.Id);
+    }
+
+    [Fact]
+    public async Task ProductQueries_DoNotTrackEntitiesInChangeTracker()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var category = CreateCategory("CPU", "cpu", ComponentType.Cpu);
+        context.Categories.Add(category);
+
+        var product = new Product(category.Id, "Test CPU", "test-cpu", "SKU1", "Brand", 200, 10, "img.jpg", ComponentType.Cpu, CreateCpuSpec()) { IsActive = true };
+        context.Products.Add(product);
+        await context.SaveChangesAsync();
+
+        // 1. Test GetProductsQuery
+        context.ChangeTracker.Clear();
+        context.ChangeTracker.Entries().Should().BeEmpty();
+
+        var listHandler = new GetProductsQueryHandler(context);
+        var listResult = await listHandler.Handle(new GetProductsQuery(new ProductFilterOptions()), CancellationToken.None);
+        listResult.IsSuccess.Should().BeTrue();
+        context.ChangeTracker.Entries().Should().BeEmpty("GetProductsQuery must not track any entities");
+
+        // 2. Test GetProductBySlugQuery
+        context.ChangeTracker.Clear();
+        var slugHandler = new GetProductBySlugQueryHandler(context);
+        var slugResult = await slugHandler.Handle(new GetProductBySlugQuery("test-cpu"), CancellationToken.None);
+        slugResult.IsSuccess.Should().BeTrue();
+        context.ChangeTracker.Entries().Should().BeEmpty("GetProductBySlugQuery must not track any entities");
+
+        // 3. Test GetProductByIdQuery
+        context.ChangeTracker.Clear();
+        var currentUserMock = new Mock<ICurrentUserService>();
+        currentUserMock.Setup(u => u.IsAuthenticated).Returns(true);
+        currentUserMock.Setup(u => u.UserId).Returns(Guid.NewGuid());
+        currentUserMock.Setup(u => u.UserRole).Returns(UserRole.Admin.ToString());
+
+        var idHandler = new GetProductByIdQueryHandler(context, currentUserMock.Object);
+        var idResult = await idHandler.Handle(new GetProductByIdQuery(product.Id), CancellationToken.None);
+        idResult.IsSuccess.Should().BeTrue();
+        context.ChangeTracker.Entries().Should().BeEmpty("GetProductByIdQuery must not track any entities");
     }
 
     [Fact]

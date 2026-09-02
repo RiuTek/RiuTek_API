@@ -66,7 +66,7 @@ public static class ProductQueryExtensions
 
         if (!string.IsNullOrWhiteSpace(options.SearchTerm))
         {
-            var search = options.SearchTerm.Trim().ToLower();
+            var search = options.SearchTerm.Trim().ToLowerInvariant();
             query = query.Where(p =>
                 p.Name.ToLower().Contains(search) ||
                 p.Sku.ToLower().Contains(search) ||
@@ -75,7 +75,7 @@ public static class ProductQueryExtensions
 
         if (!string.IsNullOrWhiteSpace(options.Brand))
         {
-            var brand = options.Brand.Trim().ToLower();
+            var brand = options.Brand.Trim().ToLowerInvariant();
             query = query.Where(p => p.Brand.ToLower() == brand);
         }
 
@@ -117,20 +117,20 @@ public static class ProductQueryExtensions
         {
             ProductSortOption.PriceLowToHigh => query
                 .OrderBy(p => p.Price)
-                .ThenBy(p => p.Name)
+                .ThenBy(p => p.Name.ToLower())
                 .ThenBy(p => p.Id),
 
             ProductSortOption.PriceHighToLow => query
                 .OrderByDescending(p => p.Price)
-                .ThenBy(p => p.Name)
+                .ThenBy(p => p.Name.ToLower())
                 .ThenBy(p => p.Id),
 
             ProductSortOption.NameAToZ => query
-                .OrderBy(p => p.Name)
+                .OrderBy(p => p.Name.ToLower())
                 .ThenBy(p => p.Id),
 
             ProductSortOption.NameZToA => query
-                .OrderByDescending(p => p.Name)
+                .OrderByDescending(p => p.Name.ToLower())
                 .ThenBy(p => p.Id),
 
             _ => query // Default Newest

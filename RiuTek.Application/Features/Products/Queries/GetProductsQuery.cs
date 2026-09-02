@@ -59,12 +59,22 @@ public class GetProductsQueryHandler : IRequestHandler<GetProductsQuery, Result<
 
         var totalCount = await query.CountAsync(cancellationToken);
 
-        var items = await query
-            .ApplySorting(request.Options.SortBy)
-            .Skip((request.Options.PageIndex - 1) * request.Options.PageSize)
-            .Take(request.Options.PageSize)
-            .Select(ProductMappingExtensions.ToSummaryDtoProjection)
-            .ToListAsync(cancellationToken);
+        long offset = ((long)request.Options.PageIndex - 1) * request.Options.PageSize;
+
+        List<ProductSummaryDto> items;
+        if (offset >= totalCount)
+        {
+            items = [];
+        }
+        else
+        {
+            items = await query
+                .ApplySorting(request.Options.SortBy)
+                .Skip((int)offset)
+                .Take(request.Options.PageSize)
+                .Select(ProductMappingExtensions.ToSummaryDtoProjection)
+                .ToListAsync(cancellationToken);
+        }
 
         var pagedResult = new PagedResult<ProductSummaryDto>(
             items,
