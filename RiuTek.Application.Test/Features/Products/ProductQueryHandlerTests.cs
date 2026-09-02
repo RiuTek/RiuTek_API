@@ -294,7 +294,9 @@ public class ProductQueryHandlerTests
         var p3 = SetEntityId(new Product(category.Id, "Beta", "beta-1", "SKU3", "Brand", 100, 10, "img.jpg", ComponentType.Cpu, CreateCpuSpec()), id3);
         var p4 = SetEntityId(new Product(category.Id, "beta", "beta-2", "SKU4", "Brand", 100, 10, "img.jpg", ComponentType.Cpu, CreateCpuSpec()), id4);
 
-        context.Products.AddRange(p1, p2, p3, p4);
+        // Seed in order (p4, p2, p3, p1) which is different from expected sort order (id1, id2, id3, id4)
+        // to strictly verify that explicit Id tie-breaker takes precedence over insertion order.
+        context.Products.AddRange(p4, p2, p3, p1);
         await context.SaveChangesAsync();
 
         var handler = new GetProductsQueryHandler(context);
@@ -325,7 +327,9 @@ public class ProductQueryHandlerTests
         var p3 = SetEntityId(new Product(category.Id, "alpha", "p3", "SKU3", "Brand", 100, 10, "img.jpg", ComponentType.Cpu, CreateCpuSpec()), id3);
         var p4 = SetEntityId(new Product(category.Id, "gamma", "p4", "SKU4", "Brand", 200, 10, "img.jpg", ComponentType.Cpu, CreateCpuSpec()), id4);
 
-        context.Products.AddRange(p1, p2, p3, p4);
+        // Seed p3 before p2 within the tied (Price=100, normalized Name="alpha") group
+        // to strictly verify that Id tie-breaker (id2 < id3) takes precedence over insertion order.
+        context.Products.AddRange(p4, p3, p1, p2);
         await context.SaveChangesAsync();
 
         var handler = new GetProductsQueryHandler(context);
@@ -356,7 +360,9 @@ public class ProductQueryHandlerTests
         var p2 = SetEntityId(new Product(category.Id, "Prod2", "p2", "SKU2", "Brand", 100, 10, "img.jpg", ComponentType.Cpu, CreateCpuSpec()) { CreatedAt = fixedTime }, id2);
         var p3 = SetEntityId(new Product(category.Id, "Prod3", "p3", "SKU3", "Brand", 100, 10, "img.jpg", ComponentType.Cpu, CreateCpuSpec()) { CreatedAt = fixedTime.AddHours(-1) }, id3);
 
-        context.Products.AddRange(p1, p2, p3);
+        // Seed p2 before p1 within the tied CreatedAt group
+        // to strictly verify that Id tie-breaker (id1 < id2) takes precedence over insertion order.
+        context.Products.AddRange(p3, p2, p1);
         await context.SaveChangesAsync();
 
         var handler = new GetProductsQueryHandler(context);
@@ -385,7 +391,8 @@ public class ProductQueryHandlerTests
         var p3 = SetEntityId(new Product(category.Id, "SameName", "s3", "SKU3", "Brand", 100, 5, "img.jpg", ComponentType.Cpu, CreateCpuSpec()) { CreatedAt = fixedTime }, id3);
         var p4 = SetEntityId(new Product(category.Id, "SameName", "s4", "SKU4", "Brand", 100, 5, "img.jpg", ComponentType.Cpu, CreateCpuSpec()) { CreatedAt = fixedTime }, id4);
 
-        context.Products.AddRange(p1, p2, p3, p4);
+        // Seed in reverse order (p4, p3, p2, p1) to verify deterministic page partitioning by Id
+        context.Products.AddRange(p4, p3, p2, p1);
         await context.SaveChangesAsync();
 
         var handler = new GetProductsQueryHandler(context);
@@ -400,6 +407,10 @@ public class ProductQueryHandlerTests
 
         var allIds = page1.Value.Items.Select(p => p.Id).Concat(page2.Value.Items.Select(p => p.Id)).ToList();
         allIds.Should().Equal(id1, id2, id3, id4);
+
+        var page1Ids = page1.Value.Items.Select(p => p.Id).ToHashSet();
+        var page2Ids = page2.Value.Items.Select(p => p.Id).ToHashSet();
+        page1Ids.Overlaps(page2Ids).Should().BeFalse();
     }
 
     [Fact]
@@ -409,22 +420,29 @@ public class ProductQueryHandlerTests
         var category = CreateCategory("CPU", "cpu", ComponentType.Cpu);
         context.Categories.Add(category);
 
-        var p1 = new Product(category.Id, "Prod1", "p1", "SKU1", "Brand", 100, 5, "img.jpg", ComponentType.Cpu, CreateCpuSpec());
-        var p2 = new Product(category.Id, "Prod2", "p2", "SKU2", "Brand", 200, 5, "img.jpg", ComponentType.Cpu, CreateCpuSpec());
-        context.Products.AddRange(p1, p2);
+        // Seed 6 products (instead of 2) so that if (PageIndex - 1) * PageSize wraps around to 4,
+        // Skip(4) would have returned items 5 and 6, proving this test truly discriminates against int overflow bug.
+        var products = Enumerable.Range(1, 6).Select(i =>
+            new Product(category.Id, $"Prod{i}", $"prod-{i}", $"SKU{i}", "Brand", i * 50, 5, "img.jpg", ComponentType.Cpu, CreateCpuSpec())
+        ).ToList();
+        context.Products.AddRange(products);
         await context.SaveChangesAsync();
 
         var handler = new GetProductsQueryHandler(context);
 
-        // 1. PageIndex = 214748366 with PageSize = 20 -> previously would overflow int offset to 4 and incorrectly return items
+        // 1. PageIndex = 214748366 with PageSize = 20 -> previously would overflow int offset to 4 and return 2 items.
+        // With long offset calculation, offset >= totalCount (6) -> safely returns empty items.
         var overflowQuery = new GetProductsQuery(new ProductFilterOptions(PageIndex: 214748366, PageSize: 20));
         var overflowResult = await handler.Handle(overflowQuery, CancellationToken.None);
 
         overflowResult.IsSuccess.Should().BeTrue();
         overflowResult.Value.Items.Should().BeEmpty();
-        overflowResult.Value.TotalCount.Should().Be(2);
+        overflowResult.Value.TotalCount.Should().Be(6);
+        overflowResult.Value.TotalPages.Should().Be(1);
         overflowResult.Value.PageIndex.Should().Be(214748366);
         overflowResult.Value.PageSize.Should().Be(20);
+        overflowResult.Value.HasPreviousPage.Should().BeTrue();
+        overflowResult.Value.HasNextPage.Should().BeFalse();
 
         // 2. PageIndex = int.MaxValue with PageSize = 50 -> must not throw OverflowException
         var maxPageQuery = new GetProductsQuery(new ProductFilterOptions(PageIndex: int.MaxValue, PageSize: 50));
@@ -432,17 +450,23 @@ public class ProductQueryHandlerTests
 
         maxPageResult.IsSuccess.Should().BeTrue();
         maxPageResult.Value.Items.Should().BeEmpty();
-        maxPageResult.Value.TotalCount.Should().Be(2);
+        maxPageResult.Value.TotalCount.Should().Be(6);
+        maxPageResult.Value.TotalPages.Should().Be(1);
         maxPageResult.Value.PageIndex.Should().Be(int.MaxValue);
+        maxPageResult.Value.PageSize.Should().Be(50);
+        maxPageResult.Value.HasPreviousPage.Should().BeTrue();
+        maxPageResult.Value.HasNextPage.Should().BeFalse();
 
-        // 3. Page index directly past last page (Page 3 of size 1 with 2 items -> TotalPages = 2)
-        var pastEndQuery = new GetProductsQuery(new ProductFilterOptions(PageIndex: 3, PageSize: 1));
+        // 3. Case directly past last page: with PageSize = 1 and 6 products, use PageIndex = 7 (TotalPages = 6)
+        var pastEndQuery = new GetProductsQuery(new ProductFilterOptions(PageIndex: 7, PageSize: 1));
         var pastEndResult = await handler.Handle(pastEndQuery, CancellationToken.None);
 
         pastEndResult.IsSuccess.Should().BeTrue();
         pastEndResult.Value.Items.Should().BeEmpty();
-        pastEndResult.Value.TotalCount.Should().Be(2);
-        pastEndResult.Value.TotalPages.Should().Be(2);
+        pastEndResult.Value.TotalCount.Should().Be(6);
+        pastEndResult.Value.TotalPages.Should().Be(6);
+        pastEndResult.Value.PageIndex.Should().Be(7);
+        pastEndResult.Value.PageSize.Should().Be(1);
         pastEndResult.Value.HasPreviousPage.Should().BeTrue();
         pastEndResult.Value.HasNextPage.Should().BeFalse();
     }
