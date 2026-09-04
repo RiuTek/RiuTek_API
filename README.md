@@ -38,7 +38,7 @@ Các biến cấu hình không nhạy cảm liên quan:
 - **Bản chất Fail-Fast**:
   - Guard của cơ sở dữ liệu kiểm tra giá trị cuối cùng nhận được từ `configuration.GetConnectionString("DefaultConnection")`. Nếu giá trị cuối cùng này bị thiếu, rỗng hoặc chỉ chứa khoảng trắng, ứng dụng sẽ fail-fast ném ngoại lệ yêu cầu cấu hình `ConnectionStrings__DefaultConnection`.
   - Guard của JWT kiểm tra cấu hình `JwtSettings` cuối cùng sau khi bind, yêu cầu `SecretKey` có độ dài tối thiểu 32 bytes UTF-8.
-  - Code ứng dụng không kiểm tra trực tiếp sự tồn tại của biến môi trường riêng lẻ trong OS; nếu một nguồn cấu hình hợp lệ khác đã cung cấp giá trị, ứng dụng sẽ không báo lỗi. Tuy nhiên, việc cung cấp secret qua biến môi trường tại runtime là **quy ước bảo mật bắt buộc** của dự án để đảm bảo an toàn tuyệt đối cho secret.
+  - Code ứng dụng không kiểm tra trực tiếp sự tồn tại của biến môi trường riêng lẻ trong OS; nếu một nguồn cấu hình hợp lệ khác đã cung cấp giá trị, ứng dụng sẽ không báo lỗi. Tuy nhiên, việc cung cấp secret qua biến môi trường tại runtime là **quy ước bảo mật bắt buộc** của dự án để giảm thiểu nguy cơ lộ secret.
 
 ---
 
@@ -77,3 +77,117 @@ dotnet run --project RiuTek.API --no-launch-profile
 ### 1.5 Định hướng cấu hình runtime trên Server (Azure / VPS)
 - **Azure App Service / Azure Container Apps**: Cấu hình các biến trên trong phần **Configuration > Application settings** (hoặc tích hợp an toàn với Azure Key Vault thông qua Managed Identity).
 - **VPS / Docker / Kubernetes**: Cấu hình qua biến môi trường của container runtime, Docker secrets, hoặc Kubernetes Secrets gắn kết vào môi trường thực thi của container.
+
+---
+
+## 2. Danh mục API Sản phẩm & Danh mục (Catalog API Contracts)
+
+### 2.1 Bảng 10 Routes, Quyền & Response Status
+
+| Method / Route | Action | Quyền hạn | Thành công | Lỗi có thể trả về |
+|---|---|---|---|---|
+| `GET api/v1/products` | `GetProducts` | `[AllowAnonymous]` | `200 OK` (`PagedResult<ProductSummaryDto>`) | `400` |
+| `GET api/v1/products/slug/{slug}` | `GetBySlug` | `[AllowAnonymous]` | `200 OK` (`ProductDto`) | `400`, `404` |
+| `GET api/v1/products/{id:guid}` | `GetById` | `ContentManager` | `200 OK` (`ProductDto`) | `400`, `401`, `403`, `404` |
+| `POST api/v1/products` | `Create` | `ContentManager` | `201 Created` (`ProductDto` + Location) | `400`, `401`, `403`, `409` |
+| `PUT api/v1/products/{id:guid}` | `Update` | `ContentManager` | `200 OK` (`ProductDto`) | `400`, `401`, `403`, `404`, `409` |
+| `GET api/v1/categories` | `GetTree` | `[AllowAnonymous]` | `200 OK` (`List<CategoryDto>`) | |
+| `GET api/v1/categories/{id:guid}` | `GetById` | `[AllowAnonymous]` | `200 OK` (`CategoryDto`) | `404` |
+| `POST api/v1/categories` | `Create` | `ContentManager` | `201 Created` (`CategoryDto` + Location) | `400`, `401`, `403`, `409` |
+| `PUT api/v1/categories/{id:guid}` | `Update` | `ContentManager` | `200 OK` (`CategoryDto`) | `400`, `401`, `403`, `404`, `409` |
+| `DELETE api/v1/categories/{id:guid}` | `Delete` | `ContentManager` | `204 NoContent` | `400`, `401`, `403`, `404`, `409` |
+
+#### Quy ước trạng thái & bảo mật nghiệp vụ:
+- **Trạng thái `IsActive`**:
+  - Là trạng thái kinh doanh (đang bán / ngừng bán), không phải quyền nhìn thấy sản phẩm.
+  - `GET api/v1/products`: Mặc định `IsActive = null`, trả về cả sản phẩm đang bán và ngừng bán. Client có thể lọc bằng query param `isActive=true` hoặc `isActive=false`.
+  - `GET api/v1/products/slug/{slug}`: Vẫn trả về chi tiết sản phẩm kể cả khi sản phẩm đã ngừng bán (`IsActive = false`).
+  - `POST api/v1/products`: Luôn tạo sản phẩm mới ở trạng thái `IsActive = true`; request body không expose trường này.
+  - `PUT api/v1/products/{id}`: Bắt buộc gửi rõ `IsActive` (kiểu boolean) trong JSON body; thiếu hoặc null sẽ bị serializer từ chối (`[property: JsonRequired]`). Cập nhật sản phẩm là full update payload, không hỗ trợ PATCH riêng status.
+- **Không hỗ trợ DELETE Product**: Hệ thống không cung cấp endpoint xóa sản phẩm (không soft-delete hay hard-delete) trong scope này.
+- **Xóa Category (`DELETE api/v1/categories/{id}`)**: Chỉ xóa thành công khi danh mục không có danh mục con và không chứa bất kỳ sản phẩm nào (kể cả sản phẩm ngừng bán); nếu vi phạm trả về HTTP `409 Conflict`.
+
+---
+
+### 2.2 Đa hình JSON thông số kỹ thuật (`ComponentSpecification`)
+Hệ thống hỗ trợ 9 loại linh kiện máy tính với thuộc tính phân biệt kiểu `"$type"` đặt ở đầu object specifications:
+1. `cpu` (`CpuSpecification`)
+2. `motherboard` (`MotherboardSpecification`)
+3. `gpu` (`GpuSpecification`)
+4. `ram` (`RamSpecification`)
+5. `storage` (`StorageSpecification`)
+6. `psu` (`PsuSpecification`)
+7. `case` (`CaseSpecification`)
+8. `cooler` (`CoolerSpecification`)
+9. `accessory` (`AccessorySpecification`)
+
+#### Ví dụ truy vấn phân trang, lọc & sắp xếp (Query Parameters):
+```http
+GET /api/v1/products?pageIndex=1&pageSize=10&searchTerm=intel&componentType=1&minPrice=200&maxPrice=500&inStock=true&sortBy=2
+```
+
+#### Ví dụ Request Body tạo mới CPU (`POST api/v1/products`):
+```json
+{
+  "categoryId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "name": "Intel Core i7-14700K",
+  "sku": "CPU-INT-14700K",
+  "brand": "Intel",
+  "price": 420.00,
+  "originalPrice": 450.00,
+  "stockQuantity": 20,
+  "imageUrl": "https://example.com/images/i7-14700k.jpg",
+  "additionalImages": [
+    "https://example.com/images/i7-box.jpg"
+  ],
+  "componentType": 1,
+  "specifications": {
+    "$type": "cpu",
+    "socket": 1,
+    "coreCount": 20,
+    "threadCount": 28,
+    "baseClockGhz": 3.4,
+    "boostClockGhz": 5.6,
+    "tdpWattage": 125,
+    "hasIntegratedGpu": true,
+    "supportedMemoryType": 2,
+    "maxMemorySpeedMhz": 5600
+  }
+}
+```
+
+#### Ví dụ Request Body cập nhật CPU (`PUT api/v1/products/{id}`):
+```json
+{
+  "categoryId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "name": "Intel Core i7-14700K",
+  "sku": "CPU-INT-14700K",
+  "brand": "Intel",
+  "price": 399.00,
+  "originalPrice": 450.00,
+  "stockQuantity": 15,
+  "isActive": false,
+  "imageUrl": "https://example.com/images/i7-14700k.jpg",
+  "additionalImages": null,
+  "componentType": 1,
+  "specifications": {
+    "$type": "cpu",
+    "socket": 1,
+    "coreCount": 20,
+    "threadCount": 28,
+    "baseClockGhz": 3.4,
+    "boostClockGhz": 5.6,
+    "tdpWattage": 125,
+    "hasIntegratedGpu": true,
+    "supportedMemoryType": 2,
+    "maxMemorySpeedMhz": 5600
+  }
+}
+```
+
+---
+
+### 2.3 Giới hạn phạm vi kiểm chứng ở Phase 3.3-B3
+- Các kiểm thử trong Phase 3.3-B3 tập trung vào Controller contract mappings, serialization đa hình JSON 9 subtype, route ambiguity, và endpoint metadata.
+- **Chưa kiểm chứng qua HTTP middleware pipeline đầy đủ** (chưa chạy qua authentication handler hay filter pipeline trên server thật).
+- **Chưa kiểm chứng tích hợp cơ sở dữ liệu thật** (PostgreSQL / EF SQL translation). Các nội dung này sẽ được thực hiện tại Integration Gate tiếp theo.
