@@ -133,6 +133,26 @@ public class ProductsControllerContractTests : IDisposable
         methods.Should().NotContain(m => m.Name.Contains("SetActive", StringComparison.OrdinalIgnoreCase));
     }
 
+    [Fact]
+    public void GetProducts_DeclaresProducesResponseTypeNotFound()
+    {
+        var method = typeof(ProductsController).GetMethod(nameof(ProductsController.GetProducts));
+        method.Should().NotBeNull();
+
+        var produces = method!.GetCustomAttributes<ProducesResponseTypeAttribute>();
+        produces.Should().Contain(a => a.StatusCode == StatusCodes.Status404NotFound);
+    }
+
+    [Fact]
+    public void Create_DeclaresProducesResponseTypeNotFound()
+    {
+        var method = typeof(ProductsController).GetMethod(nameof(ProductsController.Create));
+        method.Should().NotBeNull();
+
+        var produces = method!.GetCustomAttributes<ProducesResponseTypeAttribute>();
+        produces.Should().Contain(a => a.StatusCode == StatusCodes.Status404NotFound);
+    }
+
     #endregion
 
     #region Action Mapping & Behavior Tests
@@ -491,6 +511,59 @@ public class ProductsControllerContractTests : IDisposable
         var forbiddenResult = actionResult as ObjectResult;
         forbiddenResult.Should().NotBeNull();
         forbiddenResult!.StatusCode.Should().Be(StatusCodes.Status403Forbidden);
+    }
+
+    [Fact]
+    public async Task GetProducts_WhenCategoryNotFound_ReturnsNotFoundStatus_WithErrorCodeAndDescription()
+    {
+        using var cts = new CancellationTokenSource();
+        var categoryId = Guid.NewGuid();
+        var request = new ProductListRequest { CategoryId = categoryId };
+
+        _senderMock.Setup(s => s.Send(It.Is<GetProductsQuery>(q => q.Options.CategoryId == categoryId), cts.Token))
+            .ReturnsAsync(Result.Failure<PagedResult<ProductSummaryDto>>(Error.NotFound("Product.CategoryNotFound", "Category not found")));
+
+        var actionResult = await _controller.GetProducts(request, cts.Token);
+
+        var notFoundResult = actionResult as NotFoundObjectResult;
+        notFoundResult.Should().NotBeNull();
+        notFoundResult!.StatusCode.Should().Be(StatusCodes.Status404NotFound);
+        notFoundResult.Value.Should().BeEquivalentTo(new { Code = "Product.CategoryNotFound", Description = "Category not found" });
+
+        _senderMock.Verify(s => s.Send(It.IsAny<GetProductsQuery>(), cts.Token), Times.Once);
+    }
+
+    [Fact]
+    public async Task Create_WhenCategoryNotFound_ReturnsNotFoundStatus_DoesNotReturnCreatedAtAction_AndDoesNotAccessValue()
+    {
+        using var cts = new CancellationTokenSource();
+        var categoryId = Guid.NewGuid();
+        var request = new CreateProductRequest(
+            CategoryId: categoryId,
+            Name: "Core i7",
+            Sku: "SKU-I7",
+            Brand: "Intel",
+            Price: 350m,
+            OriginalPrice: 400m,
+            StockQuantity: 10,
+            ImageUrl: "img.jpg",
+            AdditionalImages: null,
+            ComponentType: ComponentType.Cpu,
+            Specifications: CreateCpuSpec()
+        );
+
+        _senderMock.Setup(s => s.Send(It.Is<CreateProductCommand>(c => c.CategoryId == categoryId), cts.Token))
+            .ReturnsAsync(Result.Failure<ProductDto>(Error.NotFound("Product.CategoryNotFound", "Category not found")));
+
+        var actionResult = await _controller.Create(request, cts.Token);
+
+        actionResult.Should().NotBeOfType<CreatedAtActionResult>();
+        var notFoundResult = actionResult as NotFoundObjectResult;
+        notFoundResult.Should().NotBeNull();
+        notFoundResult!.StatusCode.Should().Be(StatusCodes.Status404NotFound);
+        notFoundResult.Value.Should().BeEquivalentTo(new { Code = "Product.CategoryNotFound", Description = "Category not found" });
+
+        _senderMock.Verify(s => s.Send(It.IsAny<CreateProductCommand>(), cts.Token), Times.Once);
     }
 
     #endregion

@@ -40,6 +40,35 @@ public class CatalogJsonContractTests
             _ => throw new ArgumentException($"Unknown discriminator {discriminator}")
         };
 
+    private static void AssertSpecificationsEquivalent(ComponentSpecification? actual, ComponentSpecification? expected)
+    {
+        actual.Should().NotBeNull();
+        expected.Should().NotBeNull();
+        actual.Should().BeOfType(expected!.GetType());
+        actual.Should().BeEquivalentTo(expected, options => options
+            .PreferringRuntimeMemberTypes()
+            .ComparingRecordsByMembers()
+            .WithStrictOrdering());
+    }
+
+    private static (ComponentSpecification expected, ComponentSpecification actual, string modifiedFieldName) CreateCorruptedSpecificationPair(string discriminator)
+    {
+        var (_, original) = GetSpecForType(discriminator);
+        return discriminator switch
+        {
+            "cpu" => (original, ((CpuSpecification)original) with { CoreCount = ((CpuSpecification)original).CoreCount + 4 }, nameof(CpuSpecification.CoreCount)),
+            "motherboard" => (original, ((MotherboardSpecification)original) with { M2Slots = ((MotherboardSpecification)original).M2Slots + 1 }, nameof(MotherboardSpecification.M2Slots)),
+            "gpu" => (original, ((GpuSpecification)original) with { VramGb = ((GpuSpecification)original).VramGb + 4 }, nameof(GpuSpecification.VramGb)),
+            "ram" => (original, ((RamSpecification)original) with { CapacityGb = ((RamSpecification)original).CapacityGb * 2 }, nameof(RamSpecification.CapacityGb)),
+            "storage" => (original, ((StorageSpecification)original) with { ReadSpeedMBs = ((StorageSpecification)original).ReadSpeedMBs + 500 }, nameof(StorageSpecification.ReadSpeedMBs)),
+            "psu" => (original, ((PsuSpecification)original) with { Wattage = ((PsuSpecification)original).Wattage + 100 }, nameof(PsuSpecification.Wattage)),
+            "case" => (original, ((CaseSpecification)original) with { MaxGpuLengthMm = ((CaseSpecification)original).MaxGpuLengthMm + 20 }, nameof(CaseSpecification.MaxGpuLengthMm)),
+            "cooler" => (original, ((CoolerSpecification)original) with { MaxTdpRating = ((CoolerSpecification)original).MaxTdpRating + 50 }, nameof(CoolerSpecification.MaxTdpRating)),
+            "accessory" => (original, ((AccessorySpecification)original) with { Details = "Corrupted accessory details" }, nameof(AccessorySpecification.Details)),
+            _ => throw new ArgumentException($"Unknown discriminator {discriminator}")
+        };
+    }
+
     #region 1. CreateProductRequest Polymorphic Deserialization for all 9 subtypes
 
     [Theory]
@@ -78,7 +107,7 @@ public class CatalogJsonContractTests
         deserialized!.ComponentType.Should().Be(componentType);
         deserialized.Specifications.Should().NotBeNull();
         deserialized.Specifications.Should().BeOfType(expectedType);
-        deserialized.Specifications.Should().BeEquivalentTo(originalSpec);
+        AssertSpecificationsEquivalent(deserialized.Specifications, originalSpec);
 
         // Map to command without data loss
         var command = new CreateProductCommand(
@@ -95,7 +124,7 @@ public class CatalogJsonContractTests
             Specifications: deserialized.Specifications
         );
 
-        command.Specifications.Should().BeEquivalentTo(originalSpec);
+        AssertSpecificationsEquivalent(command.Specifications, originalSpec);
     }
 
     #endregion
@@ -141,13 +170,42 @@ public class CatalogJsonContractTests
 
         roundTripped.Should().NotBeNull();
         roundTripped!.Specifications.Should().BeOfType(expectedType);
-        roundTripped.Specifications.Should().BeEquivalentTo(originalSpec);
+        AssertSpecificationsEquivalent(roundTripped.Specifications, originalSpec);
         roundTripped.ComponentType.Should().Be(componentType);
     }
 
     #endregion
 
-    #region 3. UpdateProductRequest IsActive Wire Contract
+    #region 3. Negative-Control Regression for Assertion Equivalency
+
+    [Theory]
+    [InlineData("cpu", "CoreCount")]
+    [InlineData("motherboard", "M2Slots")]
+    [InlineData("gpu", "VramGb")]
+    [InlineData("ram", "CapacityGb")]
+    [InlineData("storage", "ReadSpeedMBs")]
+    [InlineData("psu", "Wattage")]
+    [InlineData("case", "MaxGpuLengthMm")]
+    [InlineData("cooler", "MaxTdpRating")]
+    [InlineData("accessory", "Details")]
+    public void AssertSpecificationsEquivalent_WhenDerivedFieldDiffers_DetectsCorruptionAndMentionsField(string discriminator, string expectedFieldName)
+    {
+        var (expectedSpec, actualSpec, modifiedFieldName) = CreateCorruptedSpecificationPair(discriminator);
+        modifiedFieldName.Should().Be(expectedFieldName);
+
+        using var scope = new FluentAssertions.Execution.AssertionScope();
+        AssertSpecificationsEquivalent(actualSpec, expectedSpec);
+        var failures = scope.Discard();
+
+        failures.Should().NotBeEmpty(
+            $"Equivalency assertion must reject corrupted {discriminator} specification when {expectedFieldName} is changed");
+        failures.Should().Contain(f => f.Contains(expectedFieldName, StringComparison.OrdinalIgnoreCase),
+            $"Failure message must mention the modified field '{expectedFieldName}'. Actual failures: {string.Join("; ", failures)}");
+    }
+
+    #endregion
+
+    #region 4. UpdateProductRequest IsActive Wire Contract
 
     [Theory]
     [InlineData(true)]
@@ -257,10 +315,10 @@ public class CatalogJsonContractTests
 
     #endregion
 
-    #region 4. Unknown or Missing Discriminator Rejection
+    #region 5. Unknown or Missing Discriminator Rejection
 
     [Fact]
-    public void Deserialize_WhenUnknownDiscriminator_ThrowsJsonExceptionOrNotSupportedException()
+    public void Deserialize_WhenUnknownDiscriminator_ThrowsJsonException()
     {
         var json = """
         {
@@ -271,12 +329,11 @@ public class CatalogJsonContractTests
 
         var act = () => JsonSerializer.Deserialize<ComponentSpecification>(json, _jsonOptions);
 
-        act.Should().Throw<Exception>()
-            .Where(e => e is JsonException || e is NotSupportedException);
+        act.Should().Throw<JsonException>("unknown $type discriminator must be rejected with JsonException");
     }
 
     [Fact]
-    public void Deserialize_WhenMissingDiscriminator_ThrowsJsonExceptionOrNotSupportedException()
+    public void Deserialize_WhenMissingDiscriminator_ThrowsNotSupportedException()
     {
         var json = """
         {
@@ -287,34 +344,59 @@ public class CatalogJsonContractTests
 
         var act = () => JsonSerializer.Deserialize<ComponentSpecification>(json, _jsonOptions);
 
-        act.Should().Throw<Exception>()
-            .Where(e => e is JsonException || e is NotSupportedException);
+        act.Should().Throw<NotSupportedException>("missing polymorphic $type discriminator must be rejected with NotSupportedException");
     }
 
     #endregion
 
-    #region 5. Null Specifications Handling at Boundary & Validator
+    #region 6. Null Specifications Handling at Serializer Boundary & Validator Pipeline
 
     [Fact]
-    public void CreateProductRequest_WhenSpecificationsIsNull_IsCaughtByCommandValidator()
+    public void CreateProductRequest_WhenSpecificationsIsNull_DeserializesAndIsCaughtByCommandValidator()
     {
+        // 1. JSON create request with specifications: null (serializer boundary)
+        var categoryId = Guid.NewGuid();
+        var json = $$"""
+        {
+            "categoryId": "{{categoryId}}",
+            "name": "No Spec CPU",
+            "sku": "CPU-NOSPEC",
+            "brand": "Brand",
+            "price": 200,
+            "originalPrice": null,
+            "stockQuantity": 10,
+            "imageUrl": "img.jpg",
+            "additionalImages": null,
+            "componentType": 1,
+            "specifications": null
+        }
+        """;
+
+        // 2. Deserialize CreateProductRequest using MVC options
+        var request = JsonSerializer.Deserialize<CreateProductRequest>(json, _jsonOptions);
+        request.Should().NotBeNull();
+        request!.Specifications.Should().BeNull();
+
+        // 3. Map to CreateProductCommand (in-process mapping test, not full HTTP model-binding)
         var command = new CreateProductCommand(
-            CategoryId: Guid.NewGuid(),
-            Name: "No Spec CPU",
-            Sku: "CPU-NOSPEC",
-            Brand: "Brand",
-            Price: 200,
-            OriginalPrice: null,
-            StockQuantity: 10,
-            ImageUrl: "img.jpg",
-            AdditionalImages: null,
-            ComponentType: ComponentType.Cpu,
-            Specifications: null!
+            CategoryId: request.CategoryId,
+            Name: request.Name,
+            Sku: request.Sku,
+            Brand: request.Brand,
+            Price: request.Price,
+            OriginalPrice: request.OriginalPrice,
+            StockQuantity: request.StockQuantity,
+            ImageUrl: request.ImageUrl,
+            AdditionalImages: request.AdditionalImages,
+            ComponentType: request.ComponentType,
+            Specifications: request.Specifications
         );
 
+        // 4. Validate with CreateProductCommandValidator
         var validator = new CreateProductCommandValidator();
         var result = validator.TestValidate(command);
 
+        // 5. Assert validation error for Specifications
         result.ShouldHaveValidationErrorFor(c => c.Specifications);
     }
 

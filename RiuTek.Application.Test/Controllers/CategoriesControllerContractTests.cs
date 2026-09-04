@@ -115,6 +115,26 @@ public class CategoriesControllerContractTests : IDisposable
         auth!.Policy.Should().Be(Policies.ContentManager);
     }
 
+    [Fact]
+    public void GetTree_DeclaresProducesResponseTypeBadRequest()
+    {
+        var method = typeof(CategoriesController).GetMethod(nameof(CategoriesController.GetTree));
+        method.Should().NotBeNull();
+
+        var produces = method!.GetCustomAttributes<ProducesResponseTypeAttribute>();
+        produces.Should().Contain(a => a.StatusCode == StatusCodes.Status400BadRequest);
+    }
+
+    [Fact]
+    public void Create_DeclaresProducesResponseTypeNotFound()
+    {
+        var method = typeof(CategoriesController).GetMethod(nameof(CategoriesController.Create));
+        method.Should().NotBeNull();
+
+        var produces = method!.GetCustomAttributes<ProducesResponseTypeAttribute>();
+        produces.Should().Contain(a => a.StatusCode == StatusCodes.Status404NotFound);
+    }
+
     #endregion
 
     #region Action Mapping & Behavior Tests
@@ -312,6 +332,46 @@ public class CategoriesControllerContractTests : IDisposable
         var conflictResult = actionResult as ConflictObjectResult;
         conflictResult.Should().NotBeNull();
         conflictResult!.StatusCode.Should().Be(StatusCodes.Status409Conflict);
+    }
+
+    [Theory]
+    [InlineData("Category.InvalidHierarchy", "Invalid category hierarchy structure")]
+    [InlineData("Category.CycleDetected", "Cycle detected in category hierarchy")]
+    public async Task GetTree_WhenInvalidHierarchyOrCycle_ReturnsBadRequestStatus_WithErrorCodeAndDescription(string errorCode, string errorDescription)
+    {
+        using var cts = new CancellationTokenSource();
+        _senderMock.Setup(s => s.Send(It.IsAny<GetCategoryTreeQuery>(), cts.Token))
+            .ReturnsAsync(Result.Failure<List<CategoryDto>>(Error.Validation(errorCode, errorDescription)));
+
+        var actionResult = await _controller.GetTree(cts.Token);
+
+        var badRequestResult = actionResult as BadRequestObjectResult;
+        badRequestResult.Should().NotBeNull();
+        badRequestResult!.StatusCode.Should().Be(StatusCodes.Status400BadRequest);
+        badRequestResult.Value.Should().BeEquivalentTo(new { Code = errorCode, Description = errorDescription });
+
+        _senderMock.Verify(s => s.Send(It.IsAny<GetCategoryTreeQuery>(), cts.Token), Times.Once);
+    }
+
+    [Fact]
+    public async Task Create_WhenParentNotFound_ReturnsNotFoundStatus_DoesNotReturnCreatedAtAction()
+    {
+        using var cts = new CancellationTokenSource();
+        var parentId = Guid.NewGuid();
+        var request = new CreateCategoryRequest("Child Category", ComponentType.Cpu, "Desc", parentId);
+
+        _senderMock.Setup(s => s.Send(It.Is<CreateCategoryCommand>(c => c.ParentId == parentId), cts.Token))
+            .ReturnsAsync(Result.Failure<CategoryDto>(Error.NotFound("Category.ParentNotFound", "Parent category not found")));
+
+        var actionResult = await _controller.Create(request, cts.Token);
+
+        actionResult.Should().NotBeOfType<CreatedAtActionResult>();
+        var notFoundResult = actionResult as NotFoundObjectResult;
+        notFoundResult.Should().NotBeNull();
+        notFoundResult!.StatusCode.Should().Be(StatusCodes.Status404NotFound);
+        notFoundResult.Value.Should().BeEquivalentTo(new { Code = "Category.ParentNotFound", Description = "Parent category not found" });
+
+        _senderMock.Verify(s => s.Send(It.IsAny<CreateCategoryCommand>(), cts.Token), Times.Once);
     }
 
     #endregion

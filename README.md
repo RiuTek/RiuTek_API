@@ -86,14 +86,14 @@ dotnet run --project RiuTek.API --no-launch-profile
 
 | Method / Route | Action | Quyền hạn | Thành công | Lỗi có thể trả về |
 |---|---|---|---|---|
-| `GET api/v1/products` | `GetProducts` | `[AllowAnonymous]` | `200 OK` (`PagedResult<ProductSummaryDto>`) | `400` |
+| `GET api/v1/products` | `GetProducts` | `[AllowAnonymous]` | `200 OK` (`PagedResult<ProductSummaryDto>`) | `400`, `404` |
 | `GET api/v1/products/slug/{slug}` | `GetBySlug` | `[AllowAnonymous]` | `200 OK` (`ProductDto`) | `400`, `404` |
 | `GET api/v1/products/{id:guid}` | `GetById` | `ContentManager` | `200 OK` (`ProductDto`) | `400`, `401`, `403`, `404` |
-| `POST api/v1/products` | `Create` | `ContentManager` | `201 Created` (`ProductDto` + Location) | `400`, `401`, `403`, `409` |
+| `POST api/v1/products` | `Create` | `ContentManager` | `201 Created` (`ProductDto` + Location) | `400`, `401`, `403`, `404`, `409` |
 | `PUT api/v1/products/{id:guid}` | `Update` | `ContentManager` | `200 OK` (`ProductDto`) | `400`, `401`, `403`, `404`, `409` |
-| `GET api/v1/categories` | `GetTree` | `[AllowAnonymous]` | `200 OK` (`List<CategoryDto>`) | |
+| `GET api/v1/categories` | `GetTree` | `[AllowAnonymous]` | `200 OK` (`List<CategoryDto>`) | `400` |
 | `GET api/v1/categories/{id:guid}` | `GetById` | `[AllowAnonymous]` | `200 OK` (`CategoryDto`) | `404` |
-| `POST api/v1/categories` | `Create` | `ContentManager` | `201 Created` (`CategoryDto` + Location) | `400`, `401`, `403`, `409` |
+| `POST api/v1/categories` | `Create` | `ContentManager` | `201 Created` (`CategoryDto` + Location) | `400`, `401`, `403`, `404`, `409` |
 | `PUT api/v1/categories/{id:guid}` | `Update` | `ContentManager` | `200 OK` (`CategoryDto`) | `400`, `401`, `403`, `404`, `409` |
 | `DELETE api/v1/categories/{id:guid}` | `Delete` | `ContentManager` | `204 NoContent` | `400`, `401`, `403`, `404`, `409` |
 
@@ -188,6 +188,6 @@ GET /api/v1/products?pageIndex=1&pageSize=10&searchTerm=intel&componentType=1&mi
 ---
 
 ### 2.3 Giới hạn phạm vi kiểm chứng ở Phase 3.3-B3
-- Các kiểm thử trong Phase 3.3-B3 tập trung vào Controller contract mappings, serialization đa hình JSON 9 subtype, route ambiguity, và endpoint metadata.
-- **Chưa kiểm chứng qua HTTP middleware pipeline đầy đủ** (chưa chạy qua authentication handler hay filter pipeline trên server thật).
+- Các kiểm thử trong Phase 3.3-B3 tập trung vào controller contract tests (mapping, route & error metadata reflection, status/payload verification), polymorphic serializer tests (9 derived component subtypes & negative control regressions), validator tests, route ambiguity tests và endpoint metadata tests.
+- **Chưa kiểm chứng qua full HTTP model-binding và middleware pipeline** (chưa chạy qua authentication handler, model-binding hay filter pipeline trên HTTP runtime server thật).
 - **Chưa kiểm chứng tích hợp cơ sở dữ liệu thật** (PostgreSQL / EF SQL translation). Các nội dung này sẽ được thực hiện tại Integration Gate tiếp theo.

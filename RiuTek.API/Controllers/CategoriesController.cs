@@ -14,6 +14,7 @@ public class CategoriesController : ApiControllerBase
     [HttpGet]
     [AllowAnonymous]
     [ProducesResponseType(typeof(List<CategoryDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
     public async Task<IActionResult> GetTree(CancellationToken cancellationToken = default)
     {
         var result = await Mediator.Send(new GetCategoryTreeQuery(), cancellationToken);
@@ -36,6 +37,7 @@ public class CategoriesController : ApiControllerBase
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<IActionResult> Create(
         [FromBody] CreateCategoryRequest request,
