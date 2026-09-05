@@ -10,6 +10,7 @@ namespace RiuTek.API
             // Add services to the container.
 
             builder.Services.AddControllers();
+            builder.Services.AddHealthChecks();
             // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
             builder.Services.AddOpenApi();
 
@@ -29,7 +30,7 @@ namespace RiuTek.API
             app.UseAuthentication();
             app.UseAuthorization();
 
-
+            app.MapHealthChecks("/health/live").AllowAnonymous();
             app.MapControllers();
 
             app.Run();

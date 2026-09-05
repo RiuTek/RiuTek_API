@@ -191,3 +191,47 @@ GET /api/v1/products?pageIndex=1&pageSize=10&searchTerm=intel&componentType=1&mi
 - Các kiểm thử trong Phase 3.3-B3 tập trung vào controller contract tests (mapping, route & error metadata reflection, status/payload verification), polymorphic serializer tests (9 derived component subtypes & negative control regressions), validator tests, route ambiguity tests và endpoint metadata tests.
 - **Chưa kiểm chứng qua full HTTP model-binding và middleware pipeline** (chưa chạy qua authentication handler, model-binding hay filter pipeline trên HTTP runtime server thật).
 - **Chưa kiểm chứng tích hợp cơ sở dữ liệu thật** (PostgreSQL / EF SQL translation). Các nội dung này sẽ được thực hiện tại Integration Gate tiếp theo.
+
+---
+
+## 3. Docker & Kiểm thử Tích hợp (Docker & Integration Testing)
+
+### 3.1 Yêu cầu môi trường & Phân tách kiểm thử
+- **Điều kiện Docker Desktop**: Yêu cầu Docker Desktop đang chạy chế độ Linux containers để build image và chạy integration tests với Testcontainers.
+- **Lệnh chạy Unit Tests** (Độc lập, không cần Docker):
+  ```powershell
+  dotnet test RiuTek.Application.Test/RiuTek.Application.Test.csproj
+  ```
+- **Lệnh chạy Integration Tests** (Yêu cầu Docker Desktop engine running):
+  ```powershell
+  dotnet test RiuTek.API.IntegrationTest/RiuTek.API.IntegrationTest.csproj
+  ```
+
+### 3.2 Docker Image & Liveness Endpoint
+- **Multi-stage Linux Image**: Được đóng gói từ official .NET 10 runtime (`mcr.microsoft.com/dotnet/aspnet:10.0`), chạy dưới quyền user non-root `app` (UID 1654), lắng nghe cổng `8080`.
+- **An toàn bảo mật**: Docker image **không chứa bất kỳ secret hay configuration nhạy cảm nào**. Mọi cấu hình (`ConnectionStrings`, `JwtSettings:SecretKey`, `RedisSettings`) bắt buộc phải được inject tại runtime qua biến môi trường.
+- **Liveness Endpoint (`/health/live`)**:
+  - Endpoint `GET /health/live` là liveness probe chỉ kiểm chứng tiến trình HTTP của API đang sống.
+  - Endpoint này **không** kết nối hay kiểm tra trạng thái của cơ sở dữ liệu PostgreSQL hoặc Redis.
+- **Lệnh build & chạy thử Docker Image local**:
+  ```powershell
+  # 1. Build image từ thư mục gốc của repository
+  docker build -f RiuTek.API/Dockerfile -t riutek-api:local .
+
+  # 2. Chạy container với biến môi trường canary/dummy (không chứa credential thật)
+  docker run -d --name riutek-api-test -p 8080:8080 `
+    -e ConnectionStrings__DefaultConnection="Host=127.0.0.1;Port=5432;Database=riutek_db;Username=postgres;Password=..." `
+    -e JwtSettings__SecretKey="<chuỗi_bí_mật_tối_thiểu_32_bytes_utf8>" `
+    -e RedisSettings__Enabled="false" `
+    riutek-api:local
+
+  # 3. Kiểm tra liveness
+  curl http://localhost:8080/health/live
+  ```
+
+### 3.3 PostgreSQL Testcontainers & Giới hạn phạm vi Phase 3.3-C1
+- **PostgreSQL/pgvector Testcontainer**: Project `RiuTek.API.IntegrationTest` tự động khởi chạy container `pgvector/pgvector:pg17` trên port host ngẫu nhiên, thực thi `MigrateAsync()` để tạo schema, extension `vector`, và HNSW index trên database trắng độc lập cho mục đích kiểm thử.
+- **Phân định môi trường**: PostgreSQL Testcontainer hoàn toàn là môi trường test tạm thời cục bộ/CI. Môi trường production sau này sẽ sử dụng dịch vụ Supabase quản lý tập trung.
+- **Giới hạn phạm vi hiện tại**:
+  - Đã thiết lập nền tảng integration test, migration smoke và public HTTP query smoke.
+  - Chưa triển khai CI/CD (GitHub Actions), Azure Container Registry (ACR), OIDC, Managed Identity, hay kết nối cloud Supabase/Upstash thật trong phase này (sẽ thực hiện tại Phase 6 theo lộ trình kiến trúc).
