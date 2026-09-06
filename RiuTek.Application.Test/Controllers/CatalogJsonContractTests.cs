@@ -20,7 +20,21 @@ public class CatalogJsonContractTests
     public CatalogJsonContractTests()
     {
         var services = new ServiceCollection();
-        services.AddControllers();
+        services.AddControllers()
+            .AddJsonOptions(options =>
+            {
+                var resolver = new System.Text.Json.Serialization.Metadata.DefaultJsonTypeInfoResolver();
+                resolver.Modifiers.Add(typeInfo =>
+                {
+                    if (typeInfo.Type == typeof(ComponentSpecification))
+                    {
+                        typeInfo.PolymorphismOptions = null;
+                    }
+                });
+                options.JsonSerializerOptions.TypeInfoResolver = resolver;
+                options.JsonSerializerOptions.Converters.Add(new RiuTek.API.Serialization.ComponentSpecificationJsonConverter());
+                options.AllowInputFormatterExceptionMessages = false;
+            });
         using var sp = services.BuildServiceProvider();
         _jsonOptions = sp.GetRequiredService<IOptions<JsonOptions>>().Value.JsonSerializerOptions;
     }
@@ -333,7 +347,7 @@ public class CatalogJsonContractTests
     }
 
     [Fact]
-    public void Deserialize_WhenMissingDiscriminator_ThrowsNotSupportedException()
+    public void Deserialize_WhenMissingDiscriminator_ThrowsJsonException()
     {
         var json = """
         {
@@ -344,7 +358,41 @@ public class CatalogJsonContractTests
 
         var act = () => JsonSerializer.Deserialize<ComponentSpecification>(json, _jsonOptions);
 
-        act.Should().Throw<NotSupportedException>("missing polymorphic $type discriminator must be rejected with NotSupportedException");
+        act.Should().Throw<JsonException>("missing polymorphic $type discriminator must be rejected with JsonException");
+    }
+
+    [Theory]
+    [InlineData("null")]
+    [InlineData("123")]
+    [InlineData("\"\"")]
+    [InlineData("\"   \"")]
+    public void Deserialize_WhenInvalidDiscriminatorFormat_ThrowsJsonException(string typeValue)
+    {
+        var json = $$"""
+        {
+            "$type": {{typeValue}},
+            "coreCount": 8
+        }
+        """;
+
+        var act = () => JsonSerializer.Deserialize<ComponentSpecification>(json, _jsonOptions);
+
+        act.Should().Throw<JsonException>("invalid discriminator format must be rejected with JsonException");
+    }
+
+    private record UnsupportedSpecification : ComponentSpecification
+    {
+        public override ComponentType ComponentType => (ComponentType)999;
+    }
+
+    [Fact]
+    public void Serialize_WhenUnsupportedSpecificationSubtype_ThrowsJsonException()
+    {
+        var unsupported = new UnsupportedSpecification();
+
+        var act = () => JsonSerializer.Serialize<ComponentSpecification>(unsupported, _jsonOptions);
+
+        act.Should().Throw<JsonException>("unsupported derived runtime type must fail clearly on write");
     }
 
     #endregion
