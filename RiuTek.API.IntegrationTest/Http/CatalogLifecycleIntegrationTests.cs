@@ -1,4 +1,4 @@
-using System.Data;
+﻿using System.Data;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -32,9 +32,9 @@ public class CatalogLifecycleIntegrationTests : CatalogIntegrationTestBase
     [Fact]
     public async Task Category_HappyLifecycle_EndToEnd_Succeeds()
     {
-        var adminClient = CreateAdminClient();
-        var staffClient = CreateStaffClient();
-        var publicClient = CreatePublicClient();
+        using var adminClient = CreateAdminClient();
+        using var staffClient = CreateStaffClient();
+        using var publicClient = CreatePublicClient();
 
         // 1. Admin creates root category with outer whitespace in Vietnamese
         var createRootRequest = new CreateCategoryRequest(
@@ -44,7 +44,7 @@ public class CatalogLifecycleIntegrationTests : CatalogIntegrationTestBase
             ParentId: null
         );
 
-        var createRootResponse = await adminClient.PostAsJsonAsync("/api/v1/categories", createRootRequest);
+        using var createRootResponse = await adminClient.PostAsJsonAsync("/api/v1/categories", createRootRequest);
 
         // 2. Assert 201 Created and category contract normalization
         createRootResponse.StatusCode.Should().Be(HttpStatusCode.Created);
@@ -70,7 +70,7 @@ public class CatalogLifecycleIntegrationTests : CatalogIntegrationTestBase
             ParentId: rootDto.Id
         );
 
-        var createChildResponse = await staffClient.PostAsJsonAsync("/api/v1/categories", createChildRequest);
+        using var createChildResponse = await staffClient.PostAsJsonAsync("/api/v1/categories", createChildRequest);
 
         // 4. Assert child 201 Created and proper parent relationship
         createChildResponse.StatusCode.Should().Be(HttpStatusCode.Created);
@@ -84,7 +84,7 @@ public class CatalogLifecycleIntegrationTests : CatalogIntegrationTestBase
         childDto.ComponentType.Should().Be(ComponentType.Cpu);
 
         // 5. Guest/public GET child category by Id
-        var getChildResponse = await publicClient.GetAsync($"/api/v1/categories/{childDto.Id}");
+        using var getChildResponse = await publicClient.GetAsync($"/api/v1/categories/{childDto.Id}");
         getChildResponse.StatusCode.Should().Be(HttpStatusCode.OK);
         var fetchedChild = await getChildResponse.Content.ReadFromJsonAsync<CategoryDto>(JsonOptions);
         fetchedChild.Should().NotBeNull();
@@ -94,21 +94,30 @@ public class CatalogLifecycleIntegrationTests : CatalogIntegrationTestBase
         fetchedChild.Slug.Should().Be("cpu-do-hoa");
 
         // 6. Guest/public GET category tree
-        var getTreeResponse = await publicClient.GetAsync("/api/v1/categories");
+        using var getTreeResponse = await publicClient.GetAsync("/api/v1/categories");
         getTreeResponse.StatusCode.Should().Be(HttpStatusCode.OK);
         var tree = await getTreeResponse.Content.ReadFromJsonAsync<List<CategoryDto>>(JsonOptions);
         tree.Should().NotBeNull();
 
-        var rootInTree = tree!.FirstOrDefault(c => c.Id == rootDto.Id);
-        rootInTree.Should().NotBeNull("Root category must exist at the top level of the category tree");
-        rootInTree!.Slug.Should().Be("bo-vi-xu-ly");
+        tree.Should().ContainSingle(c => c.Id == rootDto.Id, "Top level of category tree must contain exactly the root test category");
+        var rootInTree = tree!.Single();
+        rootInTree.Id.Should().Be(rootDto.Id);
+        rootInTree.Slug.Should().Be("bo-vi-xu-ly");
         rootInTree.ComponentType.Should().Be(ComponentType.Cpu);
-        rootInTree.SubCategories.Should().ContainSingle(c => c.Id == childDto.Id);
+        rootInTree.SubCategories.Should().ContainSingle(c => c.Id == childDto.Id, "Root category must contain exactly the child test category");
 
-        var childInTree = rootInTree.SubCategories.Single(c => c.Id == childDto.Id);
+        var childInTree = rootInTree.SubCategories.Single();
+        childInTree.Id.Should().Be(childDto.Id);
         childInTree.ParentId.Should().Be(rootDto.Id);
         childInTree.Slug.Should().Be("cpu-do-hoa");
         childInTree.ComponentType.Should().Be(ComponentType.Cpu);
+        childInTree.SubCategories.Should().BeEmpty();
+
+        // Flatten all category IDs across the tree and assert exact cardinality without duplicates
+        var allTreeIds = tree.Select(c => c.Id).Concat(tree.SelectMany(c => c.SubCategories).Select(c => c.Id)).ToList();
+        allTreeIds.Should().HaveCount(2);
+        allTreeIds.Should().OnlyHaveUniqueItems();
+        allTreeIds.Should().BeEquivalentTo(new[] { rootDto.Id, childDto.Id });
 
         // 7. Staff updates child category
         var updateChildRequest = new UpdateCategoryRequest(
@@ -118,7 +127,7 @@ public class CatalogLifecycleIntegrationTests : CatalogIntegrationTestBase
             ParentId: rootDto.Id
         );
 
-        var updateChildResponse = await staffClient.PutAsJsonAsync($"/api/v1/categories/{childDto.Id}", updateChildRequest);
+        using var updateChildResponse = await staffClient.PutAsJsonAsync($"/api/v1/categories/{childDto.Id}", updateChildRequest);
 
         // 8. Assert update response: 200 OK, normalized slug and retained IDs
         updateChildResponse.StatusCode.Should().Be(HttpStatusCode.OK);
@@ -132,7 +141,7 @@ public class CatalogLifecycleIntegrationTests : CatalogIntegrationTestBase
         updatedChildDto.ComponentType.Should().Be(ComponentType.Cpu);
 
         // 9. Public GET updated child to prove persistence across requests
-        var getUpdatedChildResponse = await publicClient.GetAsync($"/api/v1/categories/{childDto.Id}");
+        using var getUpdatedChildResponse = await publicClient.GetAsync($"/api/v1/categories/{childDto.Id}");
         getUpdatedChildResponse.StatusCode.Should().Be(HttpStatusCode.OK);
         var persistedChild = await getUpdatedChildResponse.Content.ReadFromJsonAsync<CategoryDto>(JsonOptions);
         persistedChild.Should().NotBeNull();
@@ -140,25 +149,25 @@ public class CatalogLifecycleIntegrationTests : CatalogIntegrationTestBase
         persistedChild.Name.Should().Be("CPU Cao Cấp");
 
         // 10. Admin DELETE child category -> 204 NoContent, empty body
-        var deleteChildResponse = await adminClient.DeleteAsync($"/api/v1/categories/{childDto.Id}");
+        using var deleteChildResponse = await adminClient.DeleteAsync($"/api/v1/categories/{childDto.Id}");
         deleteChildResponse.StatusCode.Should().Be(HttpStatusCode.NoContent);
         var childDeleteBody = await deleteChildResponse.Content.ReadAsStringAsync();
         childDeleteBody.Should().BeEmpty();
 
         // 11. Public GET deleted child -> 404 with exact Category.NotFound error
-        var getDeletedChildResponse = await publicClient.GetAsync($"/api/v1/categories/{childDto.Id}");
+        using var getDeletedChildResponse = await publicClient.GetAsync($"/api/v1/categories/{childDto.Id}");
         getDeletedChildResponse.StatusCode.Should().Be(HttpStatusCode.NotFound);
         var childError = await getDeletedChildResponse.Content.ReadFromJsonAsync<BusinessErrorResponse>(JsonOptions);
         childError.Should().NotBeNull();
         childError!.Code.Should().Be("Category.NotFound");
 
         // 12. Admin DELETE root category -> 204 NoContent; public GET root -> 404 Category.NotFound
-        var deleteRootResponse = await adminClient.DeleteAsync($"/api/v1/categories/{rootDto.Id}");
+        using var deleteRootResponse = await adminClient.DeleteAsync($"/api/v1/categories/{rootDto.Id}");
         deleteRootResponse.StatusCode.Should().Be(HttpStatusCode.NoContent);
         var rootDeleteBody = await deleteRootResponse.Content.ReadAsStringAsync();
         rootDeleteBody.Should().BeEmpty();
 
-        var getDeletedRootResponse = await publicClient.GetAsync($"/api/v1/categories/{rootDto.Id}");
+        using var getDeletedRootResponse = await publicClient.GetAsync($"/api/v1/categories/{rootDto.Id}");
         getDeletedRootResponse.StatusCode.Should().Be(HttpStatusCode.NotFound);
         var rootError = await getDeletedRootResponse.Content.ReadFromJsonAsync<BusinessErrorResponse>(JsonOptions);
         rootError.Should().NotBeNull();
@@ -177,12 +186,12 @@ public class CatalogLifecycleIntegrationTests : CatalogIntegrationTestBase
     [Fact]
     public async Task Product_HappyLifecycle_EndToEnd_AndJsonbPersistence_Succeeds()
     {
-        var adminClient = CreateAdminClient();
-        var staffClient = CreateStaffClient();
-        var publicClient = CreatePublicClient();
+        using var adminClient = CreateAdminClient();
+        using var staffClient = CreateStaffClient();
+        using var publicClient = CreatePublicClient();
 
         // 6.1 Create: First create a valid CPU category
-        var catResponse = await adminClient.PostAsJsonAsync("/api/v1/categories", new CreateCategoryRequest(
+        using var catResponse = await adminClient.PostAsJsonAsync("/api/v1/categories", new CreateCategoryRequest(
             Name: "CPU Bộ Vi Xử Lý",
             ComponentType: ComponentType.Cpu,
             Description: "Danh mục cho CPU",
@@ -224,7 +233,7 @@ public class CatalogLifecycleIntegrationTests : CatalogIntegrationTestBase
             Specifications: initialSpec
         );
 
-        var createProductResponse = await adminClient.PostAsJsonAsync("/api/v1/products", createProductRequest);
+        using var createProductResponse = await adminClient.PostAsJsonAsync("/api/v1/products", createProductRequest);
 
         // Assert 201 Created and normalized fields
         createProductResponse.StatusCode.Should().Be(HttpStatusCode.Created);
@@ -265,7 +274,7 @@ public class CatalogLifecycleIntegrationTests : CatalogIntegrationTestBase
         createProductResponse.Headers.Location!.ToString().Should().Contain($"/api/v1/Products/{createdProduct.Id}");
 
         // 6.2 Read: Guest by slug & Admin by Id
-        var guestBySlugResponse = await publicClient.GetAsync($"/api/v1/products/slug/{createdProduct.Slug}");
+        using var guestBySlugResponse = await publicClient.GetAsync($"/api/v1/products/slug/{createdProduct.Slug}");
         guestBySlugResponse.StatusCode.Should().Be(HttpStatusCode.OK);
         var guestProduct = await guestBySlugResponse.Content.ReadFromJsonAsync<ProductDto>(JsonOptions);
         guestProduct.Should().NotBeNull();
@@ -273,7 +282,7 @@ public class CatalogLifecycleIntegrationTests : CatalogIntegrationTestBase
         guestProduct.Sku.Should().Be(createdProduct.Sku);
         guestProduct.Slug.Should().Be(createdProduct.Slug);
 
-        var adminByIdResponse = await adminClient.GetAsync($"/api/v1/products/{createdProduct.Id}");
+        using var adminByIdResponse = await adminClient.GetAsync($"/api/v1/products/{createdProduct.Id}");
         adminByIdResponse.StatusCode.Should().Be(HttpStatusCode.OK);
         var adminProduct = await adminByIdResponse.Content.ReadFromJsonAsync<ProductDto>(JsonOptions);
         adminProduct.Should().NotBeNull();
@@ -310,7 +319,7 @@ public class CatalogLifecycleIntegrationTests : CatalogIntegrationTestBase
             Specifications: updatedSpec
         );
 
-        var updateProductResponse = await staffClient.PutAsJsonAsync($"/api/v1/products/{createdProduct.Id}", updateProductRequest);
+        using var updateProductResponse = await staffClient.PutAsJsonAsync($"/api/v1/products/{createdProduct.Id}", updateProductRequest);
         updateProductResponse.StatusCode.Should().Be(HttpStatusCode.OK);
         var updatedProduct = await updateProductResponse.Content.ReadFromJsonAsync<ProductDto>(JsonOptions);
         updatedProduct.Should().NotBeNull();
@@ -330,35 +339,35 @@ public class CatalogLifecycleIntegrationTests : CatalogIntegrationTestBase
         updatedCpuSpec.HasIntegratedGpu.Should().BeFalse();
 
         // Old slug should now return 404 Product.NotFound
-        var getOldSlugResponse = await publicClient.GetAsync($"/api/v1/products/slug/{createdProduct.Slug}");
+        using var getOldSlugResponse = await publicClient.GetAsync($"/api/v1/products/slug/{createdProduct.Slug}");
         getOldSlugResponse.StatusCode.Should().Be(HttpStatusCode.NotFound);
         var oldSlugError = await getOldSlugResponse.Content.ReadFromJsonAsync<BusinessErrorResponse>(JsonOptions);
         oldSlugError.Should().NotBeNull();
         oldSlugError!.Code.Should().Be("Product.NotFound");
 
         // New slug returns 200 with IsActive = false
-        var getNewSlugResponse = await publicClient.GetAsync($"/api/v1/products/slug/{updatedProduct.Slug}");
+        using var getNewSlugResponse = await publicClient.GetAsync($"/api/v1/products/slug/{updatedProduct.Slug}");
         getNewSlugResponse.StatusCode.Should().Be(HttpStatusCode.OK);
         var newSlugProduct = await getNewSlugResponse.Content.ReadFromJsonAsync<ProductDto>(JsonOptions);
         newSlugProduct.Should().NotBeNull();
         newSlugProduct!.IsActive.Should().BeFalse();
 
         // Visibility assertion 1: Default public list contains inactive product (IsActive is business state, not visibility)
-        var defaultListResponse = await publicClient.GetAsync("/api/v1/products");
+        using var defaultListResponse = await publicClient.GetAsync("/api/v1/products");
         defaultListResponse.StatusCode.Should().Be(HttpStatusCode.OK);
         var defaultPagedResult = await defaultListResponse.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions);
         defaultPagedResult.Should().NotBeNull();
         defaultPagedResult!.Items.Should().Contain(p => p.Id == createdProduct.Id && !p.IsActive);
 
         // Visibility assertion 2: Filter isActive=false contains inactive product
-        var inactiveListResponse = await publicClient.GetAsync("/api/v1/products?isActive=false");
+        using var inactiveListResponse = await publicClient.GetAsync("/api/v1/products?isActive=false");
         inactiveListResponse.StatusCode.Should().Be(HttpStatusCode.OK);
         var inactivePagedResult = await inactiveListResponse.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions);
         inactivePagedResult.Should().NotBeNull();
         inactivePagedResult!.Items.Should().Contain(p => p.Id == createdProduct.Id);
 
         // Visibility assertion 3: Filter isActive=true does NOT contain inactive product
-        var activeListResponse = await publicClient.GetAsync("/api/v1/products?isActive=true");
+        using var activeListResponse = await publicClient.GetAsync("/api/v1/products?isActive=true");
         activeListResponse.StatusCode.Should().Be(HttpStatusCode.OK);
         var activePagedResult = await activeListResponse.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions);
         activePagedResult.Should().NotBeNull();
