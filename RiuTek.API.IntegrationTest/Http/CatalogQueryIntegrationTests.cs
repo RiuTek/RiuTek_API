@@ -32,25 +32,58 @@ public class CatalogQueryIntegrationTests : CatalogIntegrationTestBase
         var catalog = await SeedStandardCatalogAsync();
         using var publicClient = CreatePublicClient();
 
-        // 1. SearchTerm = "  intel  " (matches Name, Sku, Brand)
-        using var searchIntelResp = await publicClient.GetAsync($"/api/v1/products?searchTerm={Uri.EscapeDataString("  intel  ")}");
-        searchIntelResp.StatusCode.Should().Be(HttpStatusCode.OK);
-        var searchIntelResult = (await searchIntelResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
-        searchIntelResult.TotalCount.Should().Be(3);
-        searchIntelResult.Items.Should().HaveCount(3);
-        searchIntelResult.Items.Select(p => p.Id).Should().BeEquivalentTo([catalog.P1.Id, catalog.P2.Id, catalog.P7.Id]);
-        searchIntelResult.Items.Should().AllSatisfy(p => p.Brand.Should().Be("Intel"));
+        // 1. Name-only search: "  box  " (token only in P1 Name "Intel Core i5-12400F Box")
+        using var searchNameResp = await publicClient.GetAsync($"/api/v1/products?searchTerm={Uri.EscapeDataString("  box  ")}");
+        searchNameResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var searchNameResult = (await searchNameResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        searchNameResult.TotalCount.Should().Be(1);
+        searchNameResult.Items.Should().HaveCount(1);
+        searchNameResult.Items.Single().Id.Should().Be(catalog.P1.Id);
+        searchNameResult.Items.Single().Name.ToLowerInvariant().Should().Contain("box");
 
-        // 2. SearchTerm = "  token999  " (matches P3 SKU SKU-CPU-AMD-7600-TOKEN999)
-        using var searchTokenResp = await publicClient.GetAsync($"/api/v1/products?searchTerm={Uri.EscapeDataString("  token999  ")}");
-        searchTokenResp.StatusCode.Should().Be(HttpStatusCode.OK);
-        var searchTokenResult = (await searchTokenResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
-        searchTokenResult.TotalCount.Should().Be(1);
-        searchTokenResult.Items.Should().HaveCount(1);
-        searchTokenResult.Items.Single().Id.Should().Be(catalog.P3.Id);
-        searchTokenResult.Items.Single().Sku.Should().Be(catalog.P3.Sku);
+        // 2. SKU-only search: "  token999  " (token only in P3 SKU "SKU-CPU-AMD-7600-TOKEN999")
+        using var searchSkuResp = await publicClient.GetAsync($"/api/v1/products?searchTerm={Uri.EscapeDataString("  token999  ")}");
+        searchSkuResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var searchSkuResult = (await searchSkuResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        searchSkuResult.TotalCount.Should().Be(1);
+        searchSkuResult.Items.Should().HaveCount(1);
+        searchSkuResult.Items.Single().Id.Should().Be(catalog.P3.Id);
+        searchSkuResult.Items.Single().Sku.Should().Be(catalog.P3.Sku);
 
-        // 3. Brand = "  intel  " (exact brand match, trimmed, case-insensitive)
+        // 3. Brand-only search: "  asustek  " (token only in P6 Brand "ASUSTeK", not in Name or SKU)
+        using var searchBrandResp = await publicClient.GetAsync($"/api/v1/products?searchTerm={Uri.EscapeDataString("  asustek  ")}");
+        searchBrandResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var searchBrandResult = (await searchBrandResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        searchBrandResult.TotalCount.Should().Be(1);
+        searchBrandResult.Items.Should().HaveCount(1);
+        searchBrandResult.Items.Single().Id.Should().Be(catalog.P6.Id);
+        searchBrandResult.Items.Single().Brand.Should().Be("ASUSTeK");
+
+        // 4. Whitespace-only search: "%20%20" (must ignore search and return all 7 products)
+        using var searchWsResp = await publicClient.GetAsync("/api/v1/products?searchTerm=%20%20");
+        searchWsResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var searchWsResult = (await searchWsResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        searchWsResult.TotalCount.Should().Be(7);
+        searchWsResult.Items.Should().HaveCount(7);
+        searchWsResult.Items.Select(p => p.Id).Should().BeEquivalentTo(
+            [catalog.P1.Id, catalog.P2.Id, catalog.P3.Id, catalog.P4.Id, catalog.P5.Id, catalog.P6.Id, catalog.P7.Id]);
+
+        // 5. Exact Brand filter:
+        // Case A: "  asustek  " -> exact P6
+        using var brandAsustekResp = await publicClient.GetAsync($"/api/v1/products?brand={Uri.EscapeDataString("  asustek  ")}");
+        brandAsustekResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var brandAsustekResult = (await brandAsustekResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        brandAsustekResult.TotalCount.Should().Be(1);
+        brandAsustekResult.Items.Single().Id.Should().Be(catalog.P6.Id);
+
+        // Case B: "  asus  " -> exact P5 (P6 has Brand ASUSTeK)
+        using var brandAsusResp = await publicClient.GetAsync($"/api/v1/products?brand={Uri.EscapeDataString("  asus  ")}");
+        brandAsusResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var brandAsusResult = (await brandAsusResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        brandAsusResult.TotalCount.Should().Be(1);
+        brandAsusResult.Items.Single().Id.Should().Be(catalog.P5.Id);
+
+        // Case C: "  intel  " -> exact P1, P2, P7
         using var brandIntelResp = await publicClient.GetAsync($"/api/v1/products?brand={Uri.EscapeDataString("  intel  ")}");
         brandIntelResp.StatusCode.Should().Be(HttpStatusCode.OK);
         var brandIntelResult = (await brandIntelResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
@@ -59,19 +92,22 @@ public class CatalogQueryIntegrationTests : CatalogIntegrationTestBase
         brandIntelResult.Items.Select(p => p.Id).Should().BeEquivalentTo([catalog.P1.Id, catalog.P2.Id, catalog.P7.Id]);
         brandIntelResult.Items.Should().AllSatisfy(p => p.Brand.Should().Be("Intel"));
 
-        // 4. Negative Brand substring: "inte" must not match "Intel"
-        using var brandSubResp1 = await publicClient.GetAsync("/api/v1/products?brand=inte");
-        brandSubResp1.StatusCode.Should().Be(HttpStatusCode.OK);
-        var brandSubResult1 = (await brandSubResp1.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
-        brandSubResult1.TotalCount.Should().Be(0);
-        brandSubResult1.Items.Should().BeEmpty();
+        // Case D: Negative substring brand "inte" -> 0 matches
+        using var brandSubResp = await publicClient.GetAsync("/api/v1/products?brand=inte");
+        brandSubResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var brandSubResult = (await brandSubResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        brandSubResult.TotalCount.Should().Be(0);
+        brandSubResult.Items.Should().BeEmpty();
 
-        // 5. Negative Brand substring: "ASU" must not match "ASUS"
-        using var brandSubResp2 = await publicClient.GetAsync("/api/v1/products?brand=ASU");
-        brandSubResp2.StatusCode.Should().Be(HttpStatusCode.OK);
-        var brandSubResult2 = (await brandSubResp2.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
-        brandSubResult2.TotalCount.Should().Be(0);
-        brandSubResult2.Items.Should().BeEmpty();
+        // 6. Metadata and representative payload assertions on whitespace response
+        searchWsResult.PageIndex.Should().Be(1);
+        searchWsResult.PageSize.Should().Be(20);
+        searchWsResult.TotalPages.Should().Be(1);
+        var p1Summary = searchWsResult.Items.Single(p => p.Id == catalog.P1.Id);
+        p1Summary.CategoryName.Should().Be("Intel & AMD Processors Root");
+        p1Summary.Name.Should().Be("Intel Core i5-12400F Box");
+        p1Summary.Sku.Should().Be("SKU-CPU-INTEL-12400F");
+        p1Summary.Brand.Should().Be("Intel");
     }
 
     [Fact]
@@ -80,7 +116,35 @@ public class CatalogQueryIntegrationTests : CatalogIntegrationTestBase
         var catalog = await SeedStandardCatalogAsync();
         using var publicClient = CreatePublicClient();
 
-        // 1. MinPrice = 6M and MaxPrice = 10M (inclusive bounds: P3=6M, P5=8M, P6=8M, P2=10M)
+        // 1. Default visibility without isActive: includes both active (5) and inactive (P4, P7) -> 7 total
+        using var defaultResp = await publicClient.GetAsync("/api/v1/products");
+        defaultResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var defaultResult = (await defaultResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        defaultResult.TotalCount.Should().Be(7);
+        defaultResult.Items.Should().HaveCount(7);
+        defaultResult.Items.Select(p => p.Id).Should().BeEquivalentTo(
+            [catalog.P1.Id, catalog.P2.Id, catalog.P3.Id, catalog.P4.Id, catalog.P5.Id, catalog.P6.Id, catalog.P7.Id]);
+        defaultResult.Items.Where(p => p.IsActive).Should().HaveCount(5);
+        defaultResult.Items.Where(p => !p.IsActive).Select(p => p.Id).Should().BeEquivalentTo([catalog.P4.Id, catalog.P7.Id]);
+
+        // 2. ComponentType = Cpu: P1, P2, P3, P4, P7
+        using var cpuResp = await publicClient.GetAsync("/api/v1/products?componentType=Cpu");
+        cpuResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var cpuResult = (await cpuResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        cpuResult.TotalCount.Should().Be(5);
+        cpuResult.Items.Select(p => p.Id).Should().BeEquivalentTo(
+            [catalog.P1.Id, catalog.P2.Id, catalog.P3.Id, catalog.P4.Id, catalog.P7.Id]);
+        cpuResult.Items.Should().AllSatisfy(p => p.ComponentType.Should().Be(ComponentType.Cpu));
+
+        // 3. ComponentType = Gpu: P5, P6
+        using var gpuResp = await publicClient.GetAsync("/api/v1/products?componentType=Gpu");
+        gpuResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var gpuResult = (await gpuResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        gpuResult.TotalCount.Should().Be(2);
+        gpuResult.Items.Select(p => p.Id).Should().BeEquivalentTo([catalog.P5.Id, catalog.P6.Id]);
+        gpuResult.Items.Should().AllSatisfy(p => p.ComponentType.Should().Be(ComponentType.Gpu));
+
+        // 4. MinPrice = 6M and MaxPrice = 10M (inclusive bounds: P3=6M, P5=8M, P6=8M, P2=10M)
         using var priceResp = await publicClient.GetAsync("/api/v1/products?minPrice=6000000&maxPrice=10000000");
         priceResp.StatusCode.Should().Be(HttpStatusCode.OK);
         var priceResult = (await priceResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
@@ -88,7 +152,7 @@ public class CatalogQueryIntegrationTests : CatalogIntegrationTestBase
         priceResult.Items.Select(p => p.Id).Should().BeEquivalentTo([catalog.P2.Id, catalog.P3.Id, catalog.P5.Id, catalog.P6.Id]);
         priceResult.Items.Should().AllSatisfy(p => p.Price.Should().BeInRange(6000000m, 10000000m));
 
-        // 2. InStock = true (StockQuantity > 0: P1=15, P2=8, P4=5, P5=12, P6=20)
+        // 5. InStock = true (StockQuantity > 0: P1=15, P2=8, P4=5, P5=12, P6=20)
         using var inStockTrueResp = await publicClient.GetAsync("/api/v1/products?inStock=true");
         inStockTrueResp.StatusCode.Should().Be(HttpStatusCode.OK);
         var inStockTrueResult = (await inStockTrueResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
@@ -96,7 +160,7 @@ public class CatalogQueryIntegrationTests : CatalogIntegrationTestBase
         inStockTrueResult.Items.Select(p => p.Id).Should().BeEquivalentTo([catalog.P1.Id, catalog.P2.Id, catalog.P4.Id, catalog.P5.Id, catalog.P6.Id]);
         inStockTrueResult.Items.Should().AllSatisfy(p => p.StockQuantity.Should().BeGreaterThan(0));
 
-        // 3. InStock = false (StockQuantity == 0: P3=0, P7=0)
+        // 6. InStock = false (StockQuantity == 0: P3=0, P7=0)
         using var inStockFalseResp = await publicClient.GetAsync("/api/v1/products?inStock=false");
         inStockFalseResp.StatusCode.Should().Be(HttpStatusCode.OK);
         var inStockFalseResult = (await inStockFalseResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
@@ -104,7 +168,7 @@ public class CatalogQueryIntegrationTests : CatalogIntegrationTestBase
         inStockFalseResult.Items.Select(p => p.Id).Should().BeEquivalentTo([catalog.P3.Id, catalog.P7.Id]);
         inStockFalseResult.Items.Should().AllSatisfy(p => p.StockQuantity.Should().Be(0));
 
-        // 4. IsActive = true (P1, P2, P3, P5, P6)
+        // 7. IsActive = true (P1, P2, P3, P5, P6)
         using var activeTrueResp = await publicClient.GetAsync("/api/v1/products?isActive=true");
         activeTrueResp.StatusCode.Should().Be(HttpStatusCode.OK);
         var activeTrueResult = (await activeTrueResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
@@ -112,7 +176,7 @@ public class CatalogQueryIntegrationTests : CatalogIntegrationTestBase
         activeTrueResult.Items.Select(p => p.Id).Should().BeEquivalentTo([catalog.P1.Id, catalog.P2.Id, catalog.P3.Id, catalog.P5.Id, catalog.P6.Id]);
         activeTrueResult.Items.Should().AllSatisfy(p => p.IsActive.Should().BeTrue());
 
-        // 5. IsActive = false (P4, P7)
+        // 8. IsActive = false (P4, P7)
         using var activeFalseResp = await publicClient.GetAsync("/api/v1/products?isActive=false");
         activeFalseResp.StatusCode.Should().Be(HttpStatusCode.OK);
         var activeFalseResult = (await activeFalseResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
@@ -120,19 +184,21 @@ public class CatalogQueryIntegrationTests : CatalogIntegrationTestBase
         activeFalseResult.Items.Select(p => p.Id).Should().BeEquivalentTo([catalog.P4.Id, catalog.P7.Id]);
         activeFalseResult.Items.Should().AllSatisfy(p => p.IsActive.Should().BeFalse());
 
-        // 6. Multi-filter AND combination: Brand=Intel, MinPrice=2M, MaxPrice=8M, InStock=true, IsActive=true -> P1 only
-        using var multiFilterResp = await publicClient.GetAsync(
-            "/api/v1/products?brand=Intel&minPrice=2000000&maxPrice=8000000&inStock=true&isActive=true");
-        multiFilterResp.StatusCode.Should().Be(HttpStatusCode.OK);
-        var multiFilterResult = (await multiFilterResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
-        multiFilterResult.TotalCount.Should().Be(1);
-        multiFilterResult.Items.Should().HaveCount(1);
-        var singleProduct = multiFilterResult.Items.Single();
-        singleProduct.Id.Should().Be(catalog.P1.Id);
-        singleProduct.Brand.Should().Be("Intel");
-        singleProduct.Price.Should().Be(2500000m);
-        singleProduct.StockQuantity.Should().Be(15);
-        singleProduct.IsActive.Should().BeTrue();
+        // 9. Full Combined filter: SearchTerm + Brand + ComponentType + MinPrice + MaxPrice + InStock + IsActive -> P1 only
+        using var combinedResp = await publicClient.GetAsync(
+            "/api/v1/products?searchTerm=box&brand=Intel&componentType=Cpu&minPrice=2000000&maxPrice=8000000&inStock=true&isActive=true");
+        combinedResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var combinedResult = (await combinedResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        combinedResult.TotalCount.Should().Be(1);
+        combinedResult.Items.Should().HaveCount(1);
+        var single = combinedResult.Items.Single();
+        single.Id.Should().Be(catalog.P1.Id);
+        single.Name.ToLowerInvariant().Should().Contain("box");
+        single.Brand.Should().Be("Intel");
+        single.ComponentType.Should().Be(ComponentType.Cpu);
+        single.Price.Should().Be(2500000m);
+        single.StockQuantity.Should().Be(15);
+        single.IsActive.Should().BeTrue();
     }
 
     [Fact]
@@ -141,14 +207,15 @@ public class CatalogQueryIntegrationTests : CatalogIntegrationTestBase
         var catalog = await SeedStandardCatalogAsync();
         using var publicClient = CreatePublicClient();
 
-        // 1. Root CPU: includes Root CPU (P1, P7), Child CPU (P2), Grandchild CPU (P3)
+        // 1. Root CPU: includes Root CPU (P1, P7), Child CPU (P2), Grandchild CPU (P3), Sibling CPU branch (P4) -> 5 products
         using var rootResp = await publicClient.GetAsync($"/api/v1/products?categoryId={catalog.RootCpu.Id}");
         rootResp.StatusCode.Should().Be(HttpStatusCode.OK);
         var rootResult = (await rootResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
-        rootResult.TotalCount.Should().Be(4);
-        rootResult.Items.Select(p => p.Id).Should().BeEquivalentTo([catalog.P1.Id, catalog.P2.Id, catalog.P3.Id, catalog.P7.Id]);
+        rootResult.TotalCount.Should().Be(5);
+        rootResult.Items.Select(p => p.Id).Should().BeEquivalentTo(
+            [catalog.P1.Id, catalog.P2.Id, catalog.P3.Id, catalog.P4.Id, catalog.P7.Id]);
 
-        // 2. Child CPU: includes Child CPU (P2), Grandchild CPU (P3); excludes Root CPU (P1, P7)
+        // 2. Child CPU: includes Child CPU (P2), Grandchild CPU (P3); excludes Root CPU (P1, P7) and Sibling CPU (P4) -> 2 products
         using var childResp = await publicClient.GetAsync($"/api/v1/products?categoryId={catalog.ChildCpu.Id}");
         childResp.StatusCode.Should().Be(HttpStatusCode.OK);
         var childResult = (await childResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
@@ -162,14 +229,30 @@ public class CatalogQueryIntegrationTests : CatalogIntegrationTestBase
         grandchildResult.TotalCount.Should().Be(1);
         grandchildResult.Items.Single().Id.Should().Be(catalog.P3.Id);
 
-        // 4. Sibling CPU (separate tree): includes Sibling CPU only (P4)
+        // 4. Sibling CPU (sibling branch under Root): includes Sibling CPU only (P4); excludes Root, Child, Grandchild
         using var siblingResp = await publicClient.GetAsync($"/api/v1/products?categoryId={catalog.SiblingCpu.Id}");
         siblingResp.StatusCode.Should().Be(HttpStatusCode.OK);
         var siblingResult = (await siblingResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
         siblingResult.TotalCount.Should().Be(1);
         siblingResult.Items.Single().Id.Should().Be(catalog.P4.Id);
 
-        // 5. Negative: Non-existent Category ID returns 404 Product.CategoryNotFound
+        // 5. Root GPU: includes Root GPU only (P5, P6)
+        using var gpuCatResp = await publicClient.GetAsync($"/api/v1/products?categoryId={catalog.RootGpu.Id}");
+        gpuCatResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var gpuCatResult = (await gpuCatResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        gpuCatResult.TotalCount.Should().Be(2);
+        gpuCatResult.Items.Select(p => p.Id).Should().BeEquivalentTo([catalog.P5.Id, catalog.P6.Id]);
+        gpuCatResult.Items.Should().AllSatisfy(p => p.ComponentType.Should().Be(ComponentType.Gpu));
+
+        // 6. Empty CPU category: valid category without products -> 200 OK, empty items, TotalCount = 0, TotalPages = 0
+        using var emptyCatResp = await publicClient.GetAsync($"/api/v1/products?categoryId={catalog.EmptyCpu.Id}");
+        emptyCatResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var emptyCatResult = (await emptyCatResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        emptyCatResult.TotalCount.Should().Be(0);
+        emptyCatResult.TotalPages.Should().Be(0);
+        emptyCatResult.Items.Should().BeEmpty();
+
+        // 7. Non-existent Category ID -> 404 Product.CategoryNotFound
         using var nonExistentResp = await publicClient.GetAsync($"/api/v1/products?categoryId={Guid.NewGuid()}");
         nonExistentResp.StatusCode.Should().Be(HttpStatusCode.NotFound);
         var nonExistentError = await nonExistentResp.Content.ReadFromJsonAsync<BusinessErrorResponse>(JsonOptions);
@@ -184,14 +267,20 @@ public class CatalogQueryIntegrationTests : CatalogIntegrationTestBase
         using var publicClient = CreatePublicClient();
 
         // 1. PriceLowToHigh: Price ascending, tie broken by Name.ToLower() ascending, then Id
-        // Expected: P1(2.5M) -> P7(5M) -> P3(6M) -> P5(8M White) -> P6(8M Black) -> P2(10M) -> P4(14M)
-        using var lowToHighResp = await publicClient.GetAsync($"/api/v1/products?sortBy={ProductSortOption.PriceLowToHigh}");
-        lowToHighResp.StatusCode.Should().Be(HttpStatusCode.OK);
-        var lowToHighResult = (await lowToHighResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
-        lowToHighResult.TotalCount.Should().Be(7);
-        lowToHighResult.Items.Select(p => p.Id).Should().Equal(
+        // Expected: P1(2.5M) -> P7(5M) -> P3(6M) -> P5(8M ASUS White) -> P6(8M ASUSTeK Black) -> P2(10M) -> P4(14M)
+        using var lowToHighResp1 = await publicClient.GetAsync($"/api/v1/products?sortBy={ProductSortOption.PriceLowToHigh}");
+        lowToHighResp1.StatusCode.Should().Be(HttpStatusCode.OK);
+        var lowToHighResult1 = (await lowToHighResp1.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        lowToHighResult1.TotalCount.Should().Be(7);
+        lowToHighResult1.Items.Select(p => p.Id).Should().Equal(
             catalog.P1.Id, catalog.P7.Id, catalog.P3.Id, catalog.P5.Id, catalog.P6.Id, catalog.P2.Id, catalog.P4.Id);
-        lowToHighResult.Items.Select(p => p.Price).Should().BeInAscendingOrder();
+        lowToHighResult1.Items.Select(p => p.Price).Should().BeInAscendingOrder();
+
+        // Repeated query for PriceLowToHigh to prove deterministic tie-breaking and order stability
+        using var lowToHighResp2 = await publicClient.GetAsync($"/api/v1/products?sortBy={ProductSortOption.PriceLowToHigh}");
+        lowToHighResp2.StatusCode.Should().Be(HttpStatusCode.OK);
+        var lowToHighResult2 = (await lowToHighResp2.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        lowToHighResult2.Items.Select(p => p.Id).Should().Equal(lowToHighResult1.Items.Select(p => p.Id));
 
         // 2. PriceHighToLow: Price descending, tie broken by Name.ToLower() ascending, then Id
         // Expected: P4(14M) -> P2(10M) -> P5(8M White) -> P6(8M Black) -> P3(6M) -> P7(5M) -> P1(2.5M)
@@ -229,12 +318,19 @@ public class CatalogQueryIntegrationTests : CatalogIntegrationTestBase
             catalog.P2.Id, catalog.P1.Id, catalog.P7.Id, catalog.P6.Id, catalog.P5.Id, catalog.P4.Id, catalog.P3.Id);
         zToARResult.Items.Select(p => p.Name.ToLowerInvariant()).Should().BeInDescendingOrder();
 
-        // 5. Newest: CreatedAt descending, tie broken by Id
-        using var newestResp = await publicClient.GetAsync($"/api/v1/products?sortBy={ProductSortOption.Newest}");
-        newestResp.StatusCode.Should().Be(HttpStatusCode.OK);
-        var newestResult = (await newestResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
-        newestResult.TotalCount.Should().Be(7);
-        newestResult.Items.Select(p => p.CreatedAt).Should().BeInDescendingOrder();
+        // 5. Default sort (no sortBy parameter) vs Explicit Newest: must produce identical complete ID order
+        using var explicitNewestResp = await publicClient.GetAsync($"/api/v1/products?sortBy={ProductSortOption.Newest}");
+        explicitNewestResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var explicitNewestResult = (await explicitNewestResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        explicitNewestResult.TotalCount.Should().Be(7);
+
+        using var defaultSortResp = await publicClient.GetAsync("/api/v1/products");
+        defaultSortResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var defaultSortResult = (await defaultSortResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        defaultSortResult.TotalCount.Should().Be(7);
+
+        defaultSortResult.Items.Select(p => p.Id).Should().Equal(explicitNewestResult.Items.Select(p => p.Id));
+        explicitNewestResult.Items.Select(p => p.CreatedAt).Should().BeInDescendingOrder();
     }
 
     [Fact]
@@ -243,8 +339,18 @@ public class CatalogQueryIntegrationTests : CatalogIntegrationTestBase
         var catalog = await SeedStandardCatalogAsync();
         using var publicClient = CreatePublicClient();
 
-        // 1. Deterministic multi-page iteration (pageSize = 3, sortBy = PriceLowToHigh)
-        // Full sequence: P1, P7, P3, P5, P6, P2, P4
+        // 1. Full baseline result (pageSize = 50, sortBy = PriceLowToHigh)
+        using var fullResp = await publicClient.GetAsync($"/api/v1/products?pageIndex=1&pageSize=50&sortBy={ProductSortOption.PriceLowToHigh}");
+        fullResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var fullResult = (await fullResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        fullResult.TotalCount.Should().Be(7);
+        fullResult.TotalPages.Should().Be(1);
+        fullResult.PageIndex.Should().Be(1);
+        fullResult.PageSize.Should().Be(50);
+        var fullIds = fullResult.Items.Select(p => p.Id).ToList();
+        fullIds.Should().Equal(catalog.P1.Id, catalog.P7.Id, catalog.P3.Id, catalog.P5.Id, catalog.P6.Id, catalog.P2.Id, catalog.P4.Id);
+
+        // 2. Deterministic multi-page iteration (pageSize = 3, sortBy = PriceLowToHigh)
         using var page1Resp = await publicClient.GetAsync($"/api/v1/products?pageIndex=1&pageSize=3&sortBy={ProductSortOption.PriceLowToHigh}");
         page1Resp.StatusCode.Should().Be(HttpStatusCode.OK);
         var page1 = (await page1Resp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
@@ -278,12 +384,16 @@ public class CatalogQueryIntegrationTests : CatalogIntegrationTestBase
         page3.HasNextPage.Should().BeFalse();
         page3.Items.Select(p => p.Id).Should().Equal(catalog.P4.Id);
 
-        // Union across pages: 0 duplicates, 100% complete coverage
+        // 3. Union across pages: matches full result ID order, count 7, unique items, non-overlapping
         var allPagedIds = page1.Items.Concat(page2.Items).Concat(page3.Items).Select(p => p.Id).ToList();
-        allPagedIds.Should().Equal(
-            catalog.P1.Id, catalog.P7.Id, catalog.P3.Id, catalog.P5.Id, catalog.P6.Id, catalog.P2.Id, catalog.P4.Id);
+        allPagedIds.Should().Equal(fullIds);
+        allPagedIds.Should().HaveCount(7).And.OnlyHaveUniqueItems();
 
-        // 2. Beyond-end page: pageIndex = 4 (offset = 3 * 3 = 9 >= 7)
+        page1.Items.Select(p => p.Id).Intersect(page2.Items.Select(p => p.Id)).Should().BeEmpty();
+        page2.Items.Select(p => p.Id).Intersect(page3.Items.Select(p => p.Id)).Should().BeEmpty();
+        page1.Items.Select(p => p.Id).Intersect(page3.Items.Select(p => p.Id)).Should().BeEmpty();
+
+        // 4. Beyond-end page: pageIndex = 4 (offset = 3 * 3 = 9 >= 7)
         using var page4Resp = await publicClient.GetAsync($"/api/v1/products?pageIndex=4&pageSize=3&sortBy={ProductSortOption.PriceLowToHigh}");
         page4Resp.StatusCode.Should().Be(HttpStatusCode.OK);
         var page4 = (await page4Resp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
@@ -295,7 +405,7 @@ public class CatalogQueryIntegrationTests : CatalogIntegrationTestBase
         page4.HasPreviousPage.Should().BeTrue();
         page4.HasNextPage.Should().BeFalse();
 
-        // 3. Huge offset beyond total count: pageIndex = 100, pageSize = 10
+        // 5. Huge offset beyond total count: pageIndex = 100, pageSize = 10
         using var hugePageResp = await publicClient.GetAsync("/api/v1/products?pageIndex=100&pageSize=10");
         hugePageResp.StatusCode.Should().Be(HttpStatusCode.OK);
         var hugePage = (await hugePageResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
@@ -307,7 +417,7 @@ public class CatalogQueryIntegrationTests : CatalogIntegrationTestBase
         hugePage.HasPreviousPage.Should().BeTrue();
         hugePage.HasNextPage.Should().BeFalse();
 
-        // 4. Int.MaxValue offset: must return 200 OK with empty items without int overflow
+        // 6. Int.MaxValue offset: must return 200 OK with empty items, HasPreviousPage true, HasNextPage false
         using var overflowResp = await publicClient.GetAsync($"/api/v1/products?pageIndex={int.MaxValue}&pageSize=50");
         overflowResp.StatusCode.Should().Be(HttpStatusCode.OK);
         var overflowResult = (await overflowResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
@@ -316,8 +426,10 @@ public class CatalogQueryIntegrationTests : CatalogIntegrationTestBase
         overflowResult.PageIndex.Should().Be(int.MaxValue);
         overflowResult.PageSize.Should().Be(50);
         overflowResult.Items.Should().BeEmpty();
+        overflowResult.HasPreviousPage.Should().BeTrue();
+        overflowResult.HasNextPage.Should().BeFalse();
 
-        // 5. Boundary validation checks: pageIndex < 1 or pageSize not in [1, 50]
+        // 7. Boundary validation checks: pageIndex < 1 or pageSize not in [1, 50]
         using var invalidPageIndexResp = await publicClient.GetAsync("/api/v1/products?pageIndex=0&pageSize=10");
         invalidPageIndexResp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
 
@@ -361,11 +473,12 @@ public class CatalogQueryIntegrationTests : CatalogIntegrationTestBase
         grandchildCpuResp.StatusCode.Should().Be(HttpStatusCode.Created);
         var grandchildCpu = (await grandchildCpuResp.Content.ReadFromJsonAsync<CategoryDto>(JsonOptions))!;
 
+        // SiblingCpu: sibling branch under rootCpu (ParentId = rootCpu.Id)
         using var siblingCpuResp = await adminClient.PostAsJsonAsync("/api/v1/categories", new CreateCategoryRequest(
             Name: "Server & Workstation Processors Sibling",
             ComponentType: ComponentType.Cpu,
             Description: "Sibling CPU Category",
-            ParentId: null
+            ParentId: rootCpu.Id
         ));
         siblingCpuResp.StatusCode.Should().Be(HttpStatusCode.Created);
         var siblingCpu = (await siblingCpuResp.Content.ReadFromJsonAsync<CategoryDto>(JsonOptions))!;
@@ -379,8 +492,18 @@ public class CatalogQueryIntegrationTests : CatalogIntegrationTestBase
         rootGpuResp.StatusCode.Should().Be(HttpStatusCode.Created);
         var rootGpu = (await rootGpuResp.Content.ReadFromJsonAsync<CategoryDto>(JsonOptions))!;
 
+        // EmptyCpu: valid category with no products
+        using var emptyCpuResp = await adminClient.PostAsJsonAsync("/api/v1/categories", new CreateCategoryRequest(
+            Name: "Empty CPU Category For Query Test",
+            ComponentType: ComponentType.Cpu,
+            Description: "Empty Category with no products",
+            ParentId: null
+        ));
+        emptyCpuResp.StatusCode.Should().Be(HttpStatusCode.Created);
+        var emptyCpu = (await emptyCpuResp.Content.ReadFromJsonAsync<CategoryDto>(JsonOptions))!;
+
         // 2. Products
-        // P1: CPU Root, Intel, 2.5M, Stock 15, Active
+        // P1: CPU Root, Intel, 2.5M, Stock 15, Active (Name contains "Box")
         using var p1Resp = await adminClient.PostAsJsonAsync("/api/v1/products", new CreateProductRequest(
             CategoryId: rootCpu.Id,
             Name: "Intel Core i5-12400F Box",
@@ -482,12 +605,12 @@ public class CatalogQueryIntegrationTests : CatalogIntegrationTestBase
         p5Resp.StatusCode.Should().Be(HttpStatusCode.Created);
         var p5 = (await p5Resp.Content.ReadFromJsonAsync<ProductDto>(JsonOptions))!;
 
-        // P6: GPU Root, ASUS, 8M, Stock 20, Active (Name: ASUS TUF RTX 4060 Black)
+        // P6: GPU Root, Brand: ASUSTeK (unique brand-only token), 8M, Stock 20, Active (Name: ASUS TUF RTX 4060 Black)
         using var p6Resp = await adminClient.PostAsJsonAsync("/api/v1/products", new CreateProductRequest(
             CategoryId: rootGpu.Id,
             Name: "ASUS TUF RTX 4060 Black",
             Sku: "SKU-GPU-ASUS-4060B",
-            Brand: "ASUS",
+            Brand: "ASUSTeK",
             Price: 8000000m,
             OriginalPrice: null,
             StockQuantity: 20,
@@ -539,6 +662,7 @@ public class CatalogQueryIntegrationTests : CatalogIntegrationTestBase
             GrandchildCpu: grandchildCpu,
             SiblingCpu: siblingCpu,
             RootGpu: rootGpu,
+            EmptyCpu: emptyCpu,
             P1: p1,
             P2: p2,
             P3: p3,
@@ -583,6 +707,7 @@ public class CatalogQueryIntegrationTests : CatalogIntegrationTestBase
         CategoryDto GrandchildCpu,
         CategoryDto SiblingCpu,
         CategoryDto RootGpu,
+        CategoryDto EmptyCpu,
         ProductDto P1,
         ProductDto P2,
         ProductDto P3,
