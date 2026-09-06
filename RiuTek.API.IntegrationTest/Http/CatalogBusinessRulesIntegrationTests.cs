@@ -1,4 +1,4 @@
-﻿using System.Net;
+using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using FluentAssertions;
@@ -396,6 +396,11 @@ public class CatalogBusinessRulesIntegrationTests : CatalogIntegrationTestBase
         dbProduct.Sku.Should().Be("SKU-CPU-ORIGINAL-B2");
         dbProduct.Slug.Should().Be("valid-intel-core-i9-14900k-processor");
         dbProduct.ComponentType.Should().Be(ComponentType.Cpu);
+        dbProduct.Specifications.Should().BeOfType<CpuSpecification>();
+        var dbSpec = (CpuSpecification)dbProduct.Specifications;
+        dbSpec.Socket.Should().Be(CpuSocket.LGA1700);
+        dbSpec.BaseClockGhz.Should().Be(3.2);
+        dbSpec.BoostClockGhz.Should().Be(6.0);
     }
 
     [Fact]
@@ -551,9 +556,25 @@ public class CatalogBusinessRulesIntegrationTests : CatalogIntegrationTestBase
         dbSpecA.BoostClockGhz.Should().Be(5.3);
 
         var dbProductB = productsInDb.Single(p => p.Id == productB.Id);
+        dbProductB.CategoryId.Should().Be(cpuCat.Id);
         dbProductB.Name.Should().Be("AMD Ryzen 7 7800X3D Gaming CPU");
         dbProductB.Sku.Should().Be("SKU-CPU-B-7800X3D");
         dbProductB.Slug.Should().Be("amd-ryzen-7-7800x3d-gaming-cpu");
+        dbProductB.Brand.Should().Be("AMD");
+        dbProductB.Price.Should().Be(11000000m);
+        dbProductB.OriginalPrice.Should().Be(12000000m);
+        dbProductB.StockQuantity.Should().Be(20);
+        dbProductB.IsActive.Should().BeTrue();
+        dbProductB.ImageUrl.Should().Be("https://example.com/7800x3d.jpg");
+        dbProductB.AdditionalImages.Should().BeEquivalentTo(new List<string> { "https://example.com/7800x3d-1.jpg" });
+        dbProductB.ComponentType.Should().Be(ComponentType.Cpu);
+        dbProductB.UpdatedAt.Should().BeNull();
+
+        dbProductB.Specifications.Should().BeOfType<CpuSpecification>();
+        var dbSpecB = (CpuSpecification)dbProductB.Specifications;
+        dbSpecB.Socket.Should().Be(CpuSocket.AM5);
+        dbSpecB.BaseClockGhz.Should().Be(4.2);
+        dbSpecB.BoostClockGhz.Should().Be(5.0);
     }
 
     private static CpuSpecification CreateSampleCpuSpec(CpuSocket socket, double baseClock, double boostClock) =>
