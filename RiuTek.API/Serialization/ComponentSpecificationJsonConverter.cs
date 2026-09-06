@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using RiuTek.Core.Entities.Specifications;
@@ -6,6 +7,69 @@ namespace RiuTek.API.Serialization;
 
 public class ComponentSpecificationJsonConverter : JsonConverter<ComponentSpecification>
 {
+    private static readonly Dictionary<string, Type> DiscriminatorToType;
+    private static readonly Dictionary<Type, string> TypeToDiscriminator;
+
+    static ComponentSpecificationJsonConverter()
+    {
+        var attributes = typeof(ComponentSpecification)
+            .GetCustomAttributes<JsonDerivedTypeAttribute>()
+            .ToList();
+
+        // 1. Fail fast: No JsonDerivedTypeAttribute declared
+        if (attributes.Count == 0)
+        {
+            throw new InvalidOperationException(
+                "ComponentSpecification metadata configuration error: No JsonDerivedTypeAttribute declared on ComponentSpecification.");
+        }
+
+        var discToType = new Dictionary<string, Type>(StringComparer.Ordinal);
+        var typeToDisc = new Dictionary<Type, string>();
+
+        foreach (var attr in attributes)
+        {
+            // 2. Fail fast: Discriminator must be a non-empty, non-whitespace string
+            if (attr.TypeDiscriminator is not string discriminator || string.IsNullOrWhiteSpace(discriminator))
+            {
+                throw new InvalidOperationException(
+                    "ComponentSpecification metadata configuration error: TypeDiscriminator must be a non-empty string.");
+            }
+
+            var derivedType = attr.DerivedType;
+
+            // 3. Fail fast: Derived type must inherit from ComponentSpecification
+            if (derivedType == null || !typeof(ComponentSpecification).IsAssignableFrom(derivedType))
+            {
+                throw new InvalidOperationException(
+                    "ComponentSpecification metadata configuration error: DerivedType must inherit from ComponentSpecification.");
+            }
+
+            // 4. Fail fast: Derived type must be concrete
+            if (derivedType.IsAbstract || derivedType.IsInterface)
+            {
+                throw new InvalidOperationException(
+                    "ComponentSpecification metadata configuration error: DerivedType must be a concrete type.");
+            }
+
+            // 5. Fail fast: Duplicate discriminator
+            if (!discToType.TryAdd(discriminator, derivedType))
+            {
+                throw new InvalidOperationException(
+                    "ComponentSpecification metadata configuration error: Duplicate type discriminator declared.");
+            }
+
+            // 6. Fail fast: Multiple discriminators mapped to the same derived type
+            if (!typeToDisc.TryAdd(derivedType, discriminator))
+            {
+                throw new InvalidOperationException(
+                    "ComponentSpecification metadata configuration error: Multiple discriminators mapped to the same derived type.");
+            }
+        }
+
+        DiscriminatorToType = discToType;
+        TypeToDiscriminator = typeToDisc;
+    }
+
     public override bool CanConvert(Type typeToConvert) =>
         typeToConvert == typeof(ComponentSpecification);
 
@@ -43,19 +107,10 @@ public class ComponentSpecificationJsonConverter : JsonConverter<ComponentSpecif
             throw new JsonException("Type discriminator must not be empty.");
         }
 
-        Type targetType = discriminator switch
+        if (!DiscriminatorToType.TryGetValue(discriminator, out var targetType))
         {
-            "cpu" => typeof(CpuSpecification),
-            "motherboard" => typeof(MotherboardSpecification),
-            "gpu" => typeof(GpuSpecification),
-            "ram" => typeof(RamSpecification),
-            "storage" => typeof(StorageSpecification),
-            "psu" => typeof(PsuSpecification),
-            "case" => typeof(CaseSpecification),
-            "cooler" => typeof(CoolerSpecification),
-            "accessory" => typeof(AccessorySpecification),
-            _ => throw new JsonException("Unsupported type discriminator.")
-        };
+            throw new JsonException("Unsupported type discriminator.");
+        }
 
         var rawText = root.GetRawText();
         var result = (ComponentSpecification?)JsonSerializer.Deserialize(rawText, targetType, options);
@@ -72,19 +127,10 @@ public class ComponentSpecificationJsonConverter : JsonConverter<ComponentSpecif
         ComponentSpecification value,
         JsonSerializerOptions options)
     {
-        var discriminator = value switch
+        if (!TypeToDiscriminator.TryGetValue(value.GetType(), out var discriminator))
         {
-            CpuSpecification => "cpu",
-            MotherboardSpecification => "motherboard",
-            GpuSpecification => "gpu",
-            RamSpecification => "ram",
-            StorageSpecification => "storage",
-            PsuSpecification => "psu",
-            CaseSpecification => "case",
-            CoolerSpecification => "cooler",
-            AccessorySpecification => "accessory",
-            _ => throw new JsonException("Unsupported component specification type.")
-        };
+            throw new JsonException("Unsupported component specification type.");
+        }
 
         using var doc = JsonSerializer.SerializeToDocument(value, value.GetType(), options);
         writer.WriteStartObject();

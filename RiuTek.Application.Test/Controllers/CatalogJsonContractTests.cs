@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Text.Json;
 using FluentAssertions;
 using FluentValidation.TestHelper;
@@ -446,6 +447,57 @@ public class CatalogJsonContractTests
 
         // 5. Assert validation error for Specifications
         result.ShouldHaveValidationErrorFor(c => c.Specifications);
+    }
+
+    #endregion
+
+    #region 7. Metadata Registry Consistency and Dynamic Subtype Round-Trip
+
+    [Fact]
+    public void MetadataRegistry_ReflectedFromDomainAttributes_IsConsistentAndRoundTripsAllDerivedTypes()
+    {
+        var attributes = typeof(ComponentSpecification)
+            .GetCustomAttributes<System.Text.Json.Serialization.JsonDerivedTypeAttribute>()
+            .ToList();
+
+        attributes.Should().HaveCount(9, "Domain model currently declares exactly 9 component specification subtypes");
+
+        var discriminators = new HashSet<string>(StringComparer.Ordinal);
+        var derivedTypes = new HashSet<Type>();
+
+        foreach (var attr in attributes)
+        {
+            attr.TypeDiscriminator.Should().BeOfType<string>("TypeDiscriminator must be a string");
+            var discriminator = (string)attr.TypeDiscriminator!;
+            discriminator.Should().NotBeNullOrWhiteSpace("TypeDiscriminator must not be null or whitespace");
+            discriminators.Add(discriminator).Should().BeTrue($"Discriminator '{discriminator}' must be unique");
+
+            var type = attr.DerivedType;
+            type.Should().NotBeNull("DerivedType must not be null");
+            typeof(ComponentSpecification).IsAssignableFrom(type).Should().BeTrue($"'{type.Name}' must inherit from ComponentSpecification");
+            type.IsAbstract.Should().BeFalse($"'{type.Name}' must be a concrete type");
+            derivedTypes.Add(type).Should().BeTrue($"Derived type '{type.Name}' must be unique across attributes");
+
+            // Instantiate via parameterless constructor
+            var instance = (ComponentSpecification)Activator.CreateInstance(type)!;
+            instance.Should().NotBeNull();
+
+            // Serialize under declared base type ComponentSpecification
+            var serialized = JsonSerializer.Serialize<ComponentSpecification>(instance, _jsonOptions);
+            serialized.Should().NotBeNullOrWhiteSpace();
+
+            // Verify discriminator appears exactly once
+            var expectedToken = $"\"$type\":\"{discriminator}\"";
+            var firstIdx = serialized.IndexOf(expectedToken, StringComparison.Ordinal);
+            firstIdx.Should().BeGreaterThanOrEqualTo(0, $"Discriminator token '{expectedToken}' must be present in serialized JSON");
+            var lastIdx = serialized.LastIndexOf(expectedToken, StringComparison.Ordinal);
+            firstIdx.Should().Be(lastIdx, $"Discriminator token '{expectedToken}' must appear exactly once in serialized JSON");
+
+            // Deserialize back to ComponentSpecification and verify concrete type
+            var roundTripped = JsonSerializer.Deserialize<ComponentSpecification>(serialized, _jsonOptions);
+            roundTripped.Should().NotBeNull();
+            roundTripped.Should().BeOfType(type, $"Deserialized instance must match concrete derived type '{type.Name}'");
+        }
     }
 
     #endregion

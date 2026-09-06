@@ -25,21 +25,30 @@ public class CatalogModelBindingIntegrationTests
 
     private static async Task AssertFrameworkValidationProblemDetails(HttpResponseMessage response)
     {
-        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
-        response.Content.Headers.ContentType?.MediaType.Should().Match(m => m == "application/problem+json" || m == "application/json");
+        response.StatusCode.Should().Be(HttpStatusCode.BadRequest, "framework validation error must return HTTP 400");
+        response.Content.Headers.ContentType?.MediaType.Should().Be("application/problem+json", "framework validation response must have exact application/problem+json content-type");
 
         var body = await response.Content.ReadAsStringAsync();
-        body.Should().NotBeNullOrWhiteSpace();
+        body.Should().NotBeNullOrWhiteSpace("response body must not be empty");
 
         // Must not leak internal types, paths, or stack traces
-        body.Should().NotContain("at System.");
-        body.Should().NotContain("RiuTek-API");
-        body.Should().NotContain("ComponentSpecification");
-        body.Should().NotContain("System.NotSupportedException");
+        body.Should().NotContain("at System.", "must not leak CLR stack trace");
+        body.Should().NotContain("RiuTek-API", "must not leak local repository path");
+        body.Should().NotContain("ComponentSpecification", "must not leak internal type name");
+        body.Should().NotContain("System.NotSupportedException", "must not leak internal exception name");
 
         using var doc = JsonDocument.Parse(body);
         var root = doc.RootElement;
-        (root.TryGetProperty("title", out _) || root.TryGetProperty("errors", out _) || root.TryGetProperty("status", out _)).Should().BeTrue();
+
+        root.TryGetProperty("title", out var titleProp).Should().BeTrue("ValidationProblemDetails must contain 'title'");
+        titleProp.GetString().Should().NotBeNullOrWhiteSpace("title must be a non-empty string");
+
+        root.TryGetProperty("status", out var statusProp).Should().BeTrue("ValidationProblemDetails must contain 'status'");
+        statusProp.GetInt32().Should().Be(400, "status must be 400");
+
+        root.TryGetProperty("errors", out var errorsProp).Should().BeTrue("ValidationProblemDetails must contain 'errors'");
+        errorsProp.ValueKind.Should().Be(JsonValueKind.Object, "'errors' must be a JSON object");
+        errorsProp.EnumerateObject().Any().Should().BeTrue("'errors' object must contain at least one property");
     }
 
     [Fact]
@@ -252,17 +261,11 @@ public class CatalogModelBindingIntegrationTests
 
         using var response = await client.GetAsync("/api/v1/products?sortBy=999");
 
-        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        await AssertFrameworkValidationProblemDetails(response);
 
         var body = await response.Content.ReadAsStringAsync();
-        body.Should().NotBeNullOrWhiteSpace();
-
-        body.Should().NotContain("at System.");
-        body.Should().NotContain("RiuTek-API");
-
         using var doc = JsonDocument.Parse(body);
-        var root = doc.RootElement;
-        root.TryGetProperty("errors", out var errors).Should().BeTrue();
+        var errors = doc.RootElement.GetProperty("errors");
 
         var hasSortByError = false;
         foreach (var prop in errors.EnumerateObject())
@@ -274,7 +277,7 @@ public class CatalogModelBindingIntegrationTests
                 break;
             }
         }
-        hasSortByError.Should().BeTrue($"Expected a validation error for sortBy, but got: {body}");
+        hasSortByError.Should().BeTrue("Expected a validation error for sortBy");
     }
 
     [Fact]
