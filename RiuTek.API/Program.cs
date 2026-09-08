@@ -9,7 +9,22 @@ namespace RiuTek.API
 
             // Add services to the container.
 
-            builder.Services.AddControllers();
+            builder.Services.AddControllers()
+                .AddJsonOptions(options =>
+                {
+                    var resolver = new System.Text.Json.Serialization.Metadata.DefaultJsonTypeInfoResolver();
+                    resolver.Modifiers.Add(typeInfo =>
+                    {
+                        if (typeInfo.Type == typeof(Core.Entities.Specifications.ComponentSpecification))
+                        {
+                            typeInfo.PolymorphismOptions = null;
+                        }
+                    });
+                    options.JsonSerializerOptions.TypeInfoResolver = resolver;
+                    options.JsonSerializerOptions.Converters.Add(new Serialization.ComponentSpecificationJsonConverter());
+                    options.AllowInputFormatterExceptionMessages = false;
+                });
+            builder.Services.AddHealthChecks();
             // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
             builder.Services.AddOpenApi();
 
@@ -29,7 +44,7 @@ namespace RiuTek.API
             app.UseAuthentication();
             app.UseAuthorization();
 
-
+            app.MapHealthChecks("/health/live").AllowAnonymous();
             app.MapControllers();
 
             app.Run();

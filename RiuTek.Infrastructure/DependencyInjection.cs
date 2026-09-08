@@ -20,8 +20,12 @@ public static class DependencyInjection
 {
     public static IServiceCollection AddInfrastructureDI(this IServiceCollection services, IConfiguration configuration)
     {
-        var connectionString = configuration.GetConnectionString("DefaultConnection") 
-            ?? "Host=localhost;Port=5432;Database=riutek_db;Username=postgres;Password=postgres";
+        var connectionString = configuration.GetConnectionString("DefaultConnection");
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            throw new InvalidOperationException(
+                "Chuỗi kết nối cơ sở dữ liệu chưa được cấu hình. Vui lòng cung cấp biến môi trường 'ConnectionStrings__DefaultConnection'.");
+        }
 
         services.AddDbContext<ApplicationDbContext>(options =>
         {

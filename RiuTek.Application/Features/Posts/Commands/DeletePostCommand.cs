@@ -1,8 +1,8 @@
 using MediatR;
 using Microsoft.EntityFrameworkCore;
+using RiuTek.Application.Common.Authorization;
 using RiuTek.Application.Common.Interfaces;
 using RiuTek.Core.Common;
-using RiuTek.Core.Enums;
 
 namespace RiuTek.Application.Features.Posts.Commands;
 
@@ -35,10 +35,7 @@ public class DeletePostCommandHandler : IRequestHandler<DeletePostCommand, Resul
                 "Bạn cần đăng nhập để xóa bài viết."));
         }
 
-        var userRole = _currentUserService.UserRole;
-        var isAdminOrStaff = userRole == UserRole.Admin.ToString() || userRole == UserRole.Staff.ToString();
-
-        if (!isAdminOrStaff)
+        if (!AuthorizationRules.IsContentManager(_currentUserService.UserRole))
         {
             return Result.Failure<Unit>(Error.Forbidden(
                 "Post.Forbidden",

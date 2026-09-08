@@ -1,13 +1,13 @@
 using FluentValidation;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
+using RiuTek.Application.Common.Authorization;
 using RiuTek.Application.Common.Interfaces;
 using RiuTek.Application.Common.Mappings;
 using RiuTek.Application.Common.Utils;
 using RiuTek.Application.DTOs;
 using RiuTek.Core.Common;
 using RiuTek.Core.Entities;
-using RiuTek.Core.Enums;
 
 namespace RiuTek.Application.Features.Posts.Commands;
 
@@ -63,9 +63,7 @@ public class CreatePostCommandHandler : IRequestHandler<CreatePostCommand, Resul
                 "Bạn cần đăng nhập để tạo bài viết."));
         }
 
-        var userRole = _currentUserService.UserRole;
-        var isAdminOrStaff = userRole == UserRole.Admin.ToString() || userRole == UserRole.Staff.ToString();
-        if (!isAdminOrStaff)
+        if (!AuthorizationRules.IsContentManager(_currentUserService.UserRole))
         {
             return Result.Failure<PostDto>(Error.Forbidden(
                 "Post.Forbidden",
