@@ -13,7 +13,7 @@ namespace RiuTek.Application.Test.Controllers;
 public class ActualEndpointMetadataTests
 {
     [Fact]
-    public async Task EndpointDataSource_ContainsAll22Endpoints_WithCorrectRouteAndAuthorizationMetadata()
+    public async Task EndpointDataSource_ContainsAll27Endpoints_WithCorrectRouteAndAuthorizationMetadata()
     {
         // Arrange: Build a lightweight WebApplication with in-memory test host & API controllers
         var builder = WebApplication.CreateBuilder();
@@ -35,9 +35,9 @@ public class ActualEndpointMetadataTests
 
             endpoints.Should().NotBeEmpty();
 
-            // Total controller actions: 6 Posts + 6 Comments + 5 Products + 5 Categories = 22
+            // Total controller actions: 6 Posts + 6 Comments + 5 Products + 5 Categories + 5 Carts = 27
             var controllerEndpoints = endpoints.Where(e => e.Metadata.GetMetadata<ControllerActionDescriptor>() != null).ToList();
-            controllerEndpoints.Should().HaveCount(22);
+            controllerEndpoints.Should().HaveCount(27);
 
             // Helper to get action descriptor
             ControllerActionDescriptor GetDescriptor(RouteEndpoint e) => e.Metadata.GetMetadata<ControllerActionDescriptor>()!;
@@ -211,6 +211,46 @@ public class ActualEndpointMetadataTests
             deleteCategory.Should().NotBeNull();
             GetFullRoutePattern(deleteCategory!).Should().BeEquivalentTo("api/v1/categories/{id:guid}");
             AssertAuthorizePolicy(deleteCategory!, Policies.ContentManager);
+
+            #endregion
+
+            #region Carts Endpoints (5)
+
+            var cartEndpoints = endpoints.Where(e =>
+                e.Metadata.GetMetadata<ControllerActionDescriptor>()?.ControllerTypeInfo.AsType() == typeof(CartsController))
+                .ToList();
+
+            cartEndpoints.Should().HaveCount(5);
+
+            // 23. GET api/v1/carts (Authorize) - Action: GetCart
+            var getCart = cartEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(CartsController.GetCart) && GetHttpMethods(e).Contains("GET"));
+            getCart.Should().NotBeNull();
+            GetFullRoutePattern(getCart!).Should().BeEquivalentTo("api/v1/carts");
+            AssertAuthorized(getCart!);
+
+            // 24. POST api/v1/carts/items (Authorize) - Action: AddItem
+            var addItem = cartEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(CartsController.AddItem) && GetHttpMethods(e).Contains("POST"));
+            addItem.Should().NotBeNull();
+            GetFullRoutePattern(addItem!).Should().BeEquivalentTo("api/v1/carts/items");
+            AssertAuthorized(addItem!);
+
+            // 25. PUT api/v1/carts/items/{productId:guid} (Authorize) - Action: SetItemQuantity
+            var setItemQuantity = cartEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(CartsController.SetItemQuantity) && GetHttpMethods(e).Contains("PUT"));
+            setItemQuantity.Should().NotBeNull();
+            GetFullRoutePattern(setItemQuantity!).Should().BeEquivalentTo("api/v1/carts/items/{productId:guid}");
+            AssertAuthorized(setItemQuantity!);
+
+            // 26. DELETE api/v1/carts/items/{productId:guid} (Authorize) - Action: RemoveItem
+            var removeItem = cartEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(CartsController.RemoveItem) && GetHttpMethods(e).Contains("DELETE"));
+            removeItem.Should().NotBeNull();
+            GetFullRoutePattern(removeItem!).Should().BeEquivalentTo("api/v1/carts/items/{productId:guid}");
+            AssertAuthorized(removeItem!);
+
+            // 27. DELETE api/v1/carts/items (Authorize) - Action: ClearCart
+            var clearCart = cartEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(CartsController.ClearCart) && GetHttpMethods(e).Contains("DELETE"));
+            clearCart.Should().NotBeNull();
+            GetFullRoutePattern(clearCart!).Should().BeEquivalentTo("api/v1/carts/items");
+            AssertAuthorized(clearCart!);
 
             #endregion
         }

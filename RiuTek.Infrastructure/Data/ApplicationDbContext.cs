@@ -38,4 +38,14 @@ public class ApplicationDbContext : DbContext, IUnitOfWork, IApplicationDbContex
         // Apply all entity configurations in this assembly
         modelBuilder.ApplyConfigurationsFromAssembly(typeof(ApplicationDbContext).Assembly);
     }
+
+    public bool IsUniqueViolation(DbUpdateException ex, string? constraintName = null)
+    {
+        if (ex.InnerException is Npgsql.PostgresException pex && pex.SqlState == Npgsql.PostgresErrorCodes.UniqueViolation)
+        {
+            return constraintName == null || string.Equals(pex.ConstraintName, constraintName, StringComparison.OrdinalIgnoreCase);
+        }
+
+        return false;
+    }
 }

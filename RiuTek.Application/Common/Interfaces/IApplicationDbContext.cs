@@ -22,4 +22,6 @@ public interface IApplicationDbContext
     DbSet<CartItem> CartItems { get; }
 
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
+
+    bool IsUniqueViolation(DbUpdateException ex, string? constraintName = null);
 }

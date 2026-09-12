@@ -41,6 +41,9 @@ public class CartPersistenceIntegrationTests : IAsyncLifetime
         {
             await db.CartItems.ExecuteDeleteAsync();
             await db.Carts.ExecuteDeleteAsync();
+            await db.Products.ExecuteDeleteAsync();
+            await db.Categories.ExecuteDeleteAsync();
+            await db.Users.ExecuteDeleteAsync();
             await tx.CommitAsync();
         }
         catch
@@ -557,5 +560,158 @@ public class CartPersistenceIntegrationTests : IAsyncLifetime
         columns.Should().Contain(new[] { "Id", "CartId", "ProductId", "Quantity", "CreatedAt", "UpdatedAt" });
         columns.Should().NotContain(new[] { "Price", "OriginalPrice", "ProductName", "Sku", "ImageUrl", "IsActive", "StockQuantity" },
             "CartItems must never snapshot product catalog data into its schema");
+    }
+
+    [Fact]
+    public async Task Scenario12_Concurrency_StaleFailureStateIsNotPersisted()
+    {
+        Guid cartId;
+        Guid product1Id;
+        Guid product2Id;
+
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var (user, category, product1) = await SeedPrerequisitesAsync(db);
+            product1Id = product1.Id;
+
+            var product2 = new Product(
+                categoryId: category.Id,
+                name: "Product 2 Stale Persistence Test",
+                slug: $"product-2-stale-{Guid.NewGuid():N}",
+                sku: $"SKU-STALE-2-{Guid.NewGuid():N}",
+                brand: "RiuTek",
+                price: 300_000m,
+                stockQuantity: 50,
+                imageUrl: "https://riutek.test/p2.png",
+                componentType: ComponentType.Accessory,
+                specifications: new AccessorySpecification { Details = "Stale failure test" }
+            );
+            db.Products.Add(product2);
+            await db.SaveChangesAsync();
+            product2Id = product2.Id;
+
+            var cart = new Cart(user.Id);
+            cart.AddItem(product1.Id, 2);
+            db.Carts.Add(cart);
+            await db.SaveChangesAsync();
+            cartId = cart.Id;
+        }
+
+        // Two independent scopes simulate concurrent users
+        using var scope1 = _fixture.Factory.Services.CreateScope();
+        var db1 = scope1.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        using var scope2 = _fixture.Factory.Services.CreateScope();
+        var db2 = scope2.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        var cartContext1 = await db1.Carts.Include(c => c.Items).FirstAsync(c => c.Id == cartId);
+        var cartContext2 = await db2.Carts.Include(c => c.Items).FirstAsync(c => c.Id == cartId);
+
+        // Writer 1 succeeds: adds product 2, version increments from 2 to 3
+        cartContext1.AddItem(product2Id, 1);
+        await db1.SaveChangesAsync();
+
+        // Writer 2 attempts update with stale version: tries to change product 1 quantity to 5
+        cartContext2.SetItemQuantity(product1Id, 5);
+        var actStale = async () => await db2.SaveChangesAsync();
+        await actStale.Should().ThrowAsync<DbUpdateConcurrencyException>();
+
+        // Open 3rd fresh scope: verify writer 1 committed, while writer 2's mutations were completely uncommitted
+        using var scope3 = _fixture.Factory.Services.CreateScope();
+        var db3 = scope3.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        var persistedCart = await db3.Carts.Include(c => c.Items).FirstAsync(c => c.Id == cartId);
+        persistedCart.Version.Should().Be(3, "Only the successful writer's version should be in the database");
+        persistedCart.Items.Should().HaveCount(2, "Product 1 and Product 2 should be in the cart");
+
+        var item1 = persistedCart.Items.Single(i => i.ProductId == product1Id);
+        item1.Quantity.Should().Be(2, "Stale writer's quantity (5) must NOT have been saved; original quantity (2) remains");
+
+        var item2 = persistedCart.Items.Single(i => i.ProductId == product2Id);
+        item2.Quantity.Should().Be(1, "Successful writer's added item must be persisted");
+    }
+
+    [Fact]
+    public async Task Scenario13_MultiStepMutations_AddRemoveReAddAndClearAdd_PreserveTracking()
+    {
+        Guid cartId;
+        Guid product1Id;
+        Guid product2Id;
+
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var (user, category, product1) = await SeedPrerequisitesAsync(db);
+            product1Id = product1.Id;
+
+            var product2 = new Product(
+                categoryId: category.Id,
+                name: "Product 2 MultiStep Test",
+                slug: $"product-2-multistep-{Guid.NewGuid():N}",
+                sku: $"SKU-MULTI-2-{Guid.NewGuid():N}",
+                brand: "RiuTek",
+                price: 400_000m,
+                stockQuantity: 50,
+                imageUrl: "https://riutek.test/p2.png",
+                componentType: ComponentType.Accessory,
+                specifications: new AccessorySpecification { Details = "Multistep test" }
+            );
+            db.Products.Add(product2);
+            await db.SaveChangesAsync();
+            product2Id = product2.Id;
+
+            var cart = new Cart(user.Id);
+            db.Carts.Add(cart);
+            await db.SaveChangesAsync();
+            cartId = cart.Id;
+        }
+
+        // Part A: Add, Remove, Re-add in single unit of work
+        using (var scopeA = _fixture.Factory.Services.CreateScope())
+        {
+            var dbA = scopeA.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var cartA = await dbA.Carts.Include(c => c.Items).FirstAsync(c => c.Id == cartId);
+
+            cartA.AddItem(product1Id, 2);
+            cartA.RemoveItem(product1Id);
+            cartA.AddItem(product1Id, 5);
+
+            await dbA.SaveChangesAsync();
+        }
+
+        using (var scopeCheckA = _fixture.Factory.Services.CreateScope())
+        {
+            var dbCheckA = scopeCheckA.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var cartCheckA = await dbCheckA.Carts.Include(c => c.Items).FirstAsync(c => c.Id == cartId);
+
+            cartCheckA.Items.Should().HaveCount(1);
+            var item = cartCheckA.Items.First();
+            item.ProductId.Should().Be(product1Id);
+            item.Quantity.Should().Be(5);
+        }
+
+        // Part B: Clear and Add in single unit of work
+        using (var scopeB = _fixture.Factory.Services.CreateScope())
+        {
+            var dbB = scopeB.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var cartB = await dbB.Carts.Include(c => c.Items).FirstAsync(c => c.Id == cartId);
+
+            cartB.Clear();
+            cartB.AddItem(product2Id, 3);
+
+            await dbB.SaveChangesAsync();
+        }
+
+        using (var scopeCheckB = _fixture.Factory.Services.CreateScope())
+        {
+            var dbCheckB = scopeCheckB.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var cartCheckB = await dbCheckB.Carts.Include(c => c.Items).FirstAsync(c => c.Id == cartId);
+
+            cartCheckB.Items.Should().HaveCount(1);
+            var item = cartCheckB.Items.First();
+            item.ProductId.Should().Be(product2Id);
+            item.Quantity.Should().Be(3);
+        }
     }
 }

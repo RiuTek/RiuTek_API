@@ -47,6 +47,11 @@ public class TestApplicationDbContext : DbContext, IApplicationDbContext
             .Property(p => p.Specifications)
             .HasConversion(specConverter);
     }
+
+    public bool IsUniqueViolation(DbUpdateException ex, string? constraintName = null)
+    {
+        return ex.InnerException?.Message.Contains("Unique", StringComparison.OrdinalIgnoreCase) == true;
+    }
 }
 
 public static class TestDbContextFactory
