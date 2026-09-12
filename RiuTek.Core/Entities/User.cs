@@ -23,6 +23,7 @@ public class User : BaseEntity, IAggregateRoot
     public ICollection<Wishlist> Wishlists { get; set; } = new List<Wishlist>();
     public ICollection<Post> Posts { get; set; } = new List<Post>();
     public ICollection<PostComment> PostComments { get; set; } = new List<PostComment>();
+    public Cart? Cart { get; set; }
 
     protected User() { }
 

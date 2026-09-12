@@ -33,6 +33,7 @@ public class Product : BaseEntity, IAggregateRoot
     public ICollection<Review> Reviews { get; set; } = new List<Review>();
     public ICollection<Comment> Comments { get; set; } = new List<Comment>();
     public ICollection<Wishlist> Wishlists { get; set; } = new List<Wishlist>();
+    public ICollection<CartItem> CartItems { get; set; } = new List<CartItem>();
 
     protected Product() { }
 

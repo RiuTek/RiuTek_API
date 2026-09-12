@@ -38,6 +38,7 @@ public class MigrationAndDatabaseSmokeTests
         appliedMigrations.Should().Contain(m => m.Contains("InitialCreate"));
         appliedMigrations.Should().Contain(m => m.Contains("AddEcommerceEntities"));
         appliedMigrations.Should().Contain(m => m.Contains("AddPostAndPostCommentEntities"));
+        appliedMigrations.Should().Contain(m => m.Contains("AddAuthenticatedCart"));
 
         var pendingMigrations = await db.Database.GetPendingMigrationsAsync();
         pendingMigrations.Should().BeEmpty("There should be no pending migrations after MigrateAsync");

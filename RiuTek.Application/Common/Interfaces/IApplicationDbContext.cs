@@ -18,6 +18,8 @@ public interface IApplicationDbContext
     DbSet<Wishlist> Wishlists { get; }
     DbSet<Post> Posts { get; }
     DbSet<PostComment> PostComments { get; }
+    DbSet<Cart> Carts { get; }
+    DbSet<CartItem> CartItems { get; }
 
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
 }
