@@ -100,6 +100,14 @@ public static class DependencyInjection
                 policy.RequireRole(UserRole.Admin.ToString(), UserRole.Staff.ToString()));
         });
 
+        // Cart Inactive Cleanup Services
+        var cartCleanupSettings = new Services.CartCleanupSettings();
+        configuration.GetSection(Services.CartCleanupSettings.SectionName).Bind(cartCleanupSettings);
+        cartCleanupSettings.Validate();
+        services.AddSingleton(cartCleanupSettings);
+        services.AddScoped<Services.ICartCleanupService, Services.CartCleanupService>();
+        services.AddHostedService<Services.CartCleanupBackgroundService>();
+
         return services;
     }
 }
