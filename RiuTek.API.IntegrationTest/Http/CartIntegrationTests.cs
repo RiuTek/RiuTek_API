@@ -341,9 +341,10 @@ public class CartIntegrationTests : IAsyncLifetime
         delRes.StatusCode.Should().Be(HttpStatusCode.NoContent);
     }
 
-    // Scenario 8: Simultaneous race creating first cart: exactly 1 cart created, no 500
+    // Scenario 8: Simultaneous HTTP smoke test creating first cart: verifies at least one succeeds, no 500, exactly 1 cart row persisted
+    // (Note: Deterministic proof of the IX_Carts_UserId unique-conflict branch is provided by CartDeterministicConcurrencyTests)
     [Fact]
-    public async Task Scenario08_SimultaneousRace_CreateFirstCart_ExactlyOneSucceeds_No500()
+    public async Task Scenario08_SimultaneousHttpSmoke_CreateFirstCart_ExactlyOneCartPersisted_No500()
     {
         var (client, user) = await CreateAuthenticatedClientAsync();
         var (_, product) = await SeedProductAsync(stockQuantity: 50);
@@ -366,9 +367,10 @@ public class CartIntegrationTests : IAsyncLifetime
         cartCount.Should().Be(1, "Exactly one Cart row must exist for the user");
     }
 
-    // Scenario 9: Concurrency stale update returns 409 without lost update
+    // Scenario 9: Sequential item updates correctly persist all items without lost updates
+    // (Note: Deterministic proof of stale version concurrency conflict is provided by CartDeterministicConcurrencyTests)
     [Fact]
-    public async Task Scenario09_Concurrency_StaleUpdate_Returns409WithoutLostUpdate()
+    public async Task Scenario09_SequentialUpdates_PersistsAllItemsCorrectly()
     {
         var (client, user) = await CreateAuthenticatedClientAsync();
         var (_, product1) = await SeedProductAsync(price: 100_000m, stockQuantity: 50);
@@ -377,7 +379,7 @@ public class CartIntegrationTests : IAsyncLifetime
         // Initial setup
         await client.PostAsJsonAsync("/api/v1/carts/items", new AddCartItemRequest(product1.Id, 2));
 
-        // Simulate two independent operations where one updates first
+        // Sequential operation adding second item
         var res1 = await client.PostAsJsonAsync("/api/v1/carts/items", new AddCartItemRequest(product2.Id, 1));
         res1.StatusCode.Should().Be(HttpStatusCode.OK);
 
