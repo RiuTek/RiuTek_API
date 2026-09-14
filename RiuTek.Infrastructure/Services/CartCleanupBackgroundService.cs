@@ -8,17 +8,20 @@ public class CartCleanupBackgroundService : BackgroundService
 {
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly CartCleanupSettings _settings;
+    private readonly IHostApplicationLifetime _lifetime;
     private readonly ILogger<CartCleanupBackgroundService> _logger;
     private readonly TimeProvider _timeProvider;
 
     public CartCleanupBackgroundService(
         IServiceScopeFactory scopeFactory,
         CartCleanupSettings settings,
+        IHostApplicationLifetime lifetime,
         ILogger<CartCleanupBackgroundService> logger,
         TimeProvider? timeProvider = null)
     {
         _scopeFactory = scopeFactory;
         _settings = settings;
+        _lifetime = lifetime;
         _logger = logger;
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
@@ -31,10 +34,17 @@ public class CartCleanupBackgroundService : BackgroundService
             return;
         }
 
-        // Yield immediately so background service execution never delays host/API startup
-        await Task.Yield();
+        // Wait asynchronously until the host application has fully started
+        try
+        {
+            await WaitForAppStartupAsync(_lifetime, stoppingToken);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            return;
+        }
 
-        _logger.LogInformation("CartCleanupBackgroundService started. Running initial sweep...");
+        _logger.LogInformation("CartCleanupBackgroundService started after application startup. Running initial sweep...");
 
         try
         {
@@ -82,5 +92,20 @@ public class CartCleanupBackgroundService : BackgroundService
         var cleanupService = scope.ServiceProvider.GetRequiredService<ICartCleanupService>();
         var nowUtc = _timeProvider.GetUtcNow().UtcDateTime;
         await cleanupService.CleanInactiveCartsAsync(nowUtc, cancellationToken: cancellationToken);
+    }
+
+    private static async Task WaitForAppStartupAsync(IHostApplicationLifetime lifetime, CancellationToken stoppingToken)
+    {
+        if (lifetime.ApplicationStarted.IsCancellationRequested)
+        {
+            return;
+        }
+
+        var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        await using var stoppingRegistration = stoppingToken.Register(() => tcs.TrySetCanceled(stoppingToken));
+        await using var startedRegistration = lifetime.ApplicationStarted.Register(() => tcs.TrySetResult());
+
+        await tcs.Task;
     }
 }

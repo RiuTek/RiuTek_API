@@ -1,7 +1,10 @@
+using System.Data.Common;
 using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
 using RiuTek.Core.Entities;
 using RiuTek.Core.Entities.Specifications;
@@ -295,9 +298,8 @@ public class CartCleanupIntegrationTests : IAsyncLifetime
     [Fact]
     public async Task ConcurrentUpdateSafety_CutoffReverification_PreservesRecentlyMutatedCart()
     {
-        // 1. Arrange: expired cart
+        // 1. Arrange: expired cart (35 days old)
         var nowUtc = new DateTime(2026, 9, 14, 12, 0, 0, DateTimeKind.Utc);
-        var cutoff = nowUtc.AddDays(-30);
 
         using var scope = _fixture.Factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
@@ -311,45 +313,83 @@ public class CartCleanupIntegrationTests : IAsyncLifetime
         db.Carts.Add(cart);
         await db.SaveChangesAsync();
 
-        // 2. Select candidates (cart.Id is selected)
-        var candidates = await db.Carts
-            .AsNoTracking()
-            .Where(c => (c.UpdatedAt ?? c.CreatedAt) < cutoff)
-            .Select(c => c.Id)
-            .ToListAsync();
+        var deleteReachedTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var allowDeleteToProceedTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var interceptor = new TestCartDeleteCommandInterceptor(deleteReachedTcs, allowDeleteToProceedTcs);
 
-        candidates.Should().Contain(cart.Id);
+        var options = new DbContextOptionsBuilder<ApplicationDbContext>()
+            .UseNpgsql(_fixture.ConnectionString, npgsqlOptions =>
+            {
+                npgsqlOptions.UseVector();
+                npgsqlOptions.MigrationsAssembly(typeof(ApplicationDbContext).Assembly.FullName);
+            })
+            .AddInterceptors(interceptor)
+            .Options;
 
-        // 3. Simulate concurrent mutation: in an independent scope, user updates the cart right now
+        await using var cleanupDb = new ApplicationDbContext(options);
+        var cleanupService = new CartCleanupService(cleanupDb, new CartCleanupSettings(), NullLogger<CartCleanupService>.Instance);
+
+        // 2. Act:
+        // Launch real production CleanInactiveCartsAsync in a background task
+        var cleanupTask = cleanupService.CleanInactiveCartsAsync(nowUtc);
+
+        // Wait until interceptor catches the SQL DELETE command (proves candidate SELECT has completed)
+        await deleteReachedTcs.Task.WaitAsync(TimeSpan.FromSeconds(15));
+
+        // In an independent DbContext, simulate user mutation renewing the cart right before DELETE executes
         using (var mutateScope = _fixture.Factory.Services.CreateScope())
         {
             var mutateDb = mutateScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
             var cartToMutate = await mutateDb.Carts.Include(c => c.Items).SingleAsync(c => c.Id == cart.Id);
-            cartToMutate.SetItemQuantity(product.Id, 5, nowUtc); // sets UpdatedAt = nowUtc
+            cartToMutate.SetItemQuantity(product.Id, 5, nowUtc); // UpdatedAt is now renewed to nowUtc
             await mutateDb.SaveChangesAsync();
         }
 
-        // 4. Act: Execute delete with cutoff re-verification (as implemented in CartCleanupService)
-        var deletedCount = await db.Carts
-            .Where(c => candidates.Contains(c.Id) && (c.UpdatedAt ?? c.CreatedAt) < cutoff)
-            .ExecuteDeleteAsync();
+        // Release the interceptor to let the SQL DELETE proceed
+        allowDeleteToProceedTcs.TrySetResult(true);
+        var deletedCount = await cleanupTask;
 
-        // 5. Assert: The cart was NOT deleted because its UpdatedAt was renewed to nowUtc!
-        deletedCount.Should().Be(0, "Cart was renewed concurrently before delete execution and must be preserved");
+        // 3. Assert:
+        // Because CartCleanupService.cs includes `(c.UpdatedAt ?? c.CreatedAt) < cutoff` in its DELETE statement,
+        // PostgreSQL deletes 0 rows and the production service returns 0!
+        deletedCount.Should().Be(0, "Real production service must preserve the cart because UpdatedAt was renewed before DELETE executed");
 
-        using (var verifyScope = _fixture.Factory.Services.CreateScope())
-        {
-            var verifyDb = verifyScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
-            var reloadedCart = await verifyDb.Carts.Include(c => c.Items).SingleOrDefaultAsync(c => c.Id == cart.Id);
-            reloadedCart.Should().NotBeNull("Cart must still exist in database");
-            reloadedCart!.Items.Single().Quantity.Should().Be(5);
-        }
+        using var verifyScope = _fixture.Factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var reloadedCart = await verifyDb.Carts.Include(c => c.Items).SingleOrDefaultAsync(c => c.Id == cart.Id);
+        reloadedCart.Should().NotBeNull("Cart must still exist in PostgreSQL");
+        reloadedCart!.Items.Single().Quantity.Should().Be(5);
     }
 
     [Fact]
-    public async Task BackgroundService_WhenEnabled_InitialSweepRunsWithoutBlockingHostStartup()
+    public async Task BackgroundService_WhenEnabled_InitialSweepRunsAfterApplicationStartedWithoutBlockingHost()
     {
-        // 1. Arrange: Create a factory instance with CartCleanup:Enabled = true
+        // 1. Arrange: Seed expired cart on PostgreSQL Testcontainer
+        var expiredTime = DateTime.UtcNow.AddDays(-35);
+        Guid expiredCartId;
+        Guid expiredCartItemId;
+
+        using (var setupScope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = setupScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var (user, _, product) = await SeedPrerequisitesAsync(db);
+
+            var expiredCart = new Cart(user.Id, expiredTime);
+            expiredCart.AddItem(product.Id, 2, expiredTime);
+            expiredCart.CreatedAt = expiredTime;
+            expiredCart.UpdatedAt = expiredTime;
+            db.Carts.Add(expiredCart);
+            await db.SaveChangesAsync();
+
+            expiredCartId = expiredCart.Id;
+            expiredCartItemId = expiredCart.Items.Single().Id;
+        }
+
+        var sweepStartedTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var allowSweepToCompleteTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var sweepFinishedTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        TestBarrierCartCleanupService? barrierService = null;
+
         var factory = _fixture.Factory.WithWebHostBuilder(builder =>
         {
             builder.UseSetting("CartCleanup:Enabled", "true");
@@ -360,15 +400,154 @@ public class CartCleanupIntegrationTests : IAsyncLifetime
                     ["CartCleanup:Enabled"] = "true"
                 });
             });
+
+            builder.ConfigureServices(services =>
+            {
+                var descriptor = services.First(d => d.ServiceType == typeof(ICartCleanupService));
+                services.Remove(descriptor);
+
+                services.AddScoped<ICartCleanupService>(sp =>
+                {
+                    var inner = new CartCleanupService(
+                        sp.GetRequiredService<ApplicationDbContext>(),
+                        sp.GetRequiredService<CartCleanupSettings>(),
+                        sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<CartCleanupService>>());
+
+                    var lifetime = sp.GetRequiredService<IHostApplicationLifetime>();
+
+                    barrierService = new TestBarrierCartCleanupService(
+                        inner,
+                        lifetime,
+                        onBeforeSweep: async () =>
+                        {
+                            sweepStartedTcs.TrySetResult(true);
+                            await allowSweepToCompleteTcs.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                        },
+                        onAfterSweep: () =>
+                        {
+                            sweepFinishedTcs.TrySetResult(true);
+                        });
+
+                    return barrierService;
+                });
+            });
         });
 
-        // 2. Act: Immediately create client and query /health/live
-        using var client = factory.CreateClient();
-        var response = await client.GetAsync("/health/live");
+        try
+        {
+            using var client = factory.CreateClient();
 
-        // 3. Assert: API is available and responds 200 OK immediately without being blocked
-        response.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
-        var content = await response.Content.ReadAsStringAsync();
-        content.Should().Be("Healthy");
+            // 2. Wait until background service starts its initial sweep
+            await sweepStartedTcs.Task.WaitAsync(TimeSpan.FromSeconds(15));
+
+            // Assert 1: At the time sweep ran, ApplicationStarted MUST be signaled!
+            barrierService.Should().NotBeNull();
+            barrierService!.WasApplicationStartedWhenSweepRan.Should().BeTrue(
+                "Initial cleanup sweep must execute strictly after IHostApplicationLifetime.ApplicationStarted has signaled");
+
+            // Assert 2: While the sweep is held by the barrier, query /health/live to prove API is NOT blocked
+            var healthResponse = await client.GetAsync("/health/live");
+            healthResponse.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+            var content = await healthResponse.Content.ReadAsStringAsync();
+            content.Should().Be("Healthy");
+
+            // 3. Release the sweep to complete
+            allowSweepToCompleteTcs.TrySetResult(true);
+            await sweepFinishedTcs.Task.WaitAsync(TimeSpan.FromSeconds(15));
+
+            // Assert 3: Confirm that the real background service actually deleted the expired cart from PostgreSQL
+            using var verifyScope = _fixture.Factory.Services.CreateScope();
+            var verifyDb = verifyScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+            var cartExists = await verifyDb.Carts.AnyAsync(c => c.Id == expiredCartId);
+            cartExists.Should().BeFalse("The expired cart must be deleted by the background cleanup service");
+
+            var itemExists = await verifyDb.CartItems.AnyAsync(i => i.Id == expiredCartItemId);
+            itemExists.Should().BeFalse("CartItems must be cascade deleted by PostgreSQL");
+        }
+        finally
+        {
+            allowSweepToCompleteTcs.TrySetResult(true);
+            await factory.DisposeAsync();
+        }
+    }
+}
+
+internal sealed class TestCartDeleteCommandInterceptor : DbCommandInterceptor
+{
+    private readonly TaskCompletionSource<bool> _deleteReachedTcs;
+    private readonly TaskCompletionSource<bool> _allowDeleteToProceedTcs;
+    private int _interceptedCount;
+
+    public TestCartDeleteCommandInterceptor(
+        TaskCompletionSource<bool> deleteReachedTcs,
+        TaskCompletionSource<bool> allowDeleteToProceedTcs)
+    {
+        _deleteReachedTcs = deleteReachedTcs;
+        _allowDeleteToProceedTcs = allowDeleteToProceedTcs;
+    }
+
+    public override async ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(
+        DbCommand command,
+        CommandEventData eventData,
+        InterceptionResult<int> result,
+        CancellationToken cancellationToken = default)
+    {
+        if (command.CommandText.Contains("DELETE", StringComparison.OrdinalIgnoreCase) &&
+            command.CommandText.Contains("\"Carts\"", StringComparison.OrdinalIgnoreCase))
+        {
+            if (Interlocked.Increment(ref _interceptedCount) == 1)
+            {
+                _deleteReachedTcs.TrySetResult(true);
+                await _allowDeleteToProceedTcs.Task.WaitAsync(TimeSpan.FromSeconds(15), cancellationToken);
+            }
+        }
+
+        return await base.NonQueryExecutingAsync(command, eventData, result, cancellationToken);
+    }
+}
+
+internal sealed class TestBarrierCartCleanupService : ICartCleanupService
+{
+    private readonly ICartCleanupService _inner;
+    private readonly IHostApplicationLifetime _lifetime;
+    private readonly Func<Task>? _onBeforeSweep;
+    private readonly Action? _onAfterSweep;
+
+    public TestBarrierCartCleanupService(
+        ICartCleanupService inner,
+        IHostApplicationLifetime lifetime,
+        Func<Task>? onBeforeSweep = null,
+        Action? onAfterSweep = null)
+    {
+        _inner = inner;
+        _lifetime = lifetime;
+        _onBeforeSweep = onBeforeSweep;
+        _onAfterSweep = onAfterSweep;
+    }
+
+    public bool WasApplicationStartedWhenSweepRan { get; private set; }
+
+    public async Task<int> CleanInactiveCartsAsync(
+        DateTime nowUtc,
+        int? batchSize = null,
+        int? maxBatches = null,
+        CancellationToken cancellationToken = default)
+    {
+        WasApplicationStartedWhenSweepRan = _lifetime.ApplicationStarted.IsCancellationRequested;
+
+        if (_onBeforeSweep is not null)
+        {
+            await _onBeforeSweep();
+        }
+
+        try
+        {
+            return await _inner.CleanInactiveCartsAsync(nowUtc, batchSize, maxBatches, cancellationToken);
+        }
+        finally
+        {
+            _onAfterSweep?.Invoke();
+        }
     }
 }
