@@ -1,0 +1,55 @@
+name: CI & Publish to ACR
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-test-and-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore dependencies
+        run: dotnet restore RiuTek_API.slnx
+
+      - name: Build solution (Release)
+        run: dotnet build RiuTek_API.slnx -c Release --no-restore
+
+      - name: Run all tests (Release)
+        run: dotnet test RiuTek_API.slnx -c Release --no-build --no-restore
+
+      - name: Log in to Azure Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ vars.ACR_LOGIN_SERVER }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Build production Docker image
+        run: |
+          docker build \
+            -f RiuTek.API/Dockerfile \
+            -t "${{ vars.ACR_LOGIN_SERVER }}/${{ vars.ACR_REPOSITORY }}:${{ github.sha }}" \
+            .
+
+      - name: Push image to ACR
+        run: |
+          docker push "${{ vars.ACR_LOGIN_SERVER }}/${{ vars.ACR_REPOSITORY }}:${{ github.sha }}"
