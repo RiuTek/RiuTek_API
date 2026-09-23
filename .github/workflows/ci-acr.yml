@@ -54,3 +54,102 @@ jobs:
       - name: Push image to ACR
         run: |
           docker push "${{ vars.ACR_LOGIN_SERVER }}/${{ vars.ACR_REPOSITORY }}:${{ github.sha }}"
+
+  migrate-and-deploy:
+    needs: build-test-and-publish
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore dependencies
+        run: dotnet restore RiuTek_API.slnx
+
+      - name: Build solution (Release)
+        run: dotnet build RiuTek_API.slnx -c Release --no-restore
+
+      - name: Install EF Core CLI tool
+        run: dotnet tool install --global dotnet-ef --version 10.0.11
+
+      - name: Apply EF Core migrations to Supabase
+        env:
+          ConnectionStrings__DefaultConnection: ${{ secrets.SUPABASE_DB_CONNECTION }}
+          JwtSettings__SecretKey: "ci-dummy-jwt-secret-key-min-32-chars-long-for-migration-only"
+          RedisSettings__Enabled: "false"
+          CartCleanup__Enabled: "false"
+          ASPNETCORE_ENVIRONMENT: "Production"
+        run: |
+          dotnet ef database update \
+            --project RiuTek.Infrastructure \
+            --startup-project RiuTek.API \
+            --configuration Release \
+            --no-build
+
+      - name: Deploy image to Azure Web App
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ vars.AZURE_WEBAPP_NAME }}
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+          images: "${{ vars.ACR_LOGIN_SERVER }}/${{ vars.ACR_REPOSITORY }}:${{ github.sha }}"
+
+      - name: Smoke test live endpoints
+        run: |
+          APP_URL="${{ vars.AZURE_WEBAPP_URL }}"
+          APP_URL="${APP_URL%/}"
+          echo "Smoke testing target: $APP_URL"
+
+          # 1. Health check liveness with retry for cold start
+          echo "Waiting for /health/live..."
+          health_ok=0
+          for i in {1..24}; do
+            status=$(curl -s -o /dev/null -w "%{http_code}" "$APP_URL/health/live" || true)
+            if [ "$status" = "200" ]; then
+              echo "Liveness check passed with HTTP 200 (attempt $i)"
+              health_ok=1
+              break
+            fi
+            echo "Attempt $i: HTTP status $status, waiting 10s..."
+            sleep 10
+          done
+
+          if [ $health_ok -ne 1 ]; then
+            echo "Health check failed after timeout"
+            exit 1
+          fi
+
+          # 2. Products endpoint check
+          echo "Checking /api/v1/products..."
+          prod_status=$(curl -s -o /dev/null -w "%{http_code}" "$APP_URL/api/v1/products" || true)
+          if [ "$prod_status" != "200" ]; then
+            echo "Products endpoint returned HTTP $prod_status (expected 200)"
+            exit 1
+          fi
+          prod_body=$(curl -s "$APP_URL/api/v1/products")
+          if ! echo "$prod_body" | jq . > /dev/null 2>&1; then
+            echo "Products endpoint did not return valid JSON"
+            exit 1
+          fi
+          echo "Products endpoint returned HTTP 200 with valid JSON"
+
+          # 3. Categories endpoint check
+          echo "Checking /api/v1/categories..."
+          cat_status=$(curl -s -o /dev/null -w "%{http_code}" "$APP_URL/api/v1/categories" || true)
+          if [ "$cat_status" != "200" ]; then
+            echo "Categories endpoint returned HTTP $cat_status (expected 200)"
+            exit 1
+          fi
+          cat_body=$(curl -s "$APP_URL/api/v1/categories")
+          if ! echo "$cat_body" | jq . > /dev/null 2>&1; then
+            echo "Categories endpoint did not return valid JSON"
+            exit 1
+          fi
+          echo "Categories endpoint returned HTTP 200 with valid JSON"
