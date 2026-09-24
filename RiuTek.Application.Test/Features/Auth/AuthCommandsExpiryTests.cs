@@ -1,4 +1,5 @@
 using FluentAssertions;
+using Microsoft.EntityFrameworkCore;
 using Moq;
 using RiuTek.Application.Common.Interfaces;
 using RiuTek.Application.Features.Auth.Commands;
@@ -11,9 +12,10 @@ namespace RiuTek.Application.Test.Features.Auth;
 public class AuthCommandsExpiryTests
 {
     [Fact]
-    public async Task LoginCommandHandler_ShouldReturnExpiresInSecondsFromJwtTokenGenerator()
+    public async Task LoginCommandHandler_ShouldReturnExpiresInSecondsAndSingleSourceRefreshTokenExpiry()
     {
-        // Arrange
+        // Arrange: Use non-7 day lifetime (e.g. 3 days)
+        const int customDays = 3;
         await using var context = TestDbContextFactory.CreateInMemoryDbContext();
         var user = new User(
             email: "login@example.com",
@@ -31,6 +33,7 @@ public class AuthCommandsExpiryTests
         jwtGeneratorMock.Setup(x => x.GenerateAccessToken(It.IsAny<User>())).Returns("mock_access_token");
         jwtGeneratorMock.Setup(x => x.GenerateRefreshToken()).Returns("mock_refresh_token");
         jwtGeneratorMock.Setup(x => x.ExpiryInSeconds).Returns(7200); // 120 minutes
+        jwtGeneratorMock.Setup(x => x.RefreshTokenExpiryDays).Returns(customDays);
 
         var refreshTokenHasherMock = new Mock<IRefreshTokenHasher>();
         refreshTokenHasherMock.Setup(x => x.HashToken(It.IsAny<string>())).Returns((string t) => "hash_" + t);
@@ -44,12 +47,17 @@ public class AuthCommandsExpiryTests
         result.IsSuccess.Should().BeTrue();
         result.Value.ExpiresInSeconds.Should().Be(7200);
         result.Value.AccessToken.Should().Be("mock_access_token");
+
+        // Verify single-source expiry calculation
+        result.Value.RefreshTokenExpiresAt.Should().BeCloseTo(DateTime.UtcNow.AddDays(customDays), TimeSpan.FromSeconds(5));
+        user.RefreshTokenExpiryTime.Should().Be(result.Value.RefreshTokenExpiresAt);
     }
 
     [Fact]
-    public async Task RegisterCommandHandler_ShouldReturnExpiresInSecondsFromJwtTokenGenerator()
+    public async Task RegisterCommandHandler_ShouldReturnExpiresInSecondsAndSingleSourceRefreshTokenExpiry()
     {
-        // Arrange
+        // Arrange: Use non-7 day lifetime (e.g. 5 days)
+        const int customDays = 5;
         await using var context = TestDbContextFactory.CreateInMemoryDbContext();
 
         var passwordHasherMock = new Mock<IPasswordHasher>();
@@ -59,6 +67,7 @@ public class AuthCommandsExpiryTests
         jwtGeneratorMock.Setup(x => x.GenerateAccessToken(It.IsAny<User>())).Returns("mock_access_token");
         jwtGeneratorMock.Setup(x => x.GenerateRefreshToken()).Returns("mock_refresh_token");
         jwtGeneratorMock.Setup(x => x.ExpiryInSeconds).Returns(1800); // 30 minutes
+        jwtGeneratorMock.Setup(x => x.RefreshTokenExpiryDays).Returns(customDays);
 
         var refreshTokenHasherMock = new Mock<IRefreshTokenHasher>();
         refreshTokenHasherMock.Setup(x => x.HashToken(It.IsAny<string>())).Returns((string t) => "hash_" + t);
@@ -73,12 +82,18 @@ public class AuthCommandsExpiryTests
         // Assert
         result.IsSuccess.Should().BeTrue();
         result.Value.ExpiresInSeconds.Should().Be(1800);
+
+        // Verify single-source expiry calculation
+        result.Value.RefreshTokenExpiresAt.Should().BeCloseTo(DateTime.UtcNow.AddDays(customDays), TimeSpan.FromSeconds(5));
+        var createdUser = await context.Users.FirstAsync(u => u.Email == "register@example.com");
+        createdUser.RefreshTokenExpiryTime.Should().Be(result.Value.RefreshTokenExpiresAt);
     }
 
     [Fact]
-    public async Task RefreshTokenCommandHandler_ShouldReturnExpiresInSecondsFromJwtTokenGenerator()
+    public async Task RefreshTokenCommandHandler_ShouldReturnExpiresInSecondsAndSingleSourceRefreshTokenExpiry()
     {
-        // Arrange
+        // Arrange: Use non-7 day lifetime (e.g. 2 days)
+        const int customDays = 2;
         await using var context = TestDbContextFactory.CreateInMemoryDbContext();
         var user = new User(
             email: "refresh@example.com",
@@ -97,6 +112,7 @@ public class AuthCommandsExpiryTests
         jwtGeneratorMock.Setup(x => x.GenerateAccessToken(It.IsAny<User>())).Returns("new_access_token");
         jwtGeneratorMock.Setup(x => x.GenerateRefreshToken()).Returns("new_refresh_token");
         jwtGeneratorMock.Setup(x => x.ExpiryInSeconds).Returns(5400); // 90 minutes
+        jwtGeneratorMock.Setup(x => x.RefreshTokenExpiryDays).Returns(customDays);
 
         var refreshTokenHasherMock = new Mock<IRefreshTokenHasher>();
         refreshTokenHasherMock.Setup(x => x.HashToken("existing_refresh_token")).Returns("hash_existing_refresh_token");
@@ -110,5 +126,9 @@ public class AuthCommandsExpiryTests
         // Assert
         result.IsSuccess.Should().BeTrue();
         result.Value.ExpiresInSeconds.Should().Be(5400);
+
+        // Verify single-source expiry calculation
+        result.Value.RefreshTokenExpiresAt.Should().BeCloseTo(DateTime.UtcNow.AddDays(customDays), TimeSpan.FromSeconds(5));
+        user.RefreshTokenExpiryTime.Should().Be(result.Value.RefreshTokenExpiresAt);
     }
 }

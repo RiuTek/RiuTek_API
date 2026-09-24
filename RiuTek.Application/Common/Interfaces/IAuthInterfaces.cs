@@ -13,6 +13,7 @@ public interface IJwtTokenGenerator
     string GenerateAccessToken(User user);
     string GenerateRefreshToken();
     int ExpiryInSeconds { get; }
+    int RefreshTokenExpiryDays { get; }
 }
 
 public interface IRefreshTokenHasher

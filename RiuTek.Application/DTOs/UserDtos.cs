@@ -15,7 +15,8 @@ public record AuthResponseDto(
     string AccessToken,
     string RefreshToken,
     int ExpiresInSeconds,
-    UserDto User
+    UserDto User,
+    DateTime RefreshTokenExpiresAt
 );
 
 public record UserProfileDto(

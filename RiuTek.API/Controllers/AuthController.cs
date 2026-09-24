@@ -39,7 +39,7 @@ public class AuthController : ApiControllerBase
             return HandleResult(result);
         }
 
-        SetRefreshTokenCookie(result.Value.RefreshToken);
+        SetRefreshTokenCookie(result.Value.RefreshToken, result.Value.RefreshTokenExpiresAt);
 
         var response = new AuthResponse(
             result.Value.AccessToken,
@@ -66,7 +66,7 @@ public class AuthController : ApiControllerBase
             return HandleResult(result);
         }
 
-        SetRefreshTokenCookie(result.Value.RefreshToken);
+        SetRefreshTokenCookie(result.Value.RefreshToken, result.Value.RefreshTokenExpiresAt);
 
         var response = new AuthResponse(
             result.Value.AccessToken,
@@ -98,7 +98,7 @@ public class AuthController : ApiControllerBase
             return HandleResult(result);
         }
 
-        SetRefreshTokenCookie(result.Value.RefreshToken);
+        SetRefreshTokenCookie(result.Value.RefreshToken, result.Value.RefreshTokenExpiresAt);
 
         var response = new AuthResponse(
             result.Value.AccessToken,
@@ -122,7 +122,7 @@ public class AuthController : ApiControllerBase
         return NoContent();
     }
 
-    private void SetRefreshTokenCookie(string refreshToken)
+    private void SetRefreshTokenCookie(string refreshToken, DateTime expiresAt)
     {
         var cookieOptions = new CookieOptions
         {
@@ -130,7 +130,7 @@ public class AuthController : ApiControllerBase
             Secure = _cookieSettings.Secure,
             SameSite = _cookieSettings.SameSite,
             Path = _cookieSettings.Path,
-            Expires = DateTimeOffset.UtcNow.AddDays(_cookieSettings.ExpiryDays)
+            Expires = new DateTimeOffset(expiresAt, TimeSpan.Zero)
         };
 
         Response.Cookies.Append(_cookieSettings.CookieName, refreshToken, cookieOptions);

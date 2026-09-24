@@ -69,11 +69,12 @@ public class RefreshTokenCommandHandler : IRequestHandler<RefreshTokenCommand, R
         }
 
         // 3. Cơ chế Token Rotation: Sinh Access Token mới + Refresh Token mới
+        var refreshTokenExpiresAt = DateTime.UtcNow.AddDays(_jwtTokenGenerator.RefreshTokenExpiryDays);
         var newAccessToken = _jwtTokenGenerator.GenerateAccessToken(user);
         var newRefreshToken = _jwtTokenGenerator.GenerateRefreshToken();
 
         user.RefreshToken = _refreshTokenHasher.HashToken(newRefreshToken);
-        user.RefreshTokenExpiryTime = DateTime.UtcNow.AddDays(7);
+        user.RefreshTokenExpiryTime = refreshTokenExpiresAt;
         await _context.SaveChangesAsync(cancellationToken);
 
         var userDto = new UserDto(
@@ -89,7 +90,8 @@ public class RefreshTokenCommandHandler : IRequestHandler<RefreshTokenCommand, R
             AccessToken: newAccessToken,
             RefreshToken: newRefreshToken,
             ExpiresInSeconds: _jwtTokenGenerator.ExpiryInSeconds,
-            User: userDto
+            User: userDto,
+            RefreshTokenExpiresAt: refreshTokenExpiresAt
         ));
     }
 }

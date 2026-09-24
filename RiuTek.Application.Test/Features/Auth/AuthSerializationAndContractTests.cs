@@ -1,6 +1,7 @@
 using System.Text.Json;
 using FluentAssertions;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Configuration;
 using RiuTek.API.Contracts;
 using RiuTek.Application.DTOs;
 using RiuTek.Application.Features.Auth.Commands;
@@ -14,7 +15,7 @@ namespace RiuTek.Application.Test.Features.Auth;
 public class AuthSerializationAndContractTests
 {
     [Fact]
-    public void AuthResponse_Serialization_ShouldNotContainRefreshToken()
+    public void AuthResponse_Serialization_ShouldNotContainRefreshTokenOrInternalExpiry()
     {
         // Arrange
         var userDto = new UserDto(
@@ -42,6 +43,7 @@ public class AuthSerializationAndContractTests
 
         // Assert
         json.Should().NotContainEquivalentOf("refreshToken");
+        json.Should().NotContainEquivalentOf("refreshTokenExpiresAt");
         json.Should().Contain("accessToken");
         json.Should().Contain("expiresInSeconds");
         json.Should().Contain("user");
@@ -50,6 +52,8 @@ public class AuthSerializationAndContractTests
         var root = doc.RootElement;
         root.TryGetProperty("refreshToken", out _).Should().BeFalse();
         root.TryGetProperty("RefreshToken", out _).Should().BeFalse();
+        root.TryGetProperty("refreshTokenExpiresAt", out _).Should().BeFalse();
+        root.TryGetProperty("RefreshTokenExpiresAt", out _).Should().BeFalse();
         root.GetProperty("accessToken").GetString().Should().Be("access_token_sample");
         root.GetProperty("expiresInSeconds").GetInt32().Should().Be(3600);
         root.GetProperty("user").GetProperty("email").GetString().Should().Be("test@example.com");
@@ -104,10 +108,47 @@ public class AuthSerializationAndContractTests
         settings.SameSite.Should().Be(SameSiteMode.Strict);
         settings.HttpOnly.Should().BeTrue();
         settings.Secure.Should().BeTrue();
-        settings.ExpiryDays.Should().Be(7);
 
         var validateAct = () => settings.Validate();
         validateAct.Should().NotThrow();
+    }
+
+    [Fact]
+    public void RefreshCookieSettings_SecurityInvariants_CannotBeOverwrittenByConfigurationBinder()
+    {
+        // Arrange: Try to inject insecure overrides via configuration binder
+        var inMemorySettings = new Dictionary<string, string?>
+        {
+            ["RefreshCookieSettings:CookieName"] = "custom.refresh_cookie",
+            ["RefreshCookieSettings:Path"] = "/api/v1/auth",
+            ["RefreshCookieSettings:HttpOnly"] = "false",
+            ["RefreshCookieSettings:Secure"] = "false",
+            ["RefreshCookieSettings:SameSite"] = "None"
+        };
+
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(inMemorySettings)
+            .Build();
+
+        var settings = new RefreshCookieSettings();
+
+        // Act
+        configuration.GetSection(RefreshCookieSettings.SectionName).Bind(settings);
+
+        // Assert: Configurable properties are bound, but security invariants remain immutable
+        settings.CookieName.Should().Be("custom.refresh_cookie");
+        settings.Path.Should().Be("/api/v1/auth");
+        settings.HttpOnly.Should().BeTrue("HttpOnly must be an immutable security invariant");
+        settings.Secure.Should().BeTrue("Secure must be an immutable security invariant");
+        settings.SameSite.Should().Be(SameSiteMode.Strict, "SameSite must remain Strict");
+
+        // Reflection check: Confirm setters do not exist for invariants
+        typeof(RefreshCookieSettings).GetProperty(nameof(RefreshCookieSettings.HttpOnly))!.SetMethod.Should().BeNull();
+        typeof(RefreshCookieSettings).GetProperty(nameof(RefreshCookieSettings.Secure))!.SetMethod.Should().BeNull();
+        typeof(RefreshCookieSettings).GetProperty(nameof(RefreshCookieSettings.SameSite))!.SetMethod.Should().BeNull();
+
+        // Confirm ExpiryDays is removed from RefreshCookieSettings (single-source lifetime)
+        typeof(RefreshCookieSettings).GetProperty("ExpiryDays").Should().BeNull();
     }
 
     [Theory]
@@ -139,12 +180,32 @@ public class AuthSerializationAndContractTests
     [InlineData(0)]
     [InlineData(-1)]
     [InlineData(-7)]
-    public void RefreshCookieSettings_Validation_ShouldThrowWhenExpiryDaysNonPositive(int days)
+    public void JwtSettings_Validation_ShouldThrowWhenRefreshTokenExpiryDaysNonPositive(int days)
     {
-        var settings = new RefreshCookieSettings { ExpiryDays = days };
+        var settings = new JwtSettings
+        {
+            SecretKey = "A_Valid_Secret_Key_With_At_Least_32_Characters_Length!",
+            ExpiryMinutes = 60,
+            RefreshTokenExpiryDays = days
+        };
+
         var act = () => settings.Validate();
         act.Should().Throw<InvalidOperationException>()
-            .WithMessage("*ExpiryDays*");
+            .WithMessage("*RefreshTokenExpiryDays*");
+    }
+
+    [Fact]
+    public void JwtSettings_Validation_ShouldPassWhenRefreshTokenExpiryDaysPositive()
+    {
+        var settings = new JwtSettings
+        {
+            SecretKey = "A_Valid_Secret_Key_With_At_Least_32_Characters_Length!",
+            ExpiryMinutes = 60,
+            RefreshTokenExpiryDays = 7
+        };
+
+        var act = () => settings.Validate();
+        act.Should().NotThrow();
     }
 
     [Fact]

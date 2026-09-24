@@ -88,12 +88,13 @@ public class RegisterCommandHandler : IRequestHandler<RegisterCommand, Result<Au
             phoneNumber: request.PhoneNumber?.Trim()
         );
 
-        // 4. Sinh Access Token và Refresh Token (hạn 7 ngày)
+        // 4. Sinh Access Token và Refresh Token
+        var refreshTokenExpiresAt = DateTime.UtcNow.AddDays(_jwtTokenGenerator.RefreshTokenExpiryDays);
         var accessToken = _jwtTokenGenerator.GenerateAccessToken(user);
         var refreshToken = _jwtTokenGenerator.GenerateRefreshToken();
 
         user.RefreshToken = _refreshTokenHasher.HashToken(refreshToken);
-        user.RefreshTokenExpiryTime = DateTime.UtcNow.AddDays(7);
+        user.RefreshTokenExpiryTime = refreshTokenExpiresAt;
 
         // 5. Lưu vào Database
         _context.Users.Add(user);
@@ -112,7 +113,8 @@ public class RegisterCommandHandler : IRequestHandler<RegisterCommand, Result<Au
             AccessToken: accessToken,
             RefreshToken: refreshToken,
             ExpiresInSeconds: _jwtTokenGenerator.ExpiryInSeconds,
-            User: userDto
+            User: userDto,
+            RefreshTokenExpiresAt: refreshTokenExpiresAt
         ));
     }
 }

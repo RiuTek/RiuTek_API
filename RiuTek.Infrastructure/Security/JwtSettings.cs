@@ -10,6 +10,7 @@ public class JwtSettings
     public string Issuer { get; set; } = "RiuTek.API";
     public string Audience { get; set; } = "RiuTek.Client";
     public int ExpiryMinutes { get; set; } = 60;
+    public int RefreshTokenExpiryDays { get; set; } = 7;
 
     public void Validate()
     {
@@ -38,6 +39,12 @@ public class JwtSettings
         {
             throw new InvalidOperationException(
                 "JWT ExpiryMinutes must be greater than 0.");
+        }
+
+        if (RefreshTokenExpiryDays <= 0)
+        {
+            throw new InvalidOperationException(
+                "JWT RefreshTokenExpiryDays must be greater than 0.");
         }
     }
 }

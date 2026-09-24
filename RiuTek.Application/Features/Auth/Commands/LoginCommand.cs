@@ -79,11 +79,12 @@ public class LoginCommandHandler : IRequestHandler<LoginCommand, Result<AuthResp
         }
 
         // 4. Sinh Access Token và Refresh Token mới
+        var refreshTokenExpiresAt = DateTime.UtcNow.AddDays(_jwtTokenGenerator.RefreshTokenExpiryDays);
         var accessToken = _jwtTokenGenerator.GenerateAccessToken(user);
         var refreshToken = _jwtTokenGenerator.GenerateRefreshToken();
 
         user.RefreshToken = _refreshTokenHasher.HashToken(refreshToken);
-        user.RefreshTokenExpiryTime = DateTime.UtcNow.AddDays(7);
+        user.RefreshTokenExpiryTime = refreshTokenExpiresAt;
         await _context.SaveChangesAsync(cancellationToken);
 
         var userDto = new UserDto(
@@ -99,7 +100,8 @@ public class LoginCommandHandler : IRequestHandler<LoginCommand, Result<AuthResp
             AccessToken: accessToken,
             RefreshToken: refreshToken,
             ExpiresInSeconds: _jwtTokenGenerator.ExpiryInSeconds,
-            User: userDto
+            User: userDto,
+            RefreshTokenExpiresAt: refreshTokenExpiresAt
         ));
     }
 }

@@ -19,6 +19,7 @@ public class JwtTokenGenerator : IJwtTokenGenerator
     }
 
     public int ExpiryInSeconds => _jwtSettings.ExpiryMinutes * 60;
+    public int RefreshTokenExpiryDays => _jwtSettings.RefreshTokenExpiryDays;
 
     public string GenerateAccessToken(User user)
     {

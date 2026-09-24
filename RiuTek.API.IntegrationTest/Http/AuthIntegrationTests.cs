@@ -5,6 +5,7 @@ using System.Text.Json;
 using FluentAssertions;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using RiuTek.API.Contracts;
 using RiuTek.API.IntegrationTest.Infrastructure;
@@ -140,6 +141,7 @@ public class AuthIntegrationTests : IAsyncLifetime
         var rawCookie = GetRawCookieHeader(response, CookieName);
         rawCookie.Should().NotBeNull();
         rawCookie!.ToLowerInvariant().Should().Contain("httponly");
+        rawCookie.ToLowerInvariant().Should().Contain("secure");
         rawCookie.ToLowerInvariant().Should().Contain("path=/api/v1/auth");
         rawCookie.ToLowerInvariant().Should().Contain("samesite=strict");
 
@@ -228,6 +230,7 @@ public class AuthIntegrationTests : IAsyncLifetime
         var rawCookie = GetRawCookieHeader(response, CookieName);
         rawCookie.Should().NotBeNull();
         rawCookie!.ToLowerInvariant().Should().Contain("httponly");
+        rawCookie.ToLowerInvariant().Should().Contain("secure");
         rawCookie.ToLowerInvariant().Should().Contain("path=/api/v1/auth");
         rawCookie.ToLowerInvariant().Should().Contain("samesite=strict");
     }
@@ -338,6 +341,13 @@ public class AuthIntegrationTests : IAsyncLifetime
         rotatedRawRefreshToken.Should().NotBeNullOrWhiteSpace();
         rotatedRawRefreshToken.Should().NotBe(initialRawRefreshToken);
 
+        var rotatedCookie = GetRawCookieHeader(refreshResponse, CookieName);
+        rotatedCookie.Should().NotBeNull();
+        rotatedCookie!.ToLowerInvariant().Should().Contain("httponly");
+        rotatedCookie.ToLowerInvariant().Should().Contain("secure");
+        rotatedCookie.ToLowerInvariant().Should().Contain("path=/api/v1/auth");
+        rotatedCookie.ToLowerInvariant().Should().Contain("samesite=strict");
+
         // Database should now have the rotated token's hash
         using var scope = _fixture.Factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
@@ -363,13 +373,13 @@ public class AuthIntegrationTests : IAsyncLifetime
 
         // 1st Refresh: Rotate token
         var refreshMsg1 = new HttpRequestMessage(HttpMethod.Post, "/api/v1/auth/refresh");
-        refreshMsg1.Headers.Add("Cookie", $"{CookieName}={oldRawToken}");
+        refreshMsg1.Headers.Add("Cookie", $"{CookieName}={WebUtility.UrlEncode(oldRawToken)}");
         var refreshResponse1 = await client.SendAsync(refreshMsg1);
         refreshResponse1.StatusCode.Should().Be(HttpStatusCode.OK);
 
         // Act: 2nd Refresh with the OLD token
         var refreshMsg2 = new HttpRequestMessage(HttpMethod.Post, "/api/v1/auth/refresh");
-        refreshMsg2.Headers.Add("Cookie", $"{CookieName}={oldRawToken}");
+        refreshMsg2.Headers.Add("Cookie", $"{CookieName}={WebUtility.UrlEncode(oldRawToken)}");
         var refreshResponse2 = await client.SendAsync(refreshMsg2);
 
         // Assert: Old token is rejected
@@ -419,7 +429,7 @@ public class AuthIntegrationTests : IAsyncLifetime
         }
 
         var expiredCookieMsg = new HttpRequestMessage(HttpMethod.Post, "/api/v1/auth/refresh");
-        expiredCookieMsg.Headers.Add("Cookie", $"{CookieName}={rawToken}");
+        expiredCookieMsg.Headers.Add("Cookie", $"{CookieName}={WebUtility.UrlEncode(rawToken)}");
         var expiredResponse = await client.SendAsync(expiredCookieMsg);
         expiredResponse.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
         var errorExpired = await expiredResponse.Content.ReadFromJsonAsync<ErrorResponse>(JsonOptions);
@@ -447,16 +457,20 @@ public class AuthIntegrationTests : IAsyncLifetime
 
         // Act 1: Call Logout with active cookie
         var logoutMsg1 = new HttpRequestMessage(HttpMethod.Post, "/api/v1/auth/logout");
-        logoutMsg1.Headers.Add("Cookie", $"{CookieName}={rawToken}");
+        logoutMsg1.Headers.Add("Cookie", $"{CookieName}={WebUtility.UrlEncode(rawToken)}");
         var logoutResponse1 = await client.SendAsync(logoutMsg1);
 
         // Assert 1: Status 204 NoContent
         logoutResponse1.StatusCode.Should().Be(HttpStatusCode.NoContent);
 
-        // Assert 1: Cookie deletion header is present
+        // Assert 1: Cookie deletion header is present with all security invariants
         var deleteCookieHeader = GetRawCookieHeader(logoutResponse1, CookieName);
         deleteCookieHeader.Should().NotBeNull();
         deleteCookieHeader!.ToLowerInvariant().Should().Contain("expires=");
+        deleteCookieHeader.ToLowerInvariant().Should().Contain("secure");
+        deleteCookieHeader.ToLowerInvariant().Should().Contain("httponly");
+        deleteCookieHeader.ToLowerInvariant().Should().Contain("path=/api/v1/auth");
+        deleteCookieHeader.ToLowerInvariant().Should().Contain("samesite=strict");
 
         // Assert 1: Token revoked in Database
         using (var scope = _fixture.Factory.Services.CreateScope())
@@ -510,6 +524,84 @@ public class AuthIntegrationTests : IAsyncLifetime
         var cartDto = await cartResponse.Content.ReadFromJsonAsync<CartDto>(JsonOptions);
         cartDto.Should().NotBeNull();
         cartDto!.Items.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task RefreshTokenLifetime_WhenConfiguredWithCustomDays_ShouldAlignDatabaseAndCookieExpiry()
+    {
+        // Arrange: Custom factory with 2-day refresh token lifetime
+        const int customExpiryDays = 2;
+        using var customFactory = _fixture.Factory.WithWebHostBuilder(builder =>
+        {
+            builder.UseSetting("JwtSettings:RefreshTokenExpiryDays", customExpiryDays.ToString());
+            builder.ConfigureAppConfiguration((_, config) =>
+            {
+                config.AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["JwtSettings:RefreshTokenExpiryDays"] = customExpiryDays.ToString()
+                });
+            });
+        });
+
+        using var client = customFactory.CreateClient(new WebApplicationFactoryClientOptions { HandleCookies = false });
+
+        var registerRequest = new RegisterRequest(
+            FullName: "Custom Lifetime User",
+            Email: "custom_lifetime@example.com",
+            Password: "SecurePassword123!",
+            PhoneNumber: null
+        );
+
+        // Act 1: Register
+        var regResponse = await client.PostAsJsonAsync("/api/v1/auth/register", registerRequest);
+        regResponse.StatusCode.Should().Be(HttpStatusCode.Created);
+
+        // Assert 1: Public JSON does not contain refreshToken or refreshTokenExpiresAt
+        var json = await regResponse.Content.ReadAsStringAsync();
+        json.Should().NotContainEquivalentOf("refreshToken");
+        json.Should().NotContainEquivalentOf("refreshTokenExpiresAt");
+
+        // Assert 2: Database expiry matches configured 2-day lifetime
+        using (var scope = customFactory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var user = await db.Users.FirstAsync(u => u.Email == "custom_lifetime@example.com");
+            user.RefreshTokenExpiryTime.Should().NotBeNull();
+            user.RefreshTokenExpiryTime!.Value.Should().BeCloseTo(DateTime.UtcNow.AddDays(customExpiryDays), TimeSpan.FromSeconds(10));
+
+            // Assert 3: Cookie Expires attribute matches database expiry within 2 seconds
+            var rawCookie = GetRawCookieHeader(regResponse, CookieName);
+            rawCookie.Should().NotBeNull();
+            rawCookie!.ToLowerInvariant().Should().Contain("secure");
+            rawCookie.ToLowerInvariant().Should().Contain("httponly");
+
+            var expiresMatch = System.Text.RegularExpressions.Regex.Match(rawCookie, @"expires=([^;]+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            expiresMatch.Success.Should().BeTrue();
+            var cookieExpires = DateTimeOffset.Parse(expiresMatch.Groups[1].Value.Trim());
+            cookieExpires.UtcDateTime.Should().BeCloseTo(user.RefreshTokenExpiryTime!.Value, TimeSpan.FromSeconds(2));
+        }
+
+        // Act 2: Refresh token - rotation creates new expiry also aligned with 2 days
+        var rawToken1 = ExtractCookieValue(regResponse, CookieName);
+        var refreshMsg = new HttpRequestMessage(HttpMethod.Post, "/api/v1/auth/refresh");
+        refreshMsg.Headers.Add("Cookie", $"{CookieName}={WebUtility.UrlEncode(rawToken1)}");
+        var refreshResponse = await client.SendAsync(refreshMsg);
+        refreshResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        // Assert 4: Rotated database expiry also matches 2 days from now
+        using (var scope = customFactory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var user = await db.Users.FirstAsync(u => u.Email == "custom_lifetime@example.com");
+            user.RefreshTokenExpiryTime.Should().NotBeNull();
+            user.RefreshTokenExpiryTime!.Value.Should().BeCloseTo(DateTime.UtcNow.AddDays(customExpiryDays), TimeSpan.FromSeconds(10));
+
+            var rotatedCookie = GetRawCookieHeader(refreshResponse, CookieName);
+            var rotatedExpiresMatch = System.Text.RegularExpressions.Regex.Match(rotatedCookie!, @"expires=([^;]+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            rotatedExpiresMatch.Success.Should().BeTrue();
+            var rotatedCookieExpires = DateTimeOffset.Parse(rotatedExpiresMatch.Groups[1].Value.Trim());
+            rotatedCookieExpires.UtcDateTime.Should().BeCloseTo(user.RefreshTokenExpiryTime!.Value, TimeSpan.FromSeconds(2));
+        }
     }
 
     #endregion
