@@ -153,3 +153,17 @@ jobs:
             exit 1
           fi
           echo "Categories endpoint returned HTTP 200 with valid JSON"
+
+          # 4. Posts endpoint check
+          echo "Checking /api/v1/posts?pageIndex=1&pageSize=10..."
+          posts_status=$(curl -s -o /dev/null -w "%{http_code}" "$APP_URL/api/v1/posts?pageIndex=1&pageSize=10" || true)
+          if [ "$posts_status" != "200" ]; then
+            echo "Posts endpoint returned HTTP $posts_status (expected 200)"
+            exit 1
+          fi
+          posts_body=$(curl -s "$APP_URL/api/v1/posts?pageIndex=1&pageSize=10")
+          if ! echo "$posts_body" | jq . > /dev/null 2>&1; then
+            echo "Posts endpoint did not return valid JSON"
+            exit 1
+          fi
+          echo "Posts endpoint returned HTTP 200 with valid JSON"
