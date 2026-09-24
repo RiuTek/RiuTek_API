@@ -24,22 +24,27 @@ public class RefreshTokenCommandHandler : IRequestHandler<RefreshTokenCommand, R
 {
     private readonly IApplicationDbContext _context;
     private readonly IJwtTokenGenerator _jwtTokenGenerator;
+    private readonly IRefreshTokenHasher _refreshTokenHasher;
 
     public RefreshTokenCommandHandler(
         IApplicationDbContext context,
-        IJwtTokenGenerator jwtTokenGenerator)
+        IJwtTokenGenerator jwtTokenGenerator,
+        IRefreshTokenHasher refreshTokenHasher)
     {
         _context = context;
         _jwtTokenGenerator = jwtTokenGenerator;
+        _refreshTokenHasher = refreshTokenHasher;
     }
 
     public async Task<Result<AuthResponseDto>> Handle(
         RefreshTokenCommand request,
         CancellationToken cancellationToken)
     {
-        // 1. Tìm User có Refresh Token tương ứng
+        // 1. Tìm User có Refresh Token tương ứng bằng hash
+        var hashedToken = _refreshTokenHasher.HashToken(request.RefreshToken);
+
         var user = await _context.Users
-            .FirstOrDefaultAsync(u => u.RefreshToken == request.RefreshToken, cancellationToken);
+            .FirstOrDefaultAsync(u => u.RefreshToken == hashedToken, cancellationToken);
 
         if (user == null)
         {
@@ -67,7 +72,7 @@ public class RefreshTokenCommandHandler : IRequestHandler<RefreshTokenCommand, R
         var newAccessToken = _jwtTokenGenerator.GenerateAccessToken(user);
         var newRefreshToken = _jwtTokenGenerator.GenerateRefreshToken();
 
-        user.RefreshToken = newRefreshToken;
+        user.RefreshToken = _refreshTokenHasher.HashToken(newRefreshToken);
         user.RefreshTokenExpiryTime = DateTime.UtcNow.AddDays(7);
         await _context.SaveChangesAsync(cancellationToken);
 

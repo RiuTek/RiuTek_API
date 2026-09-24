@@ -15,6 +15,11 @@ public interface IJwtTokenGenerator
     int ExpiryInSeconds { get; }
 }
 
+public interface IRefreshTokenHasher
+{
+    string HashToken(string token);
+}
+
 public interface ICurrentUserService
 {
     Guid? UserId { get; }

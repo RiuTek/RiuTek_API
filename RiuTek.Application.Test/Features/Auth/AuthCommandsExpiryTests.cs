@@ -32,7 +32,10 @@ public class AuthCommandsExpiryTests
         jwtGeneratorMock.Setup(x => x.GenerateRefreshToken()).Returns("mock_refresh_token");
         jwtGeneratorMock.Setup(x => x.ExpiryInSeconds).Returns(7200); // 120 minutes
 
-        var handler = new LoginCommandHandler(context, passwordHasherMock.Object, jwtGeneratorMock.Object);
+        var refreshTokenHasherMock = new Mock<IRefreshTokenHasher>();
+        refreshTokenHasherMock.Setup(x => x.HashToken(It.IsAny<string>())).Returns((string t) => "hash_" + t);
+
+        var handler = new LoginCommandHandler(context, passwordHasherMock.Object, jwtGeneratorMock.Object, refreshTokenHasherMock.Object);
 
         // Act
         var result = await handler.Handle(new LoginCommand("login@example.com", "ValidPassword123!"), CancellationToken.None);
@@ -57,7 +60,10 @@ public class AuthCommandsExpiryTests
         jwtGeneratorMock.Setup(x => x.GenerateRefreshToken()).Returns("mock_refresh_token");
         jwtGeneratorMock.Setup(x => x.ExpiryInSeconds).Returns(1800); // 30 minutes
 
-        var handler = new RegisterCommandHandler(context, passwordHasherMock.Object, jwtGeneratorMock.Object);
+        var refreshTokenHasherMock = new Mock<IRefreshTokenHasher>();
+        refreshTokenHasherMock.Setup(x => x.HashToken(It.IsAny<string>())).Returns((string t) => "hash_" + t);
+
+        var handler = new RegisterCommandHandler(context, passwordHasherMock.Object, jwtGeneratorMock.Object, refreshTokenHasherMock.Object);
 
         var command = new RegisterCommand("Register User", "register@example.com", "SecurePassword123!", null);
 
@@ -81,7 +87,7 @@ public class AuthCommandsExpiryTests
             role: UserRole.Customer
         )
         {
-            RefreshToken = "existing_refresh_token",
+            RefreshToken = "hash_existing_refresh_token",
             RefreshTokenExpiryTime = DateTime.UtcNow.AddDays(1)
         };
         context.Users.Add(user);
@@ -92,7 +98,11 @@ public class AuthCommandsExpiryTests
         jwtGeneratorMock.Setup(x => x.GenerateRefreshToken()).Returns("new_refresh_token");
         jwtGeneratorMock.Setup(x => x.ExpiryInSeconds).Returns(5400); // 90 minutes
 
-        var handler = new RefreshTokenCommandHandler(context, jwtGeneratorMock.Object);
+        var refreshTokenHasherMock = new Mock<IRefreshTokenHasher>();
+        refreshTokenHasherMock.Setup(x => x.HashToken("existing_refresh_token")).Returns("hash_existing_refresh_token");
+        refreshTokenHasherMock.Setup(x => x.HashToken("new_refresh_token")).Returns("hash_new_refresh_token");
+
+        var handler = new RefreshTokenCommandHandler(context, jwtGeneratorMock.Object, refreshTokenHasherMock.Object);
 
         // Act
         var result = await handler.Handle(new RefreshTokenCommand("existing_refresh_token"), CancellationToken.None);

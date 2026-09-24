@@ -70,8 +70,15 @@ public static class DependencyInjection
         // Security & Auth Services
         services.AddHttpContextAccessor();
         services.AddSingleton<IPasswordHasher, Services.PasswordHasher>();
+        services.AddSingleton<IRefreshTokenHasher, Sha256RefreshTokenHasher>();
         services.AddScoped<IJwtTokenGenerator, Services.JwtTokenGenerator>();
         services.AddScoped<ICurrentUserService, Services.CurrentUserService>();
+
+        // Refresh Cookie Settings & Validation
+        var refreshCookieSettings = new RefreshCookieSettings();
+        configuration.GetSection(RefreshCookieSettings.SectionName).Bind(refreshCookieSettings);
+        refreshCookieSettings.Validate();
+        services.AddSingleton(refreshCookieSettings);
 
         // Configure JWT Authentication
         services.AddAuthentication(options =>

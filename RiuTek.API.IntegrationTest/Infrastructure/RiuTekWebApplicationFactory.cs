@@ -22,6 +22,7 @@ public class RiuTekWebApplicationFactory : WebApplicationFactory<Program>
         builder.UseSetting("JwtSettings:SecretKey", TestJwtCanarySecret);
         builder.UseSetting("RedisSettings:Enabled", "false");
         builder.UseSetting("CartCleanup:Enabled", "false");
+        builder.UseSetting("RefreshCookieSettings:Secure", "false");
 
         builder.ConfigureAppConfiguration((_, config) =>
         {
@@ -30,7 +31,8 @@ public class RiuTekWebApplicationFactory : WebApplicationFactory<Program>
                 ["ConnectionStrings:DefaultConnection"] = _connectionString,
                 ["JwtSettings:SecretKey"] = TestJwtCanarySecret,
                 ["RedisSettings:Enabled"] = "false",
-                ["CartCleanup:Enabled"] = "false"
+                ["CartCleanup:Enabled"] = "false",
+                ["RefreshCookieSettings:Secure"] = "false"
             });
         });
     }

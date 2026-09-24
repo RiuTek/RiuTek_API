@@ -35,9 +35,9 @@ public class ActualEndpointMetadataTests
 
             endpoints.Should().NotBeEmpty();
 
-            // Total controller actions: 6 Posts + 6 Comments + 5 Products + 5 Categories + 5 Carts = 27
+            // Total controller actions: 6 Posts + 6 Comments + 5 Products + 5 Categories + 5 Carts + 4 Auth = 31
             var controllerEndpoints = endpoints.Where(e => e.Metadata.GetMetadata<ControllerActionDescriptor>() != null).ToList();
-            controllerEndpoints.Should().HaveCount(27);
+            controllerEndpoints.Should().HaveCount(31);
 
             // Helper to get action descriptor
             ControllerActionDescriptor GetDescriptor(RouteEndpoint e) => e.Metadata.GetMetadata<ControllerActionDescriptor>()!;
@@ -251,6 +251,40 @@ public class ActualEndpointMetadataTests
             clearCart.Should().NotBeNull();
             GetFullRoutePattern(clearCart!).Should().BeEquivalentTo("api/v1/carts/items");
             AssertAuthorized(clearCart!);
+
+            #endregion
+
+            #region Auth Endpoints (4)
+
+            var authEndpoints = endpoints.Where(e =>
+                e.Metadata.GetMetadata<ControllerActionDescriptor>()?.ControllerTypeInfo.AsType() == typeof(AuthController))
+                .ToList();
+
+            authEndpoints.Should().HaveCount(4);
+
+            // 28. POST api/v1/auth/register (AllowAnonymous) - Action: Register
+            var registerEndpoint = authEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(AuthController.Register) && GetHttpMethods(e).Contains("POST"));
+            registerEndpoint.Should().NotBeNull();
+            GetFullRoutePattern(registerEndpoint!).Should().BeEquivalentTo("api/v1/auth/register");
+            AssertPublicEndpoint(registerEndpoint!);
+
+            // 29. POST api/v1/auth/login (AllowAnonymous) - Action: Login
+            var loginEndpoint = authEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(AuthController.Login) && GetHttpMethods(e).Contains("POST"));
+            loginEndpoint.Should().NotBeNull();
+            GetFullRoutePattern(loginEndpoint!).Should().BeEquivalentTo("api/v1/auth/login");
+            AssertPublicEndpoint(loginEndpoint!);
+
+            // 30. POST api/v1/auth/refresh (AllowAnonymous) - Action: Refresh
+            var refreshEndpoint = authEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(AuthController.Refresh) && GetHttpMethods(e).Contains("POST"));
+            refreshEndpoint.Should().NotBeNull();
+            GetFullRoutePattern(refreshEndpoint!).Should().BeEquivalentTo("api/v1/auth/refresh");
+            AssertPublicEndpoint(refreshEndpoint!);
+
+            // 31. POST api/v1/auth/logout (AllowAnonymous) - Action: Logout
+            var logoutEndpoint = authEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(AuthController.Logout) && GetHttpMethods(e).Contains("POST"));
+            logoutEndpoint.Should().NotBeNull();
+            GetFullRoutePattern(logoutEndpoint!).Should().BeEquivalentTo("api/v1/auth/logout");
+            AssertPublicEndpoint(logoutEndpoint!);
 
             #endregion
         }
