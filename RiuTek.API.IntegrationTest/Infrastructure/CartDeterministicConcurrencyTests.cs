@@ -402,6 +402,7 @@ internal sealed class TestHookApplicationDbContext : IApplicationDbContext
     public DbSet<PCBuildItem> PCBuildItems => _inner.PCBuildItems;
     public DbSet<Order> Orders => _inner.Orders;
     public DbSet<OrderItem> OrderItems => _inner.OrderItems;
+    public DbSet<PaymentAttempt> PaymentAttempts => _inner.PaymentAttempts;
     public DbSet<User> Users => _inner.Users;
     public DbSet<UserAddress> UserAddresses => _inner.UserAddresses;
     public DbSet<Review> Reviews => _inner.Reviews;

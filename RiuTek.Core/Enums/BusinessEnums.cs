@@ -9,8 +9,8 @@ public enum PCBuildStatus
 
 public enum OrderStatus
 {
-    Pending = 1,
-    Paid = 2,
+    PendingPayment = 1,
+    Confirmed = 2,
     Processing = 3,
     Shipping = 4,
     Completed = 5,
@@ -31,6 +31,15 @@ public enum PaymentStatus
     Completed = 2,
     Failed = 3,
     Refunded = 4
+}
+
+public enum PaymentAttemptStatus
+{
+    Pending = 1,
+    Succeeded = 2,
+    Failed = 3,
+    Cancelled = 4,
+    Expired = 5
 }
 
 public enum UserRole

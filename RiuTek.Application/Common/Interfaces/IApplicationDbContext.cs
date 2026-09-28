@@ -11,6 +11,7 @@ public interface IApplicationDbContext
     DbSet<PCBuildItem> PCBuildItems { get; }
     DbSet<Order> Orders { get; }
     DbSet<OrderItem> OrderItems { get; }
+    DbSet<PaymentAttempt> PaymentAttempts { get; }
     DbSet<User> Users { get; }
     DbSet<UserAddress> UserAddresses { get; }
     DbSet<Review> Reviews { get; }
