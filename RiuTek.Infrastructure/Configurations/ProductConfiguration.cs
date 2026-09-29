@@ -43,7 +43,14 @@ public class ProductConfiguration : IEntityTypeConfiguration<Product>
             .HasMaxLength(100);
 
         builder.Property(p => p.Price)
-            .HasPrecision(18, 2);
+            .HasPrecision(18, 2)
+            .IsConcurrencyToken();
+
+        builder.Property(p => p.StockQuantity)
+            .IsConcurrencyToken();
+
+        builder.Property(p => p.IsActive)
+            .IsConcurrencyToken();
 
         builder.Property(p => p.OriginalPrice)
             .HasPrecision(18, 2);

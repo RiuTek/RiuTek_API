@@ -201,7 +201,16 @@ public class UpdateProductCommandHandler : IRequestHandler<UpdateProductCommand,
         product.Specifications = request.Specifications;
         product.UpdatedAt = DateTime.UtcNow;
 
-        await _context.SaveChangesAsync(cancellationToken);
+        try
+        {
+            await _context.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            return Result.Failure<ProductDto>(Error.Conflict(
+                "Product.ConcurrencyConflict",
+                "Sản phẩm đã bị thay đổi bởi một phiên làm việc khác. Vui lòng tải lại và thử lại."));
+        }
 
         return Result.Success(product.ToDto());
     }

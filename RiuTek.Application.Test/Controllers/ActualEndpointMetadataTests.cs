@@ -35,9 +35,9 @@ public class ActualEndpointMetadataTests
 
             endpoints.Should().NotBeEmpty();
 
-            // Total controller actions: 6 Posts + 6 Comments + 5 Products + 5 Categories + 5 Carts + 4 Auth = 31
+            // Total controller actions: 6 Posts + 6 Comments + 5 Products + 5 Categories + 5 Carts + 4 Auth + 2 Orders = 33
             var controllerEndpoints = endpoints.Where(e => e.Metadata.GetMetadata<ControllerActionDescriptor>() != null).ToList();
-            controllerEndpoints.Should().HaveCount(31);
+            controllerEndpoints.Should().HaveCount(33);
 
             // Helper to get action descriptor
             ControllerActionDescriptor GetDescriptor(RouteEndpoint e) => e.Metadata.GetMetadata<ControllerActionDescriptor>()!;
@@ -285,6 +285,28 @@ public class ActualEndpointMetadataTests
             logoutEndpoint.Should().NotBeNull();
             GetFullRoutePattern(logoutEndpoint!).Should().BeEquivalentTo("api/v1/auth/logout");
             AssertPublicEndpoint(logoutEndpoint!);
+
+            #endregion
+
+            #region Orders Endpoints (2)
+
+            var orderEndpoints = endpoints.Where(e =>
+                e.Metadata.GetMetadata<ControllerActionDescriptor>()?.ControllerTypeInfo.AsType() == typeof(OrdersController))
+                .ToList();
+
+            orderEndpoints.Should().HaveCount(2);
+
+            // 32. POST api/v1/orders/checkout/quote ([Authorize]) - Action: GetCheckoutQuote
+            var quoteEndpoint = orderEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(OrdersController.GetCheckoutQuote) && GetHttpMethods(e).Contains("POST"));
+            quoteEndpoint.Should().NotBeNull();
+            GetFullRoutePattern(quoteEndpoint!).Should().BeEquivalentTo("api/v1/orders/checkout/quote");
+            AssertAuthorized(quoteEndpoint!);
+
+            // 33. POST api/v1/orders/checkout ([Authorize]) - Action: Checkout
+            var checkoutEndpoint = orderEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(OrdersController.Checkout) && GetHttpMethods(e).Contains("POST"));
+            checkoutEndpoint.Should().NotBeNull();
+            GetFullRoutePattern(checkoutEndpoint!).Should().BeEquivalentTo("api/v1/orders/checkout");
+            AssertAuthorized(checkoutEndpoint!);
 
             #endregion
         }
