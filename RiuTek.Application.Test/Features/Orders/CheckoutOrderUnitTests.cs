@@ -446,6 +446,7 @@ public class CheckoutOrderUnitTests
         var result = await handler.Handle(command, CancellationToken.None);
 
         result.IsFailure.Should().BeTrue();
+        result.Error.Type.Should().Be(ErrorType.Conflict);
         result.Error.Code.Should().Be("Checkout.EmptyCart");
     }
 
@@ -468,7 +469,32 @@ public class CheckoutOrderUnitTests
         var result = await handler.Handle(command, CancellationToken.None);
 
         result.IsFailure.Should().BeTrue();
+        result.Error.Type.Should().Be(ErrorType.Conflict);
         result.Error.Code.Should().Be("Checkout.ProductInactive");
+        (await context.Orders.CountAsync()).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task CheckoutCart_WhenInvalidPrice_ReturnsInvalidPrice()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var (user, address, product, cart) = await SeedPrerequisitesAsync(context, price: 0m);
+        var authMock = CreateCurrentUserMock(user.Id);
+        var handler = new CheckoutCartCommandHandler(context, authMock.Object);
+
+        var command = new CheckoutCartCommand(
+            AddressId: address.Id,
+            ExpectedCartVersion: cart.Version,
+            PaymentMethod: PaymentMethod.COD,
+            Notes: null,
+            IdempotencyKey: "valid-idempotency-key-zero-price"
+        );
+
+        var result = await handler.Handle(command, CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Type.Should().Be(ErrorType.Conflict);
+        result.Error.Code.Should().Be("Checkout.InvalidPrice");
         (await context.Orders.CountAsync()).Should().Be(0);
     }
 
@@ -491,8 +517,89 @@ public class CheckoutOrderUnitTests
         var result = await handler.Handle(command, CancellationToken.None);
 
         result.IsFailure.Should().BeTrue();
+        result.Error.Type.Should().Be(ErrorType.Conflict);
         result.Error.Code.Should().Be("Checkout.InsufficientStock");
         (await context.Orders.CountAsync()).Should().Be(0);
+    }
+
+    private class GenericDbUpdateExceptionThrowingDbContext : TestApplicationDbContext
+    {
+        public bool ShouldThrowGeneric { get; set; }
+        public bool ShouldThrowExactUniqueViolation { get; set; }
+
+        public GenericDbUpdateExceptionThrowingDbContext(DbContextOptions<TestApplicationDbContext> options) : base(options) { }
+
+        public override Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
+        {
+            if (ShouldThrowGeneric)
+            {
+                throw new DbUpdateException("Generic database failure", new Exception("Foreign key violation on table XYZ"));
+            }
+
+            if (ShouldThrowExactUniqueViolation)
+            {
+                throw new DbUpdateException("Unique violation", new Exception("Unique constraint UX_Orders_UserId_CheckoutIdempotencyKey violation"));
+            }
+
+            return base.SaveChangesAsync(cancellationToken);
+        }
+    }
+
+    [Fact]
+    public async Task CheckoutCart_WhenGenericDbUpdateExceptionOccurs_PropagatesExceptionAndDoesNotSwallow()
+    {
+        var options = new DbContextOptionsBuilder<TestApplicationDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+
+        await using var context = new GenericDbUpdateExceptionThrowingDbContext(options);
+        var (user, address, product, cart) = await SeedPrerequisitesAsync(context);
+        var authMock = CreateCurrentUserMock(user.Id);
+        var handler = new CheckoutCartCommandHandler(context, authMock.Object);
+
+        context.ShouldThrowGeneric = true;
+
+        var command = new CheckoutCartCommand(
+            AddressId: address.Id,
+            ExpectedCartVersion: cart.Version,
+            PaymentMethod: PaymentMethod.COD,
+            Notes: null,
+            IdempotencyKey: "valid-idempotency-key-generic-err"
+        );
+
+        var act = () => handler.Handle(command, CancellationToken.None);
+
+        var thrown = await act.Should().ThrowAsync<DbUpdateException>();
+        thrown.Which.Message.Should().Contain("Generic database failure");
+    }
+
+    [Fact]
+    public async Task CheckoutCart_WhenIdempotencyUniqueViolationOccurs_AndOrderNotFound_ReturnsIdempotencyConflict()
+    {
+        var options = new DbContextOptionsBuilder<TestApplicationDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+
+        await using var context = new GenericDbUpdateExceptionThrowingDbContext(options);
+        var (user, address, product, cart) = await SeedPrerequisitesAsync(context);
+        var authMock = CreateCurrentUserMock(user.Id);
+        var handler = new CheckoutCartCommandHandler(context, authMock.Object);
+
+        context.ShouldThrowExactUniqueViolation = true;
+
+        var command = new CheckoutCartCommand(
+            AddressId: address.Id,
+            ExpectedCartVersion: cart.Version,
+            PaymentMethod: PaymentMethod.COD,
+            Notes: null,
+            IdempotencyKey: "valid-idempotency-key-unique-err"
+        );
+
+        var result = await handler.Handle(command, CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Type.Should().Be(ErrorType.Conflict);
+        result.Error.Code.Should().Be("Checkout.IdempotencyConflict");
     }
 
     [Fact]

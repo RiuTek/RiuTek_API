@@ -109,7 +109,7 @@ public class CheckoutCartCommandHandler : IRequestHandler<CheckoutCartCommand, R
 
         if (cart is null || cart.Items.Count == 0)
         {
-            return Result.Failure<CheckoutOrderDto>(Error.Validation(
+            return Result.Failure<CheckoutOrderDto>(Error.Conflict(
                 "Checkout.EmptyCart",
                 "Cart is empty."));
         }
@@ -149,21 +149,21 @@ public class CheckoutCartCommandHandler : IRequestHandler<CheckoutCartCommand, R
 
             if (!product.IsActive)
             {
-                return Result.Failure<CheckoutOrderDto>(Error.Validation(
+                return Result.Failure<CheckoutOrderDto>(Error.Conflict(
                     "Checkout.ProductInactive",
                     $"Product '{product.Name}' is no longer active."));
             }
 
             if (product.Price <= 0)
             {
-                return Result.Failure<CheckoutOrderDto>(Error.Validation(
+                return Result.Failure<CheckoutOrderDto>(Error.Conflict(
                     "Checkout.InvalidPrice",
                     $"Product '{product.Name}' has an invalid price."));
             }
 
             if (product.StockQuantity < cartItem.Quantity)
             {
-                return Result.Failure<CheckoutOrderDto>(Error.Validation(
+                return Result.Failure<CheckoutOrderDto>(Error.Conflict(
                     "Checkout.InsufficientStock",
                     $"Insufficient stock for product '{product.Name}'. Available: {product.StockQuantity}, Requested: {cartItem.Quantity}."));
             }
@@ -240,7 +240,10 @@ public class CheckoutCartCommandHandler : IRequestHandler<CheckoutCartCommand, R
                 "Checkout.InventoryChanged",
                 "Inventory or cart version changed during checkout. Please try again."));
         }
-        catch (DbUpdateException)
+        catch (DbUpdateException ex)
+            when (_context.IsUniqueViolation(
+                ex,
+                "UX_Orders_UserId_CheckoutIdempotencyKey"))
         {
             var replayedOrder = await _context.Orders
                 .AsNoTracking()

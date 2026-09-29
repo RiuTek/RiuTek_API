@@ -566,4 +566,240 @@ public class OrderCheckoutIntegrationTests : IAsyncLifetime
         activeProp.Should().NotBeNull();
         activeProp!.IsConcurrencyToken.Should().BeTrue("IsActive must be configured as concurrency token");
     }
+
+    // 9. Deterministic concurrent same-key race: hai request cùng một user/cart/idempotency-key
+    // cả 2 bắt đầu trước khi save; sau khi release barrier, cả 2 đều success, cùng OrderId/OrderNumber;
+    // stock chỉ trừ một lần, duy nhất một Order trong database.
+    [Fact]
+    public async Task Scenario09_DeterministicConcurrentSameKeyRace_BothSucceed_SameOrder_StockDecrementedOnce()
+    {
+        var initialStock = 10;
+        var cartQty = 2;
+        var (_, product) = await SeedProductAsync(stockQuantity: initialStock);
+        var (user, address, cart) = await SeedUserWithAddressAndCartAsync(product.Id, cartQty);
+
+        using var scope1 = _fixture.Factory.Services.CreateScope();
+        var db1 = scope1.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        using var scope2 = _fixture.Factory.Services.CreateScope();
+        var db2 = scope2.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        var tcs1ReachedHook = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tcs2ReachedHook = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tcsAllowDb1ToSave = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tcsAllowDb2ToSave = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var hookDb1 = new TestHookApplicationDbContext(db1, async ct =>
+        {
+            tcs1ReachedHook.TrySetResult(true);
+            await tcsAllowDb1ToSave.Task.WaitAsync(TimeSpan.FromSeconds(15), ct);
+        });
+
+        var hookDb2 = new TestHookApplicationDbContext(db2, async ct =>
+        {
+            tcs2ReachedHook.TrySetResult(true);
+            await tcsAllowDb2ToSave.Task.WaitAsync(TimeSpan.FromSeconds(15), ct);
+        });
+
+        var userSvc1 = new TestCurrentUserService(user.Id);
+        var userSvc2 = new TestCurrentUserService(user.Id);
+
+        var handler1 = new CheckoutCartCommandHandler(hookDb1, userSvc1);
+        var handler2 = new CheckoutCartCommandHandler(hookDb2, userSvc2);
+
+        var sharedKey = "deterministic-same-key-" + Guid.NewGuid().ToString("N");
+
+        var cmd1 = new CheckoutCartCommand(address.Id, cart.Version, PaymentMethod.COD, null, sharedKey);
+        var cmd2 = new CheckoutCartCommand(address.Id, cart.Version, PaymentMethod.COD, null, sharedKey);
+
+        var task1 = handler1.Handle(cmd1, CancellationToken.None);
+        await tcs1ReachedHook.Task.WaitAsync(TimeSpan.FromSeconds(15));
+
+        var task2 = handler2.Handle(cmd2, CancellationToken.None);
+        await tcs2ReachedHook.Task.WaitAsync(TimeSpan.FromSeconds(15));
+
+        // Both handlers have deterministically read the initial state and are held before SaveChangesAsync
+        tcsAllowDb1ToSave.TrySetResult(true);
+        var result1 = await task1;
+
+        tcsAllowDb2ToSave.TrySetResult(true);
+        var result2 = await task2;
+
+        // Both requests must succeed and return the exact same Order
+        result1.IsSuccess.Should().BeTrue("Winner request must succeed");
+        result2.IsSuccess.Should().BeTrue("Concurrent same-key request must recover and succeed");
+
+        result1.Value.Id.Should().Be(result2.Value.Id);
+        result1.Value.OrderNumber.Should().Be(result2.Value.OrderNumber);
+
+        // Verify in DB with fresh context
+        using var verifyScope = _fixture.Factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        var orders = await verifyDb.Orders.Include(o => o.Items).ToListAsync();
+        orders.Should().ContainSingle("Exactly one order row must exist in PostgreSQL");
+        orders.Single().Items.Should().ContainSingle();
+
+        var freshProduct = await verifyDb.Products.FindAsync(product.Id);
+        freshProduct!.StockQuantity.Should().Be(initialStock - cartQty, "Stock must be deducted exactly once");
+
+        var freshCart = await verifyDb.Carts.Include(c => c.Items).SingleAsync(c => c.UserId == user.Id);
+        freshCart.Items.Should().BeEmpty("Cart must be cleared");
+    }
+
+    // 10. API status regression: EmptyCart, ProductInactive, InvalidPrice, InsufficientStock trả 409 Conflict.
+    [Fact]
+    public async Task Scenario10_ApiStatusRegression_StateConflictsReturn409_InvalidRequestsReturn400()
+    {
+        var (_, activeProduct) = await SeedProductAsync(price: 100_000m, stockQuantity: 10, isActive: true);
+        var (_, inactiveProduct) = await SeedProductAsync(price: 100_000m, stockQuantity: 10, isActive: false);
+        var (_, zeroPriceProduct) = await SeedProductAsync(price: 0m, stockQuantity: 10, isActive: true);
+        var (_, lowStockProduct) = await SeedProductAsync(price: 100_000m, stockQuantity: 1, isActive: true);
+
+        // 10a. Empty Cart -> 409 Conflict with Checkout.EmptyCart
+        var (clientEmpty, _, addrEmpty, cartEmpty) = await CreateUserWithAddressAndCartAsync(activeProduct.Id, quantity: 0);
+        using (var req = new HttpRequestMessage(HttpMethod.Post, "/api/v1/orders/checkout")
+        {
+            Content = JsonContent.Create(new CheckoutCartRequest(addrEmpty.Id, cartEmpty.Version, PaymentMethod.COD, null))
+        })
+        {
+            req.Headers.Add("Idempotency-Key", Guid.NewGuid().ToString("N"));
+            var res = await clientEmpty.SendAsync(req);
+            res.StatusCode.Should().Be(HttpStatusCode.Conflict);
+            var body = await res.Content.ReadAsStringAsync();
+            body.Should().Contain("Checkout.EmptyCart");
+        }
+
+        // 10b. Inactive Product -> 409 Conflict with Checkout.ProductInactive
+        var (clientInactive, _, addrInactive, cartInactive) = await CreateUserWithAddressAndCartAsync(inactiveProduct.Id, quantity: 1);
+        using (var req = new HttpRequestMessage(HttpMethod.Post, "/api/v1/orders/checkout")
+        {
+            Content = JsonContent.Create(new CheckoutCartRequest(addrInactive.Id, cartInactive.Version, PaymentMethod.COD, null))
+        })
+        {
+            req.Headers.Add("Idempotency-Key", Guid.NewGuid().ToString("N"));
+            var res = await clientInactive.SendAsync(req);
+            res.StatusCode.Should().Be(HttpStatusCode.Conflict);
+            var body = await res.Content.ReadAsStringAsync();
+            body.Should().Contain("Checkout.ProductInactive");
+        }
+
+        // 10c. Invalid Price (price <= 0) -> 409 Conflict with Checkout.InvalidPrice
+        var (clientZeroPrice, _, addrZeroPrice, cartZeroPrice) = await CreateUserWithAddressAndCartAsync(zeroPriceProduct.Id, quantity: 1);
+        using (var req = new HttpRequestMessage(HttpMethod.Post, "/api/v1/orders/checkout")
+        {
+            Content = JsonContent.Create(new CheckoutCartRequest(addrZeroPrice.Id, cartZeroPrice.Version, PaymentMethod.COD, null))
+        })
+        {
+            req.Headers.Add("Idempotency-Key", Guid.NewGuid().ToString("N"));
+            var res = await clientZeroPrice.SendAsync(req);
+            res.StatusCode.Should().Be(HttpStatusCode.Conflict);
+            var body = await res.Content.ReadAsStringAsync();
+            body.Should().Contain("Checkout.InvalidPrice");
+        }
+
+        // 10d. Insufficient Stock -> 409 Conflict with Checkout.InsufficientStock
+        var (clientLowStock, _, addrLowStock, cartLowStock) = await CreateUserWithAddressAndCartAsync(lowStockProduct.Id, quantity: 5);
+        using (var req = new HttpRequestMessage(HttpMethod.Post, "/api/v1/orders/checkout")
+        {
+            Content = JsonContent.Create(new CheckoutCartRequest(addrLowStock.Id, cartLowStock.Version, PaymentMethod.COD, null))
+        })
+        {
+            req.Headers.Add("Idempotency-Key", Guid.NewGuid().ToString("N"));
+            var res = await clientLowStock.SendAsync(req);
+            res.StatusCode.Should().Be(HttpStatusCode.Conflict);
+            var body = await res.Content.ReadAsStringAsync();
+            body.Should().Contain("Checkout.InsufficientStock");
+        }
+    }
+
+    // 11. Test nhánh exact constraint: unique violation đúng UX_Orders_UserId_CheckoutIdempotencyKey
+    // trên PostgreSQL thực tế được catch và recover thành công Order hiện hữu.
+    [Fact]
+    public async Task Scenario11_PostgreSqlExactUniqueViolation_TriggersFilterAndRecoversOrder()
+    {
+        var (_, product) = await SeedProductAsync(stockQuantity: 20);
+        var (user, address, cart) = await SeedUserWithAddressAndCartAsync(product.Id, 2);
+
+        using var scope = _fixture.Factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        var idempotencyKey = "exact-unique-pg-" + Guid.NewGuid().ToString("N");
+
+        // Trước khi SaveChangesAsync, một scope khác chèn một Order với chính xác cùng (UserId, CheckoutIdempotencyKey)
+        // mà KHÔNG chạm vào Product hay Cart. Việc này đảm bảo PostgreSQL ném unique violation trên constraint UX_Orders_UserId_CheckoutIdempotencyKey.
+        var hookDb = new TestHookApplicationDbContext(db, async _ =>
+        {
+            using var bgScope = _fixture.Factory.Services.CreateScope();
+            var bgDb = bgScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var bgOrder = new Order(
+                orderNumber: $"ORD-BG-{Guid.NewGuid():N}"[..25],
+                userId: user.Id,
+                checkoutIdempotencyKey: idempotencyKey,
+                customerName: "BG User",
+                customerEmail: user.Email,
+                customerPhone: "0901234567",
+                shippingAddress: "123 BG Street",
+                paymentMethod: PaymentMethod.COD
+            );
+            bgOrder.AddItem(product.Id, product.Name, product.Sku, product.Price, 2);
+            bgDb.Orders.Add(bgOrder);
+            await bgDb.SaveChangesAsync();
+        });
+
+        var userSvc = new TestCurrentUserService(user.Id);
+        var handler = new CheckoutCartCommandHandler(hookDb, userSvc);
+
+        var command = new CheckoutCartCommand(
+            AddressId: address.Id,
+            ExpectedCartVersion: cart.Version,
+            PaymentMethod: PaymentMethod.COD,
+            Notes: null,
+            IdempotencyKey: idempotencyKey
+        );
+
+        var result = await handler.Handle(command, CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue("Exact unique violation on UX_Orders_UserId_CheckoutIdempotencyKey must be caught and recovered");
+        result.Value.Should().NotBeNull();
+        result.Value.CustomerName.Should().Be("BG User");
+    }
+
+    // 12. Non-idempotency DbUpdateException trên PostgreSQL (ví dụ foreign key failure)
+    // KHÔNG được bắt bởi filter và phải propagate ra ngoài.
+    [Fact]
+    public async Task Scenario12_PostgreSqlNonIdempotencyDbUpdateException_IsNotCaughtAndPropagates()
+    {
+        var (_, product) = await SeedProductAsync(stockQuantity: 20);
+        var (user, address, cart) = await SeedUserWithAddressAndCartAsync(product.Id, 2);
+
+        using var scope = _fixture.Factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        // Trước khi SaveChangesAsync, một scope khác xóa User khỏi PostgreSQL.
+        // Khi handler thử INSERT Order, foreign key constraint FK_Orders_Users_UserId sẽ thất bại!
+        var hookDb = new TestHookApplicationDbContext(db, async _ =>
+        {
+            using var bgScope = _fixture.Factory.Services.CreateScope();
+            var bgDb = bgScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            await bgDb.UserAddresses.Where(a => a.UserId == user.Id).ExecuteDeleteAsync();
+            await bgDb.CartItems.Where(ci => ci.CartId == cart.Id).ExecuteDeleteAsync();
+            await bgDb.Carts.Where(c => c.UserId == user.Id).ExecuteDeleteAsync();
+            await bgDb.Users.Where(u => u.Id == user.Id).ExecuteDeleteAsync();
+        });
+
+        var userSvc = new TestCurrentUserService(user.Id);
+        var handler = new CheckoutCartCommandHandler(hookDb, userSvc);
+
+        var command = new CheckoutCartCommand(
+            AddressId: address.Id,
+            ExpectedCartVersion: cart.Version,
+            PaymentMethod: PaymentMethod.COD,
+            Notes: null,
+            IdempotencyKey: Guid.NewGuid().ToString("N")
+        );
+
+        var act = () => handler.Handle(command, CancellationToken.None);
+
+        await act.Should().ThrowAsync<DbUpdateException>();
+    }
 }
