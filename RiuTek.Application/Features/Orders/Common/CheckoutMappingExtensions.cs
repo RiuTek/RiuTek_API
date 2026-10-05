@@ -10,7 +10,7 @@ public static class CheckoutMappingExtensions
 
     public static CheckoutOrderDto MapToDto(Order order)
     {
-        var items = order.Items.Select(i => new CheckoutOrderItemDto(
+        var items = order.Items.Select(i => new OrderItemDto(
             ProductId: i.ProductId,
             ProductName: i.ProductName,
             ProductSku: i.ProductSku,

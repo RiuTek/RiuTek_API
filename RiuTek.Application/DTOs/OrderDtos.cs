@@ -31,6 +31,54 @@ public record CheckoutQuoteItemDto(
     string? IssueCode
 );
 
+public record OrderItemDto(
+    Guid ProductId,
+    string ProductName,
+    string ProductSku,
+    decimal UnitPrice,
+    int Quantity,
+    decimal TotalPrice
+);
+
+public record OrderSummaryDto(
+    Guid Id,
+    string OrderNumber,
+    [property: JsonConverter(typeof(JsonStringEnumConverter))]
+    OrderStatus Status,
+    [property: JsonConverter(typeof(JsonStringEnumConverter))]
+    PaymentMethod PaymentMethod,
+    [property: JsonConverter(typeof(JsonStringEnumConverter))]
+    PaymentStatus PaymentStatus,
+    string Currency,
+    decimal TotalAmount,
+    decimal DiscountAmount,
+    decimal FinalAmount,
+    int ItemCount,
+    DateTime CreatedAt
+);
+
+public record OrderDetailDto(
+    Guid Id,
+    string OrderNumber,
+    [property: JsonConverter(typeof(JsonStringEnumConverter))]
+    OrderStatus Status,
+    [property: JsonConverter(typeof(JsonStringEnumConverter))]
+    PaymentMethod PaymentMethod,
+    [property: JsonConverter(typeof(JsonStringEnumConverter))]
+    PaymentStatus PaymentStatus,
+    string Currency,
+    string CustomerName,
+    string CustomerEmail,
+    string CustomerPhone,
+    string ShippingAddress,
+    decimal TotalAmount,
+    decimal DiscountAmount,
+    decimal FinalAmount,
+    string? Notes,
+    DateTime CreatedAt,
+    IReadOnlyList<OrderItemDto> Items
+);
+
 public record CheckoutOrderDto(
     Guid Id,
     string OrderNumber,
@@ -50,14 +98,5 @@ public record CheckoutOrderDto(
     decimal FinalAmount,
     string? Notes,
     DateTime CreatedAt,
-    IReadOnlyList<CheckoutOrderItemDto> Items
-);
-
-public record CheckoutOrderItemDto(
-    Guid ProductId,
-    string ProductName,
-    string ProductSku,
-    decimal UnitPrice,
-    int Quantity,
-    decimal TotalPrice
+    IReadOnlyList<OrderItemDto> Items
 );

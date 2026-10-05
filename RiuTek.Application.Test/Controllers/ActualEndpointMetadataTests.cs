@@ -35,9 +35,9 @@ public class ActualEndpointMetadataTests
 
             endpoints.Should().NotBeEmpty();
 
-            // Total controller actions: 6 Posts + 6 Comments + 5 Products + 5 Categories + 5 Carts + 4 Auth + 2 Orders = 33
+            // Total controller actions: 6 Posts + 6 Comments + 5 Products + 5 Categories + 5 Carts + 4 Auth + 4 Orders = 35
             var controllerEndpoints = endpoints.Where(e => e.Metadata.GetMetadata<ControllerActionDescriptor>() != null).ToList();
-            controllerEndpoints.Should().HaveCount(33);
+            controllerEndpoints.Should().HaveCount(35);
 
             // Helper to get action descriptor
             ControllerActionDescriptor GetDescriptor(RouteEndpoint e) => e.Metadata.GetMetadata<ControllerActionDescriptor>()!;
@@ -288,21 +288,33 @@ public class ActualEndpointMetadataTests
 
             #endregion
 
-            #region Orders Endpoints (2)
+            #region Orders Endpoints (4)
 
             var orderEndpoints = endpoints.Where(e =>
                 e.Metadata.GetMetadata<ControllerActionDescriptor>()?.ControllerTypeInfo.AsType() == typeof(OrdersController))
                 .ToList();
 
-            orderEndpoints.Should().HaveCount(2);
+            orderEndpoints.Should().HaveCount(4);
 
-            // 32. POST api/v1/orders/checkout/quote ([Authorize]) - Action: GetCheckoutQuote
+            // 32. GET api/v1/orders ([Authorize]) - Action: GetMyOrders
+            var getMyOrdersEndpoint = orderEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(OrdersController.GetMyOrders) && GetHttpMethods(e).Contains("GET"));
+            getMyOrdersEndpoint.Should().NotBeNull();
+            GetFullRoutePattern(getMyOrdersEndpoint!).Should().BeEquivalentTo("api/v1/orders");
+            AssertAuthorized(getMyOrdersEndpoint!);
+
+            // 33. GET api/v1/orders/{id:guid} ([Authorize]) - Action: GetMyOrderById
+            var getMyOrderByIdEndpoint = orderEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(OrdersController.GetMyOrderById) && GetHttpMethods(e).Contains("GET"));
+            getMyOrderByIdEndpoint.Should().NotBeNull();
+            GetFullRoutePattern(getMyOrderByIdEndpoint!).Should().BeEquivalentTo("api/v1/orders/{id:guid}");
+            AssertAuthorized(getMyOrderByIdEndpoint!);
+
+            // 34. POST api/v1/orders/checkout/quote ([Authorize]) - Action: GetCheckoutQuote
             var quoteEndpoint = orderEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(OrdersController.GetCheckoutQuote) && GetHttpMethods(e).Contains("POST"));
             quoteEndpoint.Should().NotBeNull();
             GetFullRoutePattern(quoteEndpoint!).Should().BeEquivalentTo("api/v1/orders/checkout/quote");
             AssertAuthorized(quoteEndpoint!);
 
-            // 33. POST api/v1/orders/checkout ([Authorize]) - Action: Checkout
+            // 35. POST api/v1/orders/checkout ([Authorize]) - Action: Checkout
             var checkoutEndpoint = orderEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(OrdersController.Checkout) && GetHttpMethods(e).Contains("POST"));
             checkoutEndpoint.Should().NotBeNull();
             GetFullRoutePattern(checkoutEndpoint!).Should().BeEquivalentTo("api/v1/orders/checkout");
