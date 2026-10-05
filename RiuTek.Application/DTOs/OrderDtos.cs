@@ -98,5 +98,12 @@ public record CheckoutOrderDto(
     decimal FinalAmount,
     string? Notes,
     DateTime CreatedAt,
-    IReadOnlyList<OrderItemDto> Items
+    IReadOnlyList<OrderItemDto> Items,
+    PaymentActionDto? PaymentAction = null
+);
+
+public record PaymentActionDto(
+    string Type,
+    string Url,
+    DateTime ExpiresAt
 );

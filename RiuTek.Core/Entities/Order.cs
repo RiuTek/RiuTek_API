@@ -209,6 +209,33 @@ public class Order : BaseEntity, IAggregateRoot
         return Result.Success();
     }
 
+    public Result ExpirePaymentAttempt(Guid paymentAttemptId, DateTime expiredAtUtc)
+    {
+        var attemptResult = FindPaymentAttempt(paymentAttemptId);
+        if (attemptResult.IsFailure)
+            return Result.Failure(attemptResult.Error);
+
+        var attempt = attemptResult.Value;
+        if (attempt.Method != PaymentMethod.Stripe)
+            return Result.Failure(Error.Conflict("Payment.InvalidMethod", "Only Stripe payment attempts can be expired via this method."));
+
+        // If attempt is already expired and order is already cancelled, idempotent success
+        if (attempt.Status == PaymentAttemptStatus.Expired && Status == OrderStatus.Cancelled)
+            return Result.Success();
+
+        if (Status != OrderStatus.PendingPayment)
+            return Result.Failure(Error.Conflict("Order.InvalidStatusForExpiry", "Order must be in PendingPayment status to expire."));
+
+        var result = attempt.MarkExpired(expiredAtUtc);
+        if (result.IsFailure)
+            return result;
+
+        Status = OrderStatus.Cancelled;
+        PaymentStatus = PaymentStatus.Failed;
+        UpdatedAt = expiredAtUtc;
+        return Result.Success();
+    }
+
     private Result<PaymentAttempt> FindPaymentAttempt(Guid paymentAttemptId)
     {
         if (paymentAttemptId == Guid.Empty)

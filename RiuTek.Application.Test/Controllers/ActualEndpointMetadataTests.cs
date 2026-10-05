@@ -35,9 +35,9 @@ public class ActualEndpointMetadataTests
 
             endpoints.Should().NotBeEmpty();
 
-            // Total controller actions: 6 Posts + 6 Comments + 5 Products + 5 Categories + 5 Carts + 4 Auth + 4 Orders = 35
+            // Total controller actions: 6 Posts + 6 Comments + 5 Products + 5 Categories + 5 Carts + 4 Auth + 4 Orders + 1 Payments = 36
             var controllerEndpoints = endpoints.Where(e => e.Metadata.GetMetadata<ControllerActionDescriptor>() != null).ToList();
-            controllerEndpoints.Should().HaveCount(35);
+            controllerEndpoints.Should().HaveCount(36);
 
             // Helper to get action descriptor
             ControllerActionDescriptor GetDescriptor(RouteEndpoint e) => e.Metadata.GetMetadata<ControllerActionDescriptor>()!;
@@ -319,6 +319,22 @@ public class ActualEndpointMetadataTests
             checkoutEndpoint.Should().NotBeNull();
             GetFullRoutePattern(checkoutEndpoint!).Should().BeEquivalentTo("api/v1/orders/checkout");
             AssertAuthorized(checkoutEndpoint!);
+
+            #endregion
+
+            #region Payments Endpoints (1)
+
+            var paymentEndpoints = endpoints.Where(e =>
+                e.Metadata.GetMetadata<ControllerActionDescriptor>()?.ControllerTypeInfo.AsType() == typeof(PaymentsController))
+                .ToList();
+
+            paymentEndpoints.Should().HaveCount(1);
+
+            // 36. POST api/v1/payments/stripe/webhook (AllowAnonymous) - Action: StripeWebhook
+            var webhookEndpoint = paymentEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(PaymentsController.StripeWebhook) && GetHttpMethods(e).Contains("POST"));
+            webhookEndpoint.Should().NotBeNull();
+            GetFullRoutePattern(webhookEndpoint!).Should().BeEquivalentTo("api/v1/payments/stripe/webhook");
+            AssertPublicEndpoint(webhookEndpoint!);
 
             #endregion
         }

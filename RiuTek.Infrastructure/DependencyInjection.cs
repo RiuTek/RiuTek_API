@@ -115,6 +115,13 @@ public static class DependencyInjection
         services.AddScoped<Services.ICartCleanupService, Services.CartCleanupService>();
         services.AddHostedService<Services.CartCleanupBackgroundService>();
 
+        // Stripe Settings & Payment Gateway
+        var stripeSettings = new Settings.StripeSettings();
+        configuration.GetSection(Settings.StripeSettings.SectionName).Bind(stripeSettings);
+        stripeSettings.Validate();
+        services.Configure<Settings.StripeSettings>(configuration.GetSection(Settings.StripeSettings.SectionName));
+        services.AddScoped<IStripePaymentGateway, Services.StripePaymentGateway>();
+
         return services;
     }
 }

@@ -87,6 +87,7 @@ public abstract class ApiControllerBase : ControllerBase
             ErrorType.Forbidden => StatusCode(StatusCodes.Status403Forbidden, new { error.Code, error.Description }),
             ErrorType.Conflict => Conflict(new { error.Code, error.Description }),
             ErrorType.Validation => BadRequest(new { error.Code, error.Description }),
+            ErrorType.Unavailable => StatusCode(StatusCodes.Status503ServiceUnavailable, new { error.Code, error.Description }),
             _ => BadRequest(new { error.Code, error.Description })
         };
     }

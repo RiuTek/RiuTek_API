@@ -7,7 +7,8 @@ public enum ErrorType
     NotFound,
     Conflict,
     Unauthorized,
-    Forbidden
+    Forbidden,
+    Unavailable
 }
 
 public record Error(string Code, string Description, ErrorType Type = ErrorType.Failure)
@@ -21,4 +22,5 @@ public record Error(string Code, string Description, ErrorType Type = ErrorType.
     public static Error Conflict(string code, string description) => new(code, description, ErrorType.Conflict);
     public static Error Unauthorized(string code, string description) => new(code, description, ErrorType.Unauthorized);
     public static Error Forbidden(string code, string description) => new(code, description, ErrorType.Forbidden);
+    public static Error Unavailable(string code, string description) => new(code, description, ErrorType.Unavailable);
 }

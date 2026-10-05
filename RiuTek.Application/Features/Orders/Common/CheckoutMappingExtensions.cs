@@ -8,7 +8,7 @@ public static class CheckoutMappingExtensions
     public static string FormatShippingAddress(UserAddress address) =>
         $"{address.AddressLine}, {address.Ward}, {address.District}, {address.City}";
 
-    public static CheckoutOrderDto MapToDto(Order order)
+    public static CheckoutOrderDto MapToDto(Order order, PaymentActionDto? paymentAction = null)
     {
         var items = order.Items.Select(i => new OrderItemDto(
             ProductId: i.ProductId,
@@ -35,7 +35,8 @@ public static class CheckoutMappingExtensions
             FinalAmount: order.FinalAmount,
             Notes: order.Notes,
             CreatedAt: order.CreatedAt,
-            Items: items
+            Items: items,
+            PaymentAction: paymentAction
         );
     }
 }

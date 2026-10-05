@@ -64,6 +64,7 @@ public class OrdersController : ApiControllerBase
     [ProducesResponseType(StatusCodes.Status403Forbidden)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     [ProducesResponseType(StatusCodes.Status409Conflict)]
+    [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
     public async Task<IActionResult> Checkout(
         [FromHeader(Name = "Idempotency-Key")] string? idempotencyKey,
         [FromBody] CheckoutCartRequest request,
