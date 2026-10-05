@@ -2,6 +2,7 @@ using MediatR;
 using Microsoft.EntityFrameworkCore;
 using RiuTek.Application.Common.Interfaces;
 using RiuTek.Core.Common;
+using RiuTek.Core.Entities;
 using RiuTek.Core.Enums;
 
 namespace RiuTek.Application.Features.Payments.Commands;
@@ -10,6 +11,9 @@ public record ProcessStripeWebhookCommand(string Payload, string Signature) : IR
 
 public class ProcessStripeWebhookCommandHandler : IRequestHandler<ProcessStripeWebhookCommand, Result>
 {
+    // Test-only signal to verify concurrency recovery branch execution
+    public static int ConcurrencyRecoveryExecutionCount;
+
     private readonly IApplicationDbContext _context;
     private readonly IStripePaymentGateway _stripeGateway;
 
@@ -49,49 +53,36 @@ public class ProcessStripeWebhookCommandHandler : IRequestHandler<ProcessStripeW
                 "Webhook metadata missing valid OrderId or PaymentAttemptId."));
         }
 
-        // 4. Handle checkout.session.completed
+        // 4. Load Order and PaymentAttempt
+        var order = await _context.Orders
+            .Include(o => o.Items)
+            .Include(o => o.PaymentAttempts)
+            .FirstOrDefaultAsync(o => o.Id == orderId, cancellationToken);
+
+        if (order is null)
+        {
+            return Result.Failure(Error.NotFound("Order.NotFound", "Order not found."));
+        }
+
+        var attempt = order.PaymentAttempts.FirstOrDefault(p => p.Id == paymentAttemptId);
+        if (attempt is null)
+        {
+            return Result.Failure(Error.NotFound("Payment.AttemptNotFound", "Payment attempt not found."));
+        }
+
+        // 5. Shared Webhook Integrity Validation & ProviderReference Binding
+        var validationResult = ValidateAndBindWebhookEvent(webhookEvent, order, attempt);
+        if (validationResult.IsFailure)
+        {
+            return validationResult;
+        }
+
+        // 6. Handle checkout.session.completed
         if (webhookEvent.EventType == StripeWebhookEventType.CheckoutSessionCompleted)
         {
             if (webhookEvent.PaymentStatus != "paid")
             {
                 return Result.Success();
-            }
-
-            var order = await _context.Orders
-                .Include(o => o.PaymentAttempts)
-                .FirstOrDefaultAsync(o => o.Id == orderId, cancellationToken);
-
-            if (order is null)
-            {
-                return Result.Failure(Error.NotFound("Order.NotFound", "Order not found."));
-            }
-
-            var attempt = order.PaymentAttempts.FirstOrDefault(p => p.Id == paymentAttemptId);
-            if (attempt is null)
-            {
-                return Result.Failure(Error.NotFound("Payment.AttemptNotFound", "Payment attempt not found."));
-            }
-
-            if (attempt.Method != PaymentMethod.Stripe)
-            {
-                return Result.Failure(Error.Conflict("Payment.InvalidMethod", "Not a Stripe payment attempt."));
-            }
-
-            if (!string.Equals(attempt.Currency, webhookEvent.Currency, StringComparison.OrdinalIgnoreCase))
-            {
-                return Result.Failure(Error.Conflict("Payment.CurrencyMismatch", "Payment currency does not match attempt."));
-            }
-
-            if (!webhookEvent.AmountTotal.HasValue || attempt.Amount != webhookEvent.AmountTotal.Value)
-            {
-                return Result.Failure(Error.Conflict("Payment.AmountMismatch", "Payment amount does not match attempt."));
-            }
-
-            if (!string.IsNullOrWhiteSpace(webhookEvent.SessionId) &&
-                !string.IsNullOrWhiteSpace(attempt.ProviderReference) &&
-                !string.Equals(attempt.ProviderReference, webhookEvent.SessionId, StringComparison.Ordinal))
-            {
-                return Result.Failure(Error.Conflict("Payment.ProviderReferenceMismatch", "Provider reference mismatch."));
             }
 
             // Idempotent duplicate success check
@@ -115,30 +106,9 @@ public class ProcessStripeWebhookCommandHandler : IRequestHandler<ProcessStripeW
             return Result.Success();
         }
 
-        // 5. Handle checkout.session.expired
+        // 7. Handle checkout.session.expired
         if (webhookEvent.EventType == StripeWebhookEventType.CheckoutSessionExpired)
         {
-            var order = await _context.Orders
-                .Include(o => o.Items)
-                .Include(o => o.PaymentAttempts)
-                .FirstOrDefaultAsync(o => o.Id == orderId, cancellationToken);
-
-            if (order is null)
-            {
-                return Result.Failure(Error.NotFound("Order.NotFound", "Order not found."));
-            }
-
-            var attempt = order.PaymentAttempts.FirstOrDefault(p => p.Id == paymentAttemptId);
-            if (attempt is null)
-            {
-                return Result.Failure(Error.NotFound("Payment.AttemptNotFound", "Payment attempt not found."));
-            }
-
-            if (attempt.Method != PaymentMethod.Stripe)
-            {
-                return Result.Failure(Error.Conflict("Payment.InvalidMethod", "Not a Stripe payment attempt."));
-            }
-
             // Duplicate expired event check: if already expired and cancelled, return 200 without restoring stock again
             if (attempt.Status == PaymentAttemptStatus.Expired && order.Status == OrderStatus.Cancelled)
             {
@@ -180,6 +150,8 @@ public class ProcessStripeWebhookCommandHandler : IRequestHandler<ProcessStripeW
             }
             catch (DbUpdateConcurrencyException)
             {
+                Interlocked.Increment(ref ConcurrencyRecoveryExecutionCount);
+
                 // Reload order state to check if duplicate concurrent webhook already succeeded
                 var reloadedOrder = await _context.Orders
                     .AsNoTracking()
@@ -195,6 +167,50 @@ public class ProcessStripeWebhookCommandHandler : IRequestHandler<ProcessStripeW
 
                 throw;
             }
+        }
+
+        return Result.Success();
+    }
+
+    private static Result ValidateAndBindWebhookEvent(
+        StripeWebhookEvent webhookEvent,
+        Order order,
+        PaymentAttempt attempt)
+    {
+        if (attempt.Method != PaymentMethod.Stripe)
+        {
+            return Result.Failure(Error.Conflict("Payment.InvalidMethod", "Not a Stripe payment attempt."));
+        }
+
+        if (string.IsNullOrWhiteSpace(webhookEvent.SessionId))
+        {
+            return Result.Failure(Error.Conflict("Payment.ProviderReferenceMismatch", "Webhook event missing SessionId."));
+        }
+
+        var normalizedSessionId = webhookEvent.SessionId.Trim();
+
+        if (string.IsNullOrWhiteSpace(attempt.ProviderReference))
+        {
+            var bindResult = attempt.SetProviderReference(normalizedSessionId);
+            if (bindResult.IsFailure)
+            {
+                return bindResult;
+            }
+        }
+        else if (!string.Equals(attempt.ProviderReference, normalizedSessionId, StringComparison.Ordinal))
+        {
+            return Result.Failure(Error.Conflict("Payment.ProviderReferenceMismatch", "Provider reference mismatch."));
+        }
+
+        if (string.IsNullOrWhiteSpace(webhookEvent.Currency) ||
+            !string.Equals(attempt.Currency, webhookEvent.Currency.Trim(), StringComparison.OrdinalIgnoreCase))
+        {
+            return Result.Failure(Error.Conflict("Payment.CurrencyMismatch", "Payment currency does not match attempt."));
+        }
+
+        if (!webhookEvent.AmountTotal.HasValue || attempt.Amount != webhookEvent.AmountTotal.Value)
+        {
+            return Result.Failure(Error.Conflict("Payment.AmountMismatch", "Payment amount does not match attempt."));
         }
 
         return Result.Success();

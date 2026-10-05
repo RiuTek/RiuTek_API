@@ -49,4 +49,9 @@ public class ApplicationDbContext : DbContext, IUnitOfWork, IApplicationDbContex
 
         return false;
     }
+
+    public void ClearTrackedChanges()
+    {
+        ChangeTracker.Clear();
+    }
 }

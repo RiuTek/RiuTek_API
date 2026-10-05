@@ -132,6 +132,7 @@ public class CheckoutStripeUnitTests
 
         var gatewayMock = new Mock<IStripePaymentGateway>();
         gatewayMock.Setup(g => g.IsEnabled).Returns(true);
+        gatewayMock.Setup(g => g.CheckoutSessionLifetime).Returns(TimeSpan.FromMinutes(45));
         gatewayMock.Setup(g => g.EnsureCheckoutSessionAsync(
                 It.IsAny<CreateStripeCheckoutSessionRequest>(),
                 It.IsAny<string?>(),
@@ -186,6 +187,7 @@ public class CheckoutStripeUnitTests
         attempt.Currency.Should().Be("VND");
         attempt.ProviderReference.Should().Be("cs_test_session_1");
         attempt.IdempotencyKey.Should().Be($"stripe-{order.Id:N}");
+        attempt.ExpiresAt.Should().BeCloseTo(DateTime.UtcNow.AddMinutes(45), TimeSpan.FromSeconds(10));
 
         // Stock held
         var productDb = await context.Products.FindAsync(product.Id);
@@ -205,6 +207,7 @@ public class CheckoutStripeUnitTests
 
         var gatewayMock = new Mock<IStripePaymentGateway>();
         gatewayMock.Setup(g => g.IsEnabled).Returns(true);
+        gatewayMock.Setup(g => g.CheckoutSessionLifetime).Returns(TimeSpan.FromMinutes(45));
         gatewayMock.Setup(g => g.EnsureCheckoutSessionAsync(
                 It.IsAny<CreateStripeCheckoutSessionRequest>(),
                 It.IsAny<string?>(),
@@ -254,6 +257,7 @@ public class CheckoutStripeUnitTests
 
         var gatewayMock = new Mock<IStripePaymentGateway>();
         gatewayMock.Setup(g => g.IsEnabled).Returns(true);
+        gatewayMock.Setup(g => g.CheckoutSessionLifetime).Returns(TimeSpan.FromMinutes(45));
         // Gateway unavailable on initial checkout
         gatewayMock.Setup(g => g.EnsureCheckoutSessionAsync(
                 It.IsAny<CreateStripeCheckoutSessionRequest>(),
@@ -355,6 +359,7 @@ public class CheckoutStripeUnitTests
 
         var gatewayMock = new Mock<IStripePaymentGateway>();
         gatewayMock.Setup(g => g.IsEnabled).Returns(true);
+        gatewayMock.Setup(g => g.CheckoutSessionLifetime).Returns(TimeSpan.FromMinutes(45));
 
         var handler = new CheckoutCartCommandHandler(context, authMock.Object, gatewayMock.Object);
 
@@ -405,6 +410,7 @@ public class CheckoutStripeUnitTests
 
         var gatewayMock = new Mock<IStripePaymentGateway>();
         gatewayMock.Setup(g => g.IsEnabled).Returns(true);
+        gatewayMock.Setup(g => g.CheckoutSessionLifetime).Returns(TimeSpan.FromMinutes(45));
 
         var handler = new CheckoutCartCommandHandler(context, authMock.Object, gatewayMock.Object);
 
@@ -420,5 +426,127 @@ public class CheckoutStripeUnitTests
 
         result.IsFailure.Should().BeTrue();
         result.Error.Code.Should().Be("Checkout.IdempotencyConflict");
+    }
+
+    [Fact]
+    public async Task CheckoutCart_WhenCustomLifetimeConfigured_FlowsToAttemptAndStripeRequest()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var (user, address, _, cart) = await SeedPrerequisitesAsync(context, cartQuantity: 1);
+        var authMock = CreateCurrentUserMock(user.Id);
+
+        CreateStripeCheckoutSessionRequest? capturedRequest = null;
+        var gatewayMock = new Mock<IStripePaymentGateway>();
+        gatewayMock.Setup(g => g.IsEnabled).Returns(true);
+        gatewayMock.Setup(g => g.CheckoutSessionLifetime).Returns(TimeSpan.FromMinutes(60));
+        gatewayMock.Setup(g => g.EnsureCheckoutSessionAsync(
+                It.IsAny<CreateStripeCheckoutSessionRequest>(),
+                It.IsAny<string?>(),
+                It.IsAny<CancellationToken>()))
+            .Callback<CreateStripeCheckoutSessionRequest, string?, CancellationToken>((req, _, _) => capturedRequest = req)
+            .ReturnsAsync((CreateStripeCheckoutSessionRequest req, string? r, CancellationToken _) =>
+                Result.Success(new StripeCheckoutSessionResult(
+                    SessionId: "cs_60min_session",
+                    Url: "https://checkout.stripe.com/pay/cs_60min_session",
+                    ExpiresAt: req.ExpiresAt
+                )));
+
+        var handler = new CheckoutCartCommandHandler(context, authMock.Object, gatewayMock.Object);
+
+        var command = new CheckoutCartCommand(
+            AddressId: address.Id,
+            ExpectedCartVersion: cart.Version,
+            PaymentMethod: PaymentMethod.Stripe,
+            Notes: null,
+            IdempotencyKey: "stripe-60min-lifetime-test"
+        );
+
+        var result = await handler.Handle(command, CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+        capturedRequest.Should().NotBeNull();
+        capturedRequest!.ExpiresAt.Should().BeCloseTo(DateTime.UtcNow.AddMinutes(60), TimeSpan.FromSeconds(10));
+
+        var dbOrder = await context.Orders.Include(o => o.PaymentAttempts).FirstAsync(o => o.Id == result.Value.Id);
+        var attempt = dbOrder.PaymentAttempts.First();
+        attempt.ExpiresAt.Should().BeCloseTo(DateTime.UtcNow.AddMinutes(60), TimeSpan.FromSeconds(10));
+        attempt.ExpiresAt.Should().Be(capturedRequest.ExpiresAt);
+    }
+
+    [Fact]
+    public async Task CheckoutCart_WhenAddItemFails_ReturnsFailureWithoutMutatingStockOrCart()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var (user, address, product, cart) = await SeedPrerequisitesAsync(context, cartQuantity: 1);
+        var authMock = CreateCurrentUserMock(user.Id);
+
+        // Mutate cart item quantity to 0 to bypass ValidateCartItems but trigger domain Order.AddItem failure
+        var cartItem = cart.Items.First();
+        typeof(CartItem).GetProperty(nameof(CartItem.Quantity))!.SetValue(cartItem, 0);
+        await context.SaveChangesAsync();
+
+        var gatewayMock = new Mock<IStripePaymentGateway>();
+        gatewayMock.Setup(g => g.IsEnabled).Returns(true);
+        gatewayMock.Setup(g => g.CheckoutSessionLifetime).Returns(TimeSpan.FromMinutes(45));
+
+        var handler = new CheckoutCartCommandHandler(context, authMock.Object, gatewayMock.Object);
+
+        var command = new CheckoutCartCommand(
+            AddressId: address.Id,
+            ExpectedCartVersion: cart.Version,
+            PaymentMethod: PaymentMethod.Stripe,
+            Notes: null,
+            IdempotencyKey: "stripe-additem-fail-test"
+        );
+
+        var result = await handler.Handle(command, CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be("Order.InvalidQuantity");
+
+        // No orders created
+        (await context.Orders.CountAsync()).Should().Be(0);
+
+        // Stock unmutated
+        var dbProd = await context.Products.FindAsync(product.Id);
+        dbProd!.StockQuantity.Should().Be(50);
+    }
+
+    [Fact]
+    public async Task CheckoutCart_WhenSetProviderReferenceFails_ReturnsFailure()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var (user, address, product, cart) = await SeedPrerequisitesAsync(context, cartQuantity: 1);
+        var authMock = CreateCurrentUserMock(user.Id);
+
+        var gatewayMock = new Mock<IStripePaymentGateway>();
+        gatewayMock.Setup(g => g.IsEnabled).Returns(true);
+        gatewayMock.Setup(g => g.CheckoutSessionLifetime).Returns(TimeSpan.FromMinutes(45));
+        // Return a whitespace session ID which fails PaymentAttempt.SetProviderReference
+        gatewayMock.Setup(g => g.EnsureCheckoutSessionAsync(
+                It.IsAny<CreateStripeCheckoutSessionRequest>(),
+                It.IsAny<string?>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync((CreateStripeCheckoutSessionRequest req, string? r, CancellationToken _) =>
+                Result.Success(new StripeCheckoutSessionResult(
+                    SessionId: "   ",
+                    Url: "https://checkout.stripe.com/pay/invalid",
+                    ExpiresAt: req.ExpiresAt
+                )));
+
+        var handler = new CheckoutCartCommandHandler(context, authMock.Object, gatewayMock.Object);
+
+        var command = new CheckoutCartCommand(
+            AddressId: address.Id,
+            ExpectedCartVersion: cart.Version,
+            PaymentMethod: PaymentMethod.Stripe,
+            Notes: null,
+            IdempotencyKey: "stripe-setref-fail-test"
+        );
+
+        var result = await handler.Handle(command, CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be("Payment.InvalidProviderReference");
     }
 }

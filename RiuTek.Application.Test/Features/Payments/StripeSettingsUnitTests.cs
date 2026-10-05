@@ -135,8 +135,70 @@ public class StripeSettingsUnitTests
             CheckoutSessionMinutes = 30
         };
 
-        var act = () => settings.Validate();
+        var act = () => settings.Validate("Development");
         act.Should().NotThrow();
+    }
+
+    [Theory]
+    [InlineData("Production")]
+    [InlineData("Staging")]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("Testing")]
+    public void Validate_WhenEnabled_AndLocalhostHttpUrlInNonDevelopment_ThrowsInvalidOperationException(string? env)
+    {
+        var settings = new StripeSettings
+        {
+            Enabled = true,
+            SecretKey = "sk_test_valid_key_123",
+            WebhookSecret = "whsec_valid_secret_123",
+            SuccessUrl = "http://localhost:3000/order-success",
+            CancelUrl = "http://127.0.0.1:3000/order-cancel",
+            CheckoutSessionMinutes = 30
+        };
+
+        var act = () => settings.Validate(env);
+        act.Should().Throw<InvalidOperationException>()
+            .WithMessage("*SuccessUrl*");
+    }
+
+    [Theory]
+    [InlineData("Production")]
+    [InlineData("Staging")]
+    [InlineData("Development")]
+    [InlineData(null)]
+    public void Validate_WhenEnabled_AndHttpsUrlInAnyEnvironment_DoesNotThrow(string? env)
+    {
+        var settings = new StripeSettings
+        {
+            Enabled = true,
+            SecretKey = "sk_test_valid_key_123",
+            WebhookSecret = "whsec_valid_secret_123",
+            SuccessUrl = "https://riutek.com/checkout/success",
+            CancelUrl = "https://riutek.com/checkout/cancel",
+            CheckoutSessionMinutes = 30
+        };
+
+        var act = () => settings.Validate(env);
+        act.Should().NotThrow();
+    }
+
+    [Fact]
+    public void Validate_WhenEnabled_AndNonLoopbackHttpUrlInDevelopment_ThrowsInvalidOperationException()
+    {
+        var settings = new StripeSettings
+        {
+            Enabled = true,
+            SecretKey = "sk_test_valid_key_123",
+            WebhookSecret = "whsec_valid_secret_123",
+            SuccessUrl = "http://external-site.com/checkout/success",
+            CancelUrl = "https://riutek.com/checkout/cancel",
+            CheckoutSessionMinutes = 30
+        };
+
+        var act = () => settings.Validate("Development");
+        act.Should().Throw<InvalidOperationException>()
+            .WithMessage("*SuccessUrl*");
     }
 
     [Theory]

@@ -8,12 +8,15 @@ namespace RiuTek.API;
 
 public static class DependencyInjection
 {
-    public static IServiceCollection AddAppDI(this IServiceCollection services, IConfiguration configuration)
+    public static IServiceCollection AddAppDI(
+        this IServiceCollection services,
+        IConfiguration configuration,
+        Microsoft.Extensions.Hosting.IHostEnvironment? environment = null)
     {
         services
             .AddCoreDI()
             .AddApplicationDI()
-            .AddInfrastructureDI(configuration);
+            .AddInfrastructureDI(configuration, environment);
 
         return services;
     }

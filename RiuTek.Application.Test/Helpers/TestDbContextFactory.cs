@@ -53,6 +53,11 @@ public class TestApplicationDbContext : DbContext, IApplicationDbContext
     {
         return ex.InnerException?.Message.Contains("Unique", StringComparison.OrdinalIgnoreCase) == true;
     }
+
+    public void ClearTrackedChanges()
+    {
+        ChangeTracker.Clear();
+    }
 }
 
 public static class TestDbContextFactory

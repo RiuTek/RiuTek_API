@@ -25,4 +25,6 @@ public interface IApplicationDbContext
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
 
     bool IsUniqueViolation(DbUpdateException ex, string? constraintName = null);
+
+    void ClearTrackedChanges();
 }

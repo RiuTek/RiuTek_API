@@ -15,6 +15,7 @@ public class StripePaymentGateway : IStripePaymentGateway
     private readonly ILogger<StripePaymentGateway> _logger;
 
     public bool IsEnabled => _settings.Enabled;
+    public TimeSpan CheckoutSessionLifetime => TimeSpan.FromMinutes(_settings.CheckoutSessionMinutes);
 
     public StripePaymentGateway(
         IOptions<StripeSettings> settings,
@@ -130,16 +131,22 @@ public class StripePaymentGateway : IStripePaymentGateway
                 session.ExpiresAt
             ));
         }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
         catch (StripeException ex)
         {
-            _logger.LogError("Stripe API error ensuring checkout session: {ErrorMessage}", ex.Message);
+            _logger.LogError("Stripe API error ensuring checkout session. StripeErrorCode: {StripeErrorCode}, HttpStatusCode: {StatusCode}",
+                ex.StripeError?.Code ?? "Unknown",
+                ex.HttpStatusCode);
             return Result.Failure<StripeCheckoutSessionResult>(Error.Unavailable(
                 "Payment.GatewayUnavailable",
                 "Stripe payment gateway is temporarily unavailable. Please retry."));
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Unexpected error communicating with Stripe gateway: {ErrorMessage}", ex.Message);
+            _logger.LogError("Unexpected error communicating with Stripe gateway. ExceptionType: {ExceptionType}", ex.GetType().Name);
             return Result.Failure<StripeCheckoutSessionResult>(Error.Unavailable(
                 "Payment.GatewayUnavailable",
                 "Stripe payment gateway is temporarily unavailable. Please retry."));
@@ -174,7 +181,7 @@ public class StripePaymentGateway : IStripePaymentGateway
         }
         catch (Exception ex)
         {
-            _logger.LogWarning("Stripe webhook signature verification failed: {Message}", ex.Message);
+            _logger.LogWarning("Stripe webhook signature verification failed. ExceptionType: {ExceptionType}", ex.GetType().Name);
             return Result.Failure<StripeWebhookEvent>(Error.Validation(
                 "Webhook.InvalidSignature",
                 "Stripe webhook signature verification failed."));

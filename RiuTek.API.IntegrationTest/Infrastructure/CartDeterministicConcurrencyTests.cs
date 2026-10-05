@@ -426,6 +426,9 @@ internal sealed class TestHookApplicationDbContext : IApplicationDbContext
     public bool IsUniqueViolation(DbUpdateException ex, string? constraintName = null)
         => _inner.IsUniqueViolation(ex, constraintName);
 
+    public void ClearTrackedChanges()
+        => _inner.ClearTrackedChanges();
+
     public ApplicationDbContext InnerDbContext => _inner;
 }
 

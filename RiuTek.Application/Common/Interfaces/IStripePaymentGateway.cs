@@ -40,6 +40,7 @@ public record StripeWebhookEvent(
 public interface IStripePaymentGateway
 {
     bool IsEnabled { get; }
+    TimeSpan CheckoutSessionLifetime { get; }
 
     Task<Result<StripeCheckoutSessionResult>> EnsureCheckoutSessionAsync(
         CreateStripeCheckoutSessionRequest request,

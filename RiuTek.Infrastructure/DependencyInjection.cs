@@ -18,7 +18,10 @@ namespace RiuTek.Infrastructure;
 
 public static class DependencyInjection
 {
-    public static IServiceCollection AddInfrastructureDI(this IServiceCollection services, IConfiguration configuration)
+    public static IServiceCollection AddInfrastructureDI(
+        this IServiceCollection services,
+        IConfiguration configuration,
+        Microsoft.Extensions.Hosting.IHostEnvironment? environment = null)
     {
         var connectionString = configuration.GetConnectionString("DefaultConnection");
         if (string.IsNullOrWhiteSpace(connectionString))
@@ -118,7 +121,8 @@ public static class DependencyInjection
         // Stripe Settings & Payment Gateway
         var stripeSettings = new Settings.StripeSettings();
         configuration.GetSection(Settings.StripeSettings.SectionName).Bind(stripeSettings);
-        stripeSettings.Validate();
+        var envName = environment?.EnvironmentName ?? configuration["ASPNETCORE_ENVIRONMENT"] ?? configuration["DOTNET_ENVIRONMENT"] ?? "Production";
+        stripeSettings.Validate(envName);
         services.Configure<Settings.StripeSettings>(configuration.GetSection(Settings.StripeSettings.SectionName));
         services.AddScoped<IStripePaymentGateway, Services.StripePaymentGateway>();
 

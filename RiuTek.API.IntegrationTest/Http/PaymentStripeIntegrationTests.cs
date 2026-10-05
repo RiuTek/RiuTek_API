@@ -9,6 +9,8 @@ using RiuTek.API.Contracts;
 using RiuTek.API.IntegrationTest.Infrastructure;
 using RiuTek.Application.Common.Interfaces;
 using RiuTek.Application.DTOs;
+using RiuTek.Application.Features.Orders.Commands;
+using RiuTek.Application.Features.Payments.Commands;
 using RiuTek.Core.Common;
 using RiuTek.Core.Entities;
 using RiuTek.Core.Entities.Specifications;
@@ -22,6 +24,7 @@ public class FakeStripePaymentGateway : IStripePaymentGateway
 {
     public bool IsEnabled { get; set; } = true;
     public bool ShouldFailWithUnavailable { get; set; } = false;
+    public TimeSpan CheckoutSessionLifetime { get; set; } = TimeSpan.FromMinutes(45);
 
     public Func<CreateStripeCheckoutSessionRequest, string?, Result<StripeCheckoutSessionResult>>? OnEnsureSession { get; set; }
     public Func<string, string, Result<StripeWebhookEvent>>? OnParseWebhook { get; set; }
@@ -74,19 +77,23 @@ public class FakeStripePaymentGateway : IStripePaymentGateway
 
         using var doc = JsonDocument.Parse(payload);
         var root = doc.RootElement;
-        var eventTypeStr = root.GetProperty("type").GetString();
-        var id = root.GetProperty("id").GetString() ?? "evt_default";
+        var eventTypeStr = root.TryGetProperty("type", out var typeElem) ? typeElem.GetString() : null;
+        var id = root.TryGetProperty("id", out var idElem) ? idElem.GetString() ?? "evt_default" : "evt_default";
 
         if (eventTypeStr == "checkout.session.completed")
         {
             var dataObj = root.GetProperty("data").GetProperty("object");
-            var sessionId = dataObj.GetProperty("id").GetString();
-            var paymentStatus = dataObj.GetProperty("payment_status").GetString();
-            var currency = dataObj.GetProperty("currency").GetString();
-            var amountTotal = dataObj.GetProperty("amount_total").GetDecimal();
-            var metadata = dataObj.GetProperty("metadata");
-            var orderIdStr = metadata.GetProperty("OrderId").GetString();
-            var attemptIdStr = metadata.GetProperty("PaymentAttemptId").GetString();
+            var sessionId = dataObj.TryGetProperty("id", out var sElem) ? sElem.GetString() : null;
+            var paymentStatus = dataObj.TryGetProperty("payment_status", out var pElem) ? pElem.GetString() : null;
+            var currency = dataObj.TryGetProperty("currency", out var cElem) ? cElem.GetString() : null;
+            decimal? amountTotal = dataObj.TryGetProperty("amount_total", out var aElem) && aElem.TryGetDecimal(out var amt) ? amt : null;
+            string? orderIdStr = null;
+            string? attemptIdStr = null;
+            if (dataObj.TryGetProperty("metadata", out var metadata))
+            {
+                orderIdStr = metadata.TryGetProperty("OrderId", out var oElem) ? oElem.GetString() : null;
+                attemptIdStr = metadata.TryGetProperty("PaymentAttemptId", out var paElem) ? paElem.GetString() : null;
+            }
 
             return Result.Success(new StripeWebhookEvent(
                 EventType: StripeWebhookEventType.CheckoutSessionCompleted,
@@ -103,13 +110,17 @@ public class FakeStripePaymentGateway : IStripePaymentGateway
         if (eventTypeStr == "checkout.session.expired")
         {
             var dataObj = root.GetProperty("data").GetProperty("object");
-            var sessionId = dataObj.GetProperty("id").GetString();
-            var paymentStatus = dataObj.GetProperty("payment_status").GetString();
-            var currency = dataObj.GetProperty("currency").GetString();
-            var amountTotal = dataObj.GetProperty("amount_total").GetDecimal();
-            var metadata = dataObj.GetProperty("metadata");
-            var orderIdStr = metadata.GetProperty("OrderId").GetString();
-            var attemptIdStr = metadata.GetProperty("PaymentAttemptId").GetString();
+            var sessionId = dataObj.TryGetProperty("id", out var sElem) ? sElem.GetString() : null;
+            var paymentStatus = dataObj.TryGetProperty("payment_status", out var pElem) ? pElem.GetString() : null;
+            var currency = dataObj.TryGetProperty("currency", out var cElem) ? cElem.GetString() : null;
+            decimal? amountTotal = dataObj.TryGetProperty("amount_total", out var aElem) && aElem.TryGetDecimal(out var amt) ? amt : null;
+            string? orderIdStr = null;
+            string? attemptIdStr = null;
+            if (dataObj.TryGetProperty("metadata", out var metadata))
+            {
+                orderIdStr = metadata.TryGetProperty("OrderId", out var oElem) ? oElem.GetString() : null;
+                attemptIdStr = metadata.TryGetProperty("PaymentAttemptId", out var paElem) ? paElem.GetString() : null;
+            }
 
             return Result.Success(new StripeWebhookEvent(
                 EventType: StripeWebhookEventType.CheckoutSessionExpired,
@@ -637,5 +648,643 @@ public class PaymentStripeIntegrationTests : IAsyncLifetime
         lower.Should().NotContain("checkoutidempotencykey");
         lower.Should().NotContain("paymentintentsecret");
         lower.Should().NotContain("clientsecret");
+    }
+
+    [Fact]
+    public async Task Checkout_DeterministicSameKeyStripeRace_Both201_SingleOrderSingleSession_LoserGraphNotSaved()
+    {
+        // 1. Arrange: seed user, address, product (stock 50), cart with 2 items
+        var initialStock = 50;
+        var cartQty = 2;
+        var (user, address, product, cart, _) = await SeedPrerequisitesAsync(stockQuantity: initialStock, cartQuantity: cartQty);
+
+        using var scope1 = _fixture.Factory.Services.CreateScope();
+        var db1 = scope1.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        using var scope2 = _fixture.Factory.Services.CreateScope();
+        var db2 = scope2.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        var tcs1ReachedHook = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tcs2ReachedHook = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tcsAllowDb1ToSave = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tcsAllowDb2ToSave = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var hookDb1 = new TestHookApplicationDbContext(db1, async ct =>
+        {
+            tcs1ReachedHook.TrySetResult(true);
+            await tcsAllowDb1ToSave.Task.WaitAsync(TimeSpan.FromSeconds(15), ct);
+        });
+
+        var hookDb2 = new TestHookApplicationDbContext(db2, async ct =>
+        {
+            tcs2ReachedHook.TrySetResult(true);
+            await tcsAllowDb2ToSave.Task.WaitAsync(TimeSpan.FromSeconds(15), ct);
+        });
+
+        var userSvc1 = new TestCurrentUserService(user.Id);
+        var userSvc2 = new TestCurrentUserService(user.Id);
+
+        var fakeGateway = new FakeStripePaymentGateway { CheckoutSessionLifetime = TimeSpan.FromMinutes(45) };
+
+        var handler1 = new CheckoutCartCommandHandler(hookDb1, userSvc1, fakeGateway);
+        var handler2 = new CheckoutCartCommandHandler(hookDb2, userSvc2, fakeGateway);
+
+        var sharedKey = "deterministic-stripe-race-" + Guid.NewGuid().ToString("N");
+
+        var cmd1 = new CheckoutCartCommand(address.Id, cart.Version, PaymentMethod.Stripe, null, sharedKey);
+        var cmd2 = new CheckoutCartCommand(address.Id, cart.Version, PaymentMethod.Stripe, null, sharedKey);
+
+        // 2. Act:
+        var task1 = handler1.Handle(cmd1, CancellationToken.None);
+        await tcs1ReachedHook.Task.WaitAsync(TimeSpan.FromSeconds(15));
+
+        var task2 = handler2.Handle(cmd2, CancellationToken.None);
+        await tcs2ReachedHook.Task.WaitAsync(TimeSpan.FromSeconds(15));
+
+        // Both handlers reached hook before initial SaveChangesAsync, without winner order in DB
+        tcsAllowDb1ToSave.TrySetResult(true);
+        var result1 = await task1;
+
+        tcsAllowDb2ToSave.TrySetResult(true);
+        var result2 = await task2;
+
+        // 3. Assert:
+        result1.IsSuccess.Should().BeTrue("Winner request must succeed");
+        result2.IsSuccess.Should().BeTrue("Concurrent same-key request must recover and succeed");
+
+        result1.Value.Id.Should().Be(result2.Value.Id);
+        result1.Value.OrderNumber.Should().Be(result2.Value.OrderNumber);
+        result1.Value.PaymentAction.Should().NotBeNull();
+        result2.Value.PaymentAction.Should().NotBeNull();
+        result1.Value.PaymentAction!.Url.Should().Be(result2.Value.PaymentAction!.Url);
+        result1.Value.PaymentAction.ExpiresAt.Should().BeCloseTo(DateTime.UtcNow.AddMinutes(45), TimeSpan.FromSeconds(15));
+
+        // 4. DB audit
+        using var verifyScope = _fixture.Factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        var orders = await verifyDb.Orders.Include(o => o.Items).Include(o => o.PaymentAttempts).ToListAsync();
+        orders.Should().ContainSingle("Exactly one order must exist in PostgreSQL");
+        var dbOrder = orders.Single();
+        dbOrder.Items.Should().ContainSingle();
+        dbOrder.PaymentAttempts.Should().ContainSingle("Exactly one payment attempt must exist in PostgreSQL");
+        var dbAttempt = dbOrder.PaymentAttempts.Single();
+        dbAttempt.ProviderReference.Should().NotBeNullOrWhiteSpace();
+        dbAttempt.ExpiresAt.Should().BeCloseTo(DateTime.UtcNow.AddMinutes(45), TimeSpan.FromSeconds(15));
+
+        var productDb = await verifyDb.Products.FindAsync(product.Id);
+        productDb!.StockQuantity.Should().Be(initialStock - cartQty, "Stock must be decremented exactly once");
+
+        var cartDb = await verifyDb.Carts.Include(c => c.Items).SingleAsync(c => c.UserId == user.Id);
+        cartDb.Items.Should().BeEmpty("Cart must be cleared once");
+    }
+
+    [Fact]
+    public async Task Webhook_CheckoutSessionExpired_DeterministicBarrier_RestoresStockExactlyOnce_HitsRecoveryBranch()
+    {
+        var (client, fakeGateway) = CreateClientWithFakeGateway();
+        var (_, address, product, cart, token) = await SeedPrerequisitesAsync(stockQuantity: 10, cartQuantity: 2);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        // Initial checkout to create order + pending attempt, stock decrements 10 -> 8
+        var checkoutReq = new HttpRequestMessage(HttpMethod.Post, "/api/v1/orders/checkout")
+        {
+            Content = JsonContent.Create(new CheckoutCartRequest(address.Id, cart.Version, PaymentMethod.Stripe, null))
+        };
+        checkoutReq.Headers.Add("Idempotency-Key", "stripe-wh-expired-barrier-" + Guid.NewGuid().ToString("N"));
+        var checkoutRes = await client.SendAsync(checkoutReq);
+        checkoutRes.StatusCode.Should().Be(HttpStatusCode.Created);
+        var orderDto = (await checkoutRes.Content.ReadFromJsonAsync<CheckoutOrderDto>(JsonOptions))!;
+
+        Guid attemptId;
+        string providerRef;
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var attempt = await db.PaymentAttempts.FirstAsync(p => p.OrderId == orderDto.Id);
+            attemptId = attempt.Id;
+            providerRef = attempt.ProviderReference!;
+        }
+
+        var webhookPayload = $$"""
+        {
+          "id": "evt_test_expired_barrier",
+          "type": "checkout.session.expired",
+          "data": {
+            "object": {
+              "id": "{{providerRef}}",
+              "amount_total": 400000,
+              "currency": "vnd",
+              "payment_status": "unpaid",
+              "metadata": {
+                "OrderId": "{{orderDto.Id}}",
+                "PaymentAttemptId": "{{attemptId}}"
+              }
+            }
+          }
+        }
+        """;
+
+        using var scope1 = _fixture.Factory.Services.CreateScope();
+        var db1 = scope1.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        using var scope2 = _fixture.Factory.Services.CreateScope();
+        var db2 = scope2.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        var tcs1ReachedHook = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tcs2ReachedHook = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tcsAllowDb1ToSave = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tcsAllowDb2ToSave = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var hookDb1 = new TestHookApplicationDbContext(db1, async ct =>
+        {
+            tcs1ReachedHook.TrySetResult(true);
+            await tcsAllowDb1ToSave.Task.WaitAsync(TimeSpan.FromSeconds(15), ct);
+        });
+
+        var hookDb2 = new TestHookApplicationDbContext(db2, async ct =>
+        {
+            tcs2ReachedHook.TrySetResult(true);
+            await tcsAllowDb2ToSave.Task.WaitAsync(TimeSpan.FromSeconds(15), ct);
+        });
+
+        ProcessStripeWebhookCommandHandler.ConcurrencyRecoveryExecutionCount = 0;
+
+        var handler1 = new ProcessStripeWebhookCommandHandler(hookDb1, fakeGateway);
+        var handler2 = new ProcessStripeWebhookCommandHandler(hookDb2, fakeGateway);
+
+        var whCmd = new ProcessStripeWebhookCommand(webhookPayload, "valid_signature");
+
+        var task1 = handler1.Handle(whCmd, CancellationToken.None);
+        await tcs1ReachedHook.Task.WaitAsync(TimeSpan.FromSeconds(15));
+
+        var task2 = handler2.Handle(whCmd, CancellationToken.None);
+        await tcs2ReachedHook.Task.WaitAsync(TimeSpan.FromSeconds(15));
+
+        // Both handlers loaded the attempt in Pending and products with stock 8 before either saved!
+        tcsAllowDb1ToSave.TrySetResult(true);
+        var res1 = await task1;
+
+        tcsAllowDb2ToSave.TrySetResult(true);
+        var res2 = await task2;
+
+        res1.IsSuccess.Should().BeTrue();
+        res2.IsSuccess.Should().BeTrue();
+
+        // Concurrency recovery branch was executed deterministically
+        ProcessStripeWebhookCommandHandler.ConcurrencyRecoveryExecutionCount.Should().BeGreaterThanOrEqualTo(1,
+            "At least one request must have executed the concurrency recovery branch");
+
+        // Verify stock restored exactly once to 10
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var dbProduct = await db.Products.FindAsync(product.Id);
+            dbProduct!.StockQuantity.Should().Be(10, "Stock was restored from 8 to 10 exactly once");
+
+            var dbOrder = await db.Orders.Include(o => o.PaymentAttempts).FirstAsync(o => o.Id == orderDto.Id);
+            dbOrder.Status.Should().Be(OrderStatus.Cancelled);
+            dbOrder.PaymentStatus.Should().Be(PaymentStatus.Failed);
+            dbOrder.PaymentAttempts.First().Status.Should().Be(PaymentAttemptStatus.Expired);
+        }
+    }
+
+    [Fact]
+    public async Task Webhook_CheckoutSessionCompleted_WhenProviderReferenceNull_BindsAndSucceeds()
+    {
+        var (client, _) = CreateClientWithFakeGateway();
+        var (user, address, product, cart, _) = await SeedPrerequisitesAsync(price: 200_000m, cartQuantity: 1);
+
+        // Create Order and PaymentAttempt directly with ProviderReference = null (crash gap)
+        Guid orderId;
+        Guid attemptId;
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var order = new Order(
+                orderNumber: "ORD-GAP-COMPLETED",
+                userId: user.Id,
+                checkoutIdempotencyKey: "gap-comp-key-12345",
+                customerName: user.FullName,
+                customerEmail: user.Email,
+                customerPhone: user.PhoneNumber!,
+                shippingAddress: "123 Test St",
+                paymentMethod: PaymentMethod.Stripe,
+                notes: null
+            );
+            order.AddItem(product.Id, product.Name, product.Sku, product.Price, 1);
+            var attemptRes = order.CreatePaymentAttempt($"stripe-{order.Id:N}", DateTime.UtcNow.AddMinutes(45));
+            attemptRes.IsSuccess.Should().BeTrue();
+            // ProviderReference remains null!
+
+            db.Orders.Add(order);
+            await db.SaveChangesAsync();
+
+            orderId = order.Id;
+            attemptId = attemptRes.Value.Id;
+        }
+
+        var webhookPayload = $$"""
+        {
+          "id": "evt_gap_completed",
+          "type": "checkout.session.completed",
+          "data": {
+            "object": {
+              "id": "cs_recovered_gap_session",
+              "amount_total": 200000,
+              "currency": "vnd",
+              "payment_status": "paid",
+              "metadata": {
+                "OrderId": "{{orderId}}",
+                "PaymentAttemptId": "{{attemptId}}"
+              }
+            }
+          }
+        }
+        """;
+
+        using var whReq = new HttpRequestMessage(HttpMethod.Post, "/api/v1/payments/stripe/webhook")
+        {
+            Content = new StringContent(webhookPayload, System.Text.Encoding.UTF8, "application/json")
+        };
+        whReq.Headers.Add("Stripe-Signature", "valid_signature");
+
+        var whRes = await client.SendAsync(whReq);
+        whRes.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        // Verify DB
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var dbOrder = await db.Orders.Include(o => o.PaymentAttempts).FirstAsync(o => o.Id == orderId);
+            dbOrder.Status.Should().Be(OrderStatus.Confirmed);
+            dbOrder.PaymentStatus.Should().Be(PaymentStatus.Completed);
+            var attempt = dbOrder.PaymentAttempts.First();
+            attempt.Status.Should().Be(PaymentAttemptStatus.Succeeded);
+            attempt.ProviderReference.Should().Be("cs_recovered_gap_session");
+        }
+
+        // Duplicate call should succeed idempotently
+        using var whReqDup = new HttpRequestMessage(HttpMethod.Post, "/api/v1/payments/stripe/webhook")
+        {
+            Content = new StringContent(webhookPayload, System.Text.Encoding.UTF8, "application/json")
+        };
+        whReqDup.Headers.Add("Stripe-Signature", "valid_signature");
+
+        var whResDup = await client.SendAsync(whReqDup);
+        whResDup.StatusCode.Should().Be(HttpStatusCode.OK);
+    }
+
+    [Fact]
+    public async Task Webhook_CheckoutSessionExpired_WhenProviderReferenceNull_BindsAndExpires_RestoresStockOnce()
+    {
+        var (client, _) = CreateClientWithFakeGateway();
+        var (user, address, product, cart, _) = await SeedPrerequisitesAsync(stockQuantity: 10, price: 150_000m, cartQuantity: 2);
+
+        // Create Order and PaymentAttempt with ProviderReference = null, simulate held stock (10 - 2 = 8)
+        Guid orderId;
+        Guid attemptId;
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var p = await db.Products.FindAsync(product.Id);
+            p!.StockQuantity = 8;
+
+            var order = new Order(
+                orderNumber: "ORD-GAP-EXPIRED",
+                userId: user.Id,
+                checkoutIdempotencyKey: "gap-exp-key-12345",
+                customerName: user.FullName,
+                customerEmail: user.Email,
+                customerPhone: user.PhoneNumber!,
+                shippingAddress: "123 Test St",
+                paymentMethod: PaymentMethod.Stripe,
+                notes: null
+            );
+            order.AddItem(product.Id, product.Name, product.Sku, product.Price, 2);
+            var attemptRes = order.CreatePaymentAttempt($"stripe-{order.Id:N}", DateTime.UtcNow.AddMinutes(45));
+            attemptRes.IsSuccess.Should().BeTrue();
+
+            db.Orders.Add(order);
+            await db.SaveChangesAsync();
+
+            orderId = order.Id;
+            attemptId = attemptRes.Value.Id;
+        }
+
+        var webhookPayload = $$"""
+        {
+          "id": "evt_gap_expired",
+          "type": "checkout.session.expired",
+          "data": {
+            "object": {
+              "id": "cs_recovered_expired_session",
+              "amount_total": 300000,
+              "currency": "vnd",
+              "payment_status": "unpaid",
+              "metadata": {
+                "OrderId": "{{orderId}}",
+                "PaymentAttemptId": "{{attemptId}}"
+              }
+            }
+          }
+        }
+        """;
+
+        using var whReq = new HttpRequestMessage(HttpMethod.Post, "/api/v1/payments/stripe/webhook")
+        {
+            Content = new StringContent(webhookPayload, System.Text.Encoding.UTF8, "application/json")
+        };
+        whReq.Headers.Add("Stripe-Signature", "valid_signature");
+
+        var whRes = await client.SendAsync(whReq);
+        whRes.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        // Verify DB
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var dbOrder = await db.Orders.Include(o => o.PaymentAttempts).FirstAsync(o => o.Id == orderId);
+            dbOrder.Status.Should().Be(OrderStatus.Cancelled);
+            dbOrder.PaymentStatus.Should().Be(PaymentStatus.Failed);
+            var attempt = dbOrder.PaymentAttempts.First();
+            attempt.Status.Should().Be(PaymentAttemptStatus.Expired);
+            attempt.ProviderReference.Should().Be("cs_recovered_expired_session");
+
+            var p = await db.Products.FindAsync(product.Id);
+            p!.StockQuantity.Should().Be(10, "Stock restored from 8 to 10");
+        }
+
+        // Duplicate call should return 200 and not restore stock again
+        using var whReqDup = new HttpRequestMessage(HttpMethod.Post, "/api/v1/payments/stripe/webhook")
+        {
+            Content = new StringContent(webhookPayload, System.Text.Encoding.UTF8, "application/json")
+        };
+        whReqDup.Headers.Add("Stripe-Signature", "valid_signature");
+
+        var whResDup = await client.SendAsync(whReqDup);
+        whResDup.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var p = await db.Products.FindAsync(product.Id);
+            p!.StockQuantity.Should().Be(10, "Stock must remain 10 after duplicate webhook");
+        }
+    }
+
+    [Theory]
+    [InlineData("checkout.session.completed", "paid")]
+    [InlineData("checkout.session.expired", "unpaid")]
+    public async Task Webhook_WhenSessionIdMissingOrEmpty_Returns409Conflict(string eventType, string paymentStatus)
+    {
+        var (client, _) = CreateClientWithFakeGateway();
+        var (_, address, product, cart, token) = await SeedPrerequisitesAsync(cartQuantity: 1);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        // Checkout first
+        var checkoutReq = new HttpRequestMessage(HttpMethod.Post, "/api/v1/orders/checkout")
+        {
+            Content = JsonContent.Create(new CheckoutCartRequest(address.Id, cart.Version, PaymentMethod.Stripe, null))
+        };
+        checkoutReq.Headers.Add("Idempotency-Key", "stripe-empty-session-" + Guid.NewGuid().ToString("N"));
+        var checkoutRes = await client.SendAsync(checkoutReq);
+        var orderDto = (await checkoutRes.Content.ReadFromJsonAsync<CheckoutOrderDto>(JsonOptions))!;
+
+        Guid attemptId;
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var attempt = await db.PaymentAttempts.FirstAsync(p => p.OrderId == orderDto.Id);
+            attemptId = attempt.Id;
+        }
+
+        var webhookPayload = $$"""
+        {
+          "id": "evt_empty_session",
+          "type": "{{eventType}}",
+          "data": {
+            "object": {
+              "id": "   ",
+              "amount_total": 200000,
+              "currency": "vnd",
+              "payment_status": "{{paymentStatus}}",
+              "metadata": {
+                "OrderId": "{{orderDto.Id}}",
+                "PaymentAttemptId": "{{attemptId}}"
+              }
+            }
+          }
+        }
+        """;
+
+        using var whReq = new HttpRequestMessage(HttpMethod.Post, "/api/v1/payments/stripe/webhook")
+        {
+            Content = new StringContent(webhookPayload, System.Text.Encoding.UTF8, "application/json")
+        };
+        whReq.Headers.Add("Stripe-Signature", "valid_signature");
+
+        var whRes = await client.SendAsync(whReq);
+        whRes.StatusCode.Should().Be(HttpStatusCode.Conflict);
+    }
+
+    [Fact]
+    public async Task Webhook_Expired_WhenAmountOrCurrencyOrSessionMismatch_Returns409ConflictAndDoesNotRestoreStock()
+    {
+        var (client, _) = CreateClientWithFakeGateway();
+        var (_, address, product, cart, token) = await SeedPrerequisitesAsync(stockQuantity: 10, cartQuantity: 2);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        // Checkout: stock 10 -> 8
+        var checkoutReq = new HttpRequestMessage(HttpMethod.Post, "/api/v1/orders/checkout")
+        {
+            Content = JsonContent.Create(new CheckoutCartRequest(address.Id, cart.Version, PaymentMethod.Stripe, null))
+        };
+        checkoutReq.Headers.Add("Idempotency-Key", "stripe-mismatch-check-" + Guid.NewGuid().ToString("N"));
+        var checkoutRes = await client.SendAsync(checkoutReq);
+        var orderDto = (await checkoutRes.Content.ReadFromJsonAsync<CheckoutOrderDto>(JsonOptions))!;
+
+        Guid attemptId;
+        string providerRef;
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var attempt = await db.PaymentAttempts.FirstAsync(p => p.OrderId == orderDto.Id);
+            attemptId = attempt.Id;
+            providerRef = attempt.ProviderReference!;
+        }
+
+        // Amount mismatch
+        var amountMismatchPayload = $$"""
+        {
+          "id": "evt_amt_mismatch",
+          "type": "checkout.session.expired",
+          "data": {
+            "object": {
+              "id": "{{providerRef}}",
+              "amount_total": 999999,
+              "currency": "vnd",
+              "payment_status": "unpaid",
+              "metadata": {
+                "OrderId": "{{orderDto.Id}}",
+                "PaymentAttemptId": "{{attemptId}}"
+              }
+            }
+          }
+        }
+        """;
+
+        using var req1 = new HttpRequestMessage(HttpMethod.Post, "/api/v1/payments/stripe/webhook")
+        {
+            Content = new StringContent(amountMismatchPayload, System.Text.Encoding.UTF8, "application/json")
+        };
+        req1.Headers.Add("Stripe-Signature", "valid_signature");
+        var res1 = await client.SendAsync(req1);
+        res1.StatusCode.Should().Be(HttpStatusCode.Conflict);
+
+        // Currency mismatch
+        var currMismatchPayload = $$"""
+        {
+          "id": "evt_curr_mismatch",
+          "type": "checkout.session.expired",
+          "data": {
+            "object": {
+              "id": "{{providerRef}}",
+              "amount_total": 400000,
+              "currency": "usd",
+              "payment_status": "unpaid",
+              "metadata": {
+                "OrderId": "{{orderDto.Id}}",
+                "PaymentAttemptId": "{{attemptId}}"
+              }
+            }
+          }
+        }
+        """;
+
+        using var req2 = new HttpRequestMessage(HttpMethod.Post, "/api/v1/payments/stripe/webhook")
+        {
+            Content = new StringContent(currMismatchPayload, System.Text.Encoding.UTF8, "application/json")
+        };
+        req2.Headers.Add("Stripe-Signature", "valid_signature");
+        var res2 = await client.SendAsync(req2);
+        res2.StatusCode.Should().Be(HttpStatusCode.Conflict);
+
+        // Session ID mismatch
+        var sessMismatchPayload = $$"""
+        {
+          "id": "evt_sess_mismatch",
+          "type": "checkout.session.expired",
+          "data": {
+            "object": {
+              "id": "cs_completely_different",
+              "amount_total": 400000,
+              "currency": "vnd",
+              "payment_status": "unpaid",
+              "metadata": {
+                "OrderId": "{{orderDto.Id}}",
+                "PaymentAttemptId": "{{attemptId}}"
+              }
+            }
+          }
+        }
+        """;
+
+        using var req3 = new HttpRequestMessage(HttpMethod.Post, "/api/v1/payments/stripe/webhook")
+        {
+            Content = new StringContent(sessMismatchPayload, System.Text.Encoding.UTF8, "application/json")
+        };
+        req3.Headers.Add("Stripe-Signature", "valid_signature");
+        var res3 = await client.SendAsync(req3);
+        res3.StatusCode.Should().Be(HttpStatusCode.Conflict);
+
+        // Verify stock was NOT restored (still 8)
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var p = await db.Products.FindAsync(product.Id);
+            p!.StockQuantity.Should().Be(8, "Stock must not be restored when webhook validation fails");
+        }
+    }
+
+    [Fact]
+    public async Task Webhook_DuplicateCompleted_WhenMismatchedSession_Returns409Conflict()
+    {
+        var (client, _) = CreateClientWithFakeGateway();
+        var (_, address, product, cart, token) = await SeedPrerequisitesAsync(cartQuantity: 1);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        // Checkout
+        var checkoutReq = new HttpRequestMessage(HttpMethod.Post, "/api/v1/orders/checkout")
+        {
+            Content = JsonContent.Create(new CheckoutCartRequest(address.Id, cart.Version, PaymentMethod.Stripe, null))
+        };
+        checkoutReq.Headers.Add("Idempotency-Key", "stripe-dup-mismatch-" + Guid.NewGuid().ToString("N"));
+        var checkoutRes = await client.SendAsync(checkoutReq);
+        var orderDto = (await checkoutRes.Content.ReadFromJsonAsync<CheckoutOrderDto>(JsonOptions))!;
+
+        Guid attemptId;
+        string providerRef;
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var attempt = await db.PaymentAttempts.FirstAsync(p => p.OrderId == orderDto.Id);
+            attemptId = attempt.Id;
+            providerRef = attempt.ProviderReference!;
+        }
+
+        // First completed webhook succeeds
+        var validPayload = $$"""
+        {
+          "id": "evt_valid_comp",
+          "type": "checkout.session.completed",
+          "data": {
+            "object": {
+              "id": "{{providerRef}}",
+              "amount_total": 200000,
+              "currency": "vnd",
+              "payment_status": "paid",
+              "metadata": {
+                "OrderId": "{{orderDto.Id}}",
+                "PaymentAttemptId": "{{attemptId}}"
+              }
+            }
+          }
+        }
+        """;
+
+        using var req1 = new HttpRequestMessage(HttpMethod.Post, "/api/v1/payments/stripe/webhook")
+        {
+            Content = new StringContent(validPayload, System.Text.Encoding.UTF8, "application/json")
+        };
+        req1.Headers.Add("Stripe-Signature", "valid_signature");
+        var res1 = await client.SendAsync(req1);
+        res1.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        // Duplicate with mismatched session ID -> 409 Conflict (not 200)
+        var mismatchedDupPayload = $$"""
+        {
+          "id": "evt_dup_mismatched",
+          "type": "checkout.session.completed",
+          "data": {
+            "object": {
+              "id": "cs_forged_session",
+              "amount_total": 200000,
+              "currency": "vnd",
+              "payment_status": "paid",
+              "metadata": {
+                "OrderId": "{{orderDto.Id}}",
+                "PaymentAttemptId": "{{attemptId}}"
+              }
+            }
+          }
+        }
+        """;
+
+        using var req2 = new HttpRequestMessage(HttpMethod.Post, "/api/v1/payments/stripe/webhook")
+        {
+            Content = new StringContent(mismatchedDupPayload, System.Text.Encoding.UTF8, "application/json")
+        };
+        req2.Headers.Add("Stripe-Signature", "valid_signature");
+        var res2 = await client.SendAsync(req2);
+        res2.StatusCode.Should().Be(HttpStatusCode.Conflict);
     }
 }

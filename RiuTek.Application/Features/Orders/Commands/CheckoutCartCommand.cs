@@ -94,7 +94,6 @@ public class CheckoutCartCommandHandler : IRequestHandler<CheckoutCartCommand, R
 
         // 4. Before reading cart, query existing Order by (UserId, CheckoutIdempotencyKey)
         var existingOrder = await _context.Orders
-            .AsNoTracking()
             .Include(o => o.Items)
             .Include(o => o.PaymentAttempts)
             .FirstOrDefaultAsync(o => o.UserId == user.Id && o.CheckoutIdempotencyKey == normalizedKey, cancellationToken);
@@ -158,7 +157,12 @@ public class CheckoutCartCommandHandler : IRequestHandler<CheckoutCartCommand, R
         }
 
         // 9. Build Order entity and items
-        var order = BuildOrder(request, user, address, normalizedKey, cart, productMap);
+        var orderResult = BuildOrder(request, user, address, normalizedKey, cart, productMap);
+        if (orderResult.IsFailure)
+        {
+            return Result.Failure<CheckoutOrderDto>(orderResult.Error);
+        }
+        var order = orderResult.Value;
 
         // 10. Decrement Product.StockQuantity for each item
         foreach (var cartItem in cart.Items)
@@ -174,9 +178,10 @@ public class CheckoutCartCommandHandler : IRequestHandler<CheckoutCartCommand, R
         PaymentAttempt? stripeAttempt = null;
         if (request.PaymentMethod == PaymentMethod.Stripe)
         {
-            var expiresAtUtc = DateTime.UtcNow.AddMinutes(30);
+            var nowUtc = DateTime.UtcNow;
+            var expiresAtUtc = nowUtc.Add(_stripeGateway!.CheckoutSessionLifetime);
             var providerIdempotencyKey = $"stripe-{order.Id:N}";
-            var attemptResult = order.CreatePaymentAttempt(providerIdempotencyKey, expiresAtUtc);
+            var attemptResult = order.CreatePaymentAttempt(providerIdempotencyKey, expiresAtUtc, nowUtc: nowUtc);
             if (attemptResult.IsFailure)
             {
                 return Result.Failure<CheckoutOrderDto>(attemptResult.Error);
@@ -193,11 +198,13 @@ public class CheckoutCartCommandHandler : IRequestHandler<CheckoutCartCommand, R
         }
         catch (DbUpdateConcurrencyException)
         {
+            _context.ClearTrackedChanges();
             return await ReloadAndReplayExistingOrderAsync(user.Id, normalizedKey, cancellationToken, isConcurrency: true);
         }
         catch (DbUpdateException ex)
             when (_context.IsUniqueViolation(ex, "UX_Orders_UserId_CheckoutIdempotencyKey"))
         {
+            _context.ClearTrackedChanges();
             return await ReloadAndReplayExistingOrderAsync(user.Id, normalizedKey, cancellationToken, isConcurrency: false);
         }
 
@@ -247,7 +254,7 @@ public class CheckoutCartCommandHandler : IRequestHandler<CheckoutCartCommand, R
         return Result.Success();
     }
 
-    private static Order BuildOrder(
+    private static Result<Order> BuildOrder(
         CheckoutCartCommand request,
         User user,
         UserAddress address,
@@ -277,16 +284,21 @@ public class CheckoutCartCommandHandler : IRequestHandler<CheckoutCartCommand, R
         foreach (var cartItem in cart.Items)
         {
             var product = productMap[cartItem.ProductId];
-            order.AddItem(
+            var addItemResult = order.AddItem(
                 productId: product.Id,
                 productName: product.Name,
                 productSku: product.Sku,
                 unitPrice: product.Price,
                 quantity: cartItem.Quantity
             );
+
+            if (addItemResult.IsFailure)
+            {
+                return Result.Failure<Order>(addItemResult.Error);
+            }
         }
 
-        return order;
+        return Result.Success(order);
     }
 
     private async Task<Result<CheckoutOrderDto>> InitiateStripeCheckoutAsync(
@@ -315,7 +327,12 @@ public class CheckoutCartCommandHandler : IRequestHandler<CheckoutCartCommand, R
             return Result.Failure<CheckoutOrderDto>(sessionResult.Error);
         }
 
-        attempt.SetProviderReference(sessionResult.Value.SessionId);
+        var setRefResult = attempt.SetProviderReference(sessionResult.Value.SessionId);
+        if (setRefResult.IsFailure)
+        {
+            return Result.Failure<CheckoutOrderDto>(setRefResult.Error);
+        }
+
         await _context.SaveChangesAsync(cancellationToken);
 
         var paymentAction = new PaymentActionDto(
@@ -382,16 +399,13 @@ public class CheckoutCartCommandHandler : IRequestHandler<CheckoutCartCommand, R
 
                 if (string.IsNullOrWhiteSpace(attempt.ProviderReference))
                 {
-                    var trackedOrder = await _context.Orders
-                        .Include(o => o.PaymentAttempts)
-                        .FirstOrDefaultAsync(o => o.Id == existingOrder.Id, cancellationToken);
-
-                    var trackedAttempt = trackedOrder?.PaymentAttempts.FirstOrDefault(p => p.Id == attempt.Id);
-                    if (trackedAttempt is not null)
+                    var setRefResult = attempt.SetProviderReference(sessionResult.Value.SessionId);
+                    if (setRefResult.IsFailure)
                     {
-                        trackedAttempt.SetProviderReference(sessionResult.Value.SessionId);
-                        await _context.SaveChangesAsync(cancellationToken);
+                        return Result.Failure<CheckoutOrderDto>(setRefResult.Error);
                     }
+
+                    await _context.SaveChangesAsync(cancellationToken);
                 }
 
                 var paymentAction = new PaymentActionDto(
@@ -418,7 +432,6 @@ public class CheckoutCartCommandHandler : IRequestHandler<CheckoutCartCommand, R
         bool isConcurrency)
     {
         var replayedOrder = await _context.Orders
-            .AsNoTracking()
             .Include(o => o.Items)
             .Include(o => o.PaymentAttempts)
             .FirstOrDefaultAsync(o => o.UserId == userId && o.CheckoutIdempotencyKey == normalizedKey, cancellationToken);

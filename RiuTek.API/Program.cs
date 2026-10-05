@@ -29,7 +29,7 @@ namespace RiuTek.API
             builder.Services.AddOpenApi();
 
             // Register Application, Infrastructure, and Core services
-            builder.Services.AddAppDI(builder.Configuration);
+            builder.Services.AddAppDI(builder.Configuration, builder.Environment);
 
             var app = builder.Build();
 

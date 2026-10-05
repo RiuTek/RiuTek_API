@@ -437,4 +437,304 @@ public class ProcessStripeWebhookUnitTests
         var dbOrder = await context.Orders.FirstAsync(o => o.Id == order.Id);
         dbOrder.Status.Should().Be(OrderStatus.Cancelled);
     }
+
+    [Fact]
+    public async Task Handle_CheckoutSessionCompleted_WhenProviderReferenceNull_BindsSessionIdAndSucceeds()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        // ProviderReference is null initially (crash gap scenario)
+        var (order, attempt, _) = await SeedOrderAndAttemptAsync(context, providerReference: null);
+        attempt.ProviderReference.Should().BeNull();
+
+        var gatewayMock = new Mock<IStripePaymentGateway>();
+        gatewayMock.Setup(g => g.ParseAndVerifyWebhook(It.IsAny<string>(), It.IsAny<string>()))
+            .Returns(Result.Success(new StripeWebhookEvent(
+                EventType: StripeWebhookEventType.CheckoutSessionCompleted,
+                EventId: "evt_completed_crash_recovery",
+                SessionId: "cs_recovered_session_123",
+                OrderIdString: order.Id.ToString(),
+                PaymentAttemptIdString: attempt.Id.ToString(),
+                AmountTotal: attempt.Amount,
+                Currency: "vnd",
+                PaymentStatus: "paid"
+            )));
+
+        var handler = new ProcessStripeWebhookCommandHandler(context, gatewayMock.Object);
+
+        var result = await handler.Handle(new ProcessStripeWebhookCommand("{}", "sig"), CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+
+        var updatedOrder = await context.Orders.Include(o => o.PaymentAttempts).FirstAsync(o => o.Id == order.Id);
+        updatedOrder.Status.Should().Be(OrderStatus.Confirmed);
+        updatedOrder.PaymentStatus.Should().Be(PaymentStatus.Completed);
+
+        var updatedAttempt = updatedOrder.PaymentAttempts.First(p => p.Id == attempt.Id);
+        updatedAttempt.Status.Should().Be(PaymentAttemptStatus.Succeeded);
+        updatedAttempt.ProviderReference.Should().Be("cs_recovered_session_123");
+
+        // Subsequent duplicate event should succeed idempotently
+        var dupResult = await handler.Handle(new ProcessStripeWebhookCommand("{}", "sig"), CancellationToken.None);
+        dupResult.IsSuccess.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Handle_CheckoutSessionExpired_WhenProviderReferenceNull_BindsSessionIdAndExpires()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var (order, attempt, product) = await SeedOrderAndAttemptAsync(context, stockQuantity: 48, itemQuantity: 2, providerReference: null);
+        attempt.ProviderReference.Should().BeNull();
+
+        var gatewayMock = new Mock<IStripePaymentGateway>();
+        gatewayMock.Setup(g => g.ParseAndVerifyWebhook(It.IsAny<string>(), It.IsAny<string>()))
+            .Returns(Result.Success(new StripeWebhookEvent(
+                EventType: StripeWebhookEventType.CheckoutSessionExpired,
+                EventId: "evt_expired_crash_recovery",
+                SessionId: "cs_expired_recovered_session",
+                OrderIdString: order.Id.ToString(),
+                PaymentAttemptIdString: attempt.Id.ToString(),
+                AmountTotal: attempt.Amount,
+                Currency: "vnd",
+                PaymentStatus: "unpaid"
+            )));
+
+        var handler = new ProcessStripeWebhookCommandHandler(context, gatewayMock.Object);
+
+        var result = await handler.Handle(new ProcessStripeWebhookCommand("{}", "sig"), CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+
+        var updatedOrder = await context.Orders.Include(o => o.PaymentAttempts).FirstAsync(o => o.Id == order.Id);
+        updatedOrder.Status.Should().Be(OrderStatus.Cancelled);
+        updatedOrder.PaymentStatus.Should().Be(PaymentStatus.Failed);
+
+        var updatedAttempt = updatedOrder.PaymentAttempts.First(p => p.Id == attempt.Id);
+        updatedAttempt.Status.Should().Be(PaymentAttemptStatus.Expired);
+        updatedAttempt.ProviderReference.Should().Be("cs_expired_recovered_session");
+
+        var updatedProduct = await context.Products.FindAsync(product.Id);
+        updatedProduct!.StockQuantity.Should().Be(50);
+
+        // Duplicate call should return 200 and not restore stock again
+        var dupResult = await handler.Handle(new ProcessStripeWebhookCommand("{}", "sig"), CancellationToken.None);
+        dupResult.IsSuccess.Should().BeTrue();
+
+        var updatedProductAfterDup = await context.Products.FindAsync(product.Id);
+        updatedProductAfterDup!.StockQuantity.Should().Be(50);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task Handle_CheckoutSessionCompleted_WhenSessionIdMissingOrEmpty_ReturnsConflict(string? sessionId)
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var (order, attempt, _) = await SeedOrderAndAttemptAsync(context);
+
+        var gatewayMock = new Mock<IStripePaymentGateway>();
+        gatewayMock.Setup(g => g.ParseAndVerifyWebhook(It.IsAny<string>(), It.IsAny<string>()))
+            .Returns(Result.Success(new StripeWebhookEvent(
+                EventType: StripeWebhookEventType.CheckoutSessionCompleted,
+                EventId: "evt_no_session",
+                SessionId: sessionId,
+                OrderIdString: order.Id.ToString(),
+                PaymentAttemptIdString: attempt.Id.ToString(),
+                AmountTotal: attempt.Amount,
+                Currency: "vnd",
+                PaymentStatus: "paid"
+            )));
+
+        var handler = new ProcessStripeWebhookCommandHandler(context, gatewayMock.Object);
+
+        var result = await handler.Handle(new ProcessStripeWebhookCommand("{}", "sig"), CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be("Payment.ProviderReferenceMismatch");
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task Handle_CheckoutSessionExpired_WhenSessionIdMissingOrEmpty_ReturnsConflictAndDoesNotRestoreStock(string? sessionId)
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var (order, attempt, product) = await SeedOrderAndAttemptAsync(context, stockQuantity: 48, itemQuantity: 2);
+
+        var gatewayMock = new Mock<IStripePaymentGateway>();
+        gatewayMock.Setup(g => g.ParseAndVerifyWebhook(It.IsAny<string>(), It.IsAny<string>()))
+            .Returns(Result.Success(new StripeWebhookEvent(
+                EventType: StripeWebhookEventType.CheckoutSessionExpired,
+                EventId: "evt_expired_no_session",
+                SessionId: sessionId,
+                OrderIdString: order.Id.ToString(),
+                PaymentAttemptIdString: attempt.Id.ToString(),
+                AmountTotal: attempt.Amount,
+                Currency: "vnd",
+                PaymentStatus: "unpaid"
+            )));
+
+        var handler = new ProcessStripeWebhookCommandHandler(context, gatewayMock.Object);
+
+        var result = await handler.Handle(new ProcessStripeWebhookCommand("{}", "sig"), CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be("Payment.ProviderReferenceMismatch");
+
+        var dbProd = await context.Products.FindAsync(product.Id);
+        dbProd!.StockQuantity.Should().Be(48); // unmutated
+    }
+
+    [Fact]
+    public async Task Handle_CheckoutSessionExpired_WhenAmountMismatch_ReturnsConflictAndDoesNotRestoreStock()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var (order, attempt, product) = await SeedOrderAndAttemptAsync(context, stockQuantity: 48, itemQuantity: 2);
+
+        var gatewayMock = new Mock<IStripePaymentGateway>();
+        gatewayMock.Setup(g => g.ParseAndVerifyWebhook(It.IsAny<string>(), It.IsAny<string>()))
+            .Returns(Result.Success(new StripeWebhookEvent(
+                EventType: StripeWebhookEventType.CheckoutSessionExpired,
+                EventId: "evt_expired_amount_mismatch",
+                SessionId: attempt.ProviderReference,
+                OrderIdString: order.Id.ToString(),
+                PaymentAttemptIdString: attempt.Id.ToString(),
+                AmountTotal: 999_999m, // wrong amount
+                Currency: "vnd",
+                PaymentStatus: "unpaid"
+            )));
+
+        var handler = new ProcessStripeWebhookCommandHandler(context, gatewayMock.Object);
+
+        var result = await handler.Handle(new ProcessStripeWebhookCommand("{}", "sig"), CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be("Payment.AmountMismatch");
+
+        var dbProd = await context.Products.FindAsync(product.Id);
+        dbProd!.StockQuantity.Should().Be(48); // unmutated
+    }
+
+    [Fact]
+    public async Task Handle_CheckoutSessionExpired_WhenCurrencyMismatch_ReturnsConflictAndDoesNotRestoreStock()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var (order, attempt, product) = await SeedOrderAndAttemptAsync(context, stockQuantity: 48, itemQuantity: 2);
+
+        var gatewayMock = new Mock<IStripePaymentGateway>();
+        gatewayMock.Setup(g => g.ParseAndVerifyWebhook(It.IsAny<string>(), It.IsAny<string>()))
+            .Returns(Result.Success(new StripeWebhookEvent(
+                EventType: StripeWebhookEventType.CheckoutSessionExpired,
+                EventId: "evt_expired_currency_mismatch",
+                SessionId: attempt.ProviderReference,
+                OrderIdString: order.Id.ToString(),
+                PaymentAttemptIdString: attempt.Id.ToString(),
+                AmountTotal: attempt.Amount,
+                Currency: "usd", // wrong currency
+                PaymentStatus: "unpaid"
+            )));
+
+        var handler = new ProcessStripeWebhookCommandHandler(context, gatewayMock.Object);
+
+        var result = await handler.Handle(new ProcessStripeWebhookCommand("{}", "sig"), CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be("Payment.CurrencyMismatch");
+
+        var dbProd = await context.Products.FindAsync(product.Id);
+        dbProd!.StockQuantity.Should().Be(48); // unmutated
+    }
+
+    [Fact]
+    public async Task Handle_CheckoutSessionExpired_WhenProviderReferenceMismatch_ReturnsConflictAndDoesNotRestoreStock()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var (order, attempt, product) = await SeedOrderAndAttemptAsync(context, stockQuantity: 48, itemQuantity: 2, providerReference: "cs_legit_ref");
+
+        var gatewayMock = new Mock<IStripePaymentGateway>();
+        gatewayMock.Setup(g => g.ParseAndVerifyWebhook(It.IsAny<string>(), It.IsAny<string>()))
+            .Returns(Result.Success(new StripeWebhookEvent(
+                EventType: StripeWebhookEventType.CheckoutSessionExpired,
+                EventId: "evt_expired_ref_mismatch",
+                SessionId: "cs_forged_ref", // wrong session
+                OrderIdString: order.Id.ToString(),
+                PaymentAttemptIdString: attempt.Id.ToString(),
+                AmountTotal: attempt.Amount,
+                Currency: "vnd",
+                PaymentStatus: "unpaid"
+            )));
+
+        var handler = new ProcessStripeWebhookCommandHandler(context, gatewayMock.Object);
+
+        var result = await handler.Handle(new ProcessStripeWebhookCommand("{}", "sig"), CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be("Payment.ProviderReferenceMismatch");
+
+        var dbProd = await context.Products.FindAsync(product.Id);
+        dbProd!.StockQuantity.Should().Be(48); // unmutated
+    }
+
+    [Fact]
+    public async Task Handle_DuplicateCompleted_WhenAmountOrCurrencyOrSessionMismatch_ReturnsConflict()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var (order, attempt, _) = await SeedOrderAndAttemptAsync(context, providerReference: "cs_orig_session");
+
+        order.MarkPaymentSucceeded(attempt.Id, DateTime.UtcNow);
+        await context.SaveChangesAsync();
+
+        var gatewayMock = new Mock<IStripePaymentGateway>();
+        // Duplicate completed event, but with forged SessionId
+        gatewayMock.Setup(g => g.ParseAndVerifyWebhook(It.IsAny<string>(), It.IsAny<string>()))
+            .Returns(Result.Success(new StripeWebhookEvent(
+                EventType: StripeWebhookEventType.CheckoutSessionCompleted,
+                EventId: "evt_dup_forged",
+                SessionId: "cs_mismatched_session",
+                OrderIdString: order.Id.ToString(),
+                PaymentAttemptIdString: attempt.Id.ToString(),
+                AmountTotal: attempt.Amount,
+                Currency: "vnd",
+                PaymentStatus: "paid"
+            )));
+
+        var handler = new ProcessStripeWebhookCommandHandler(context, gatewayMock.Object);
+
+        var result = await handler.Handle(new ProcessStripeWebhookCommand("{}", "sig"), CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be("Payment.ProviderReferenceMismatch");
+    }
+
+    [Fact]
+    public async Task Handle_DuplicateExpired_WhenAmountOrCurrencyOrSessionMismatch_ReturnsConflict()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var (order, attempt, product) = await SeedOrderAndAttemptAsync(context, stockQuantity: 48, itemQuantity: 2, providerReference: "cs_orig_session");
+
+        order.ExpirePaymentAttempt(attempt.Id, attempt.ExpiresAt);
+        await context.SaveChangesAsync();
+
+        var gatewayMock = new Mock<IStripePaymentGateway>();
+        // Duplicate expired event, but with forged Amount
+        gatewayMock.Setup(g => g.ParseAndVerifyWebhook(It.IsAny<string>(), It.IsAny<string>()))
+            .Returns(Result.Success(new StripeWebhookEvent(
+                EventType: StripeWebhookEventType.CheckoutSessionExpired,
+                EventId: "evt_dup_expired_forged",
+                SessionId: "cs_orig_session",
+                OrderIdString: order.Id.ToString(),
+                PaymentAttemptIdString: attempt.Id.ToString(),
+                AmountTotal: 999_999m, // mismatched amount
+                Currency: "vnd",
+                PaymentStatus: "unpaid"
+            )));
+
+        var handler = new ProcessStripeWebhookCommandHandler(context, gatewayMock.Object);
+
+        var result = await handler.Handle(new ProcessStripeWebhookCommand("{}", "sig"), CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be("Payment.AmountMismatch");
+    }
 }

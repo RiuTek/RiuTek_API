@@ -11,7 +11,7 @@ public class StripeSettings
     public string? CancelUrl { get; set; }
     public int CheckoutSessionMinutes { get; set; } = 30;
 
-    public void Validate()
+    public void Validate(string? environmentName = null)
     {
         if (!Enabled) return;
 
@@ -25,23 +25,35 @@ public class StripeSettings
             throw new InvalidOperationException("Stripe:WebhookSecret is required and cannot be a placeholder when Stripe is enabled.");
         }
 
-        if (string.IsNullOrWhiteSpace(SuccessUrl) ||
-            !Uri.TryCreate(SuccessUrl, UriKind.Absolute, out var successUri) ||
-            (successUri.Scheme != Uri.UriSchemeHttps && !successUri.IsLoopback))
-        {
-            throw new InvalidOperationException("Stripe:SuccessUrl must be a valid absolute HTTPS URL (or HTTP localhost in development).");
-        }
-
-        if (string.IsNullOrWhiteSpace(CancelUrl) ||
-            !Uri.TryCreate(CancelUrl, UriKind.Absolute, out var cancelUri) ||
-            (cancelUri.Scheme != Uri.UriSchemeHttps && !cancelUri.IsLoopback))
-        {
-            throw new InvalidOperationException("Stripe:CancelUrl must be a valid absolute HTTPS URL (or HTTP localhost in development).");
-        }
+        ValidateUrl(SuccessUrl, "Stripe:SuccessUrl", environmentName);
+        ValidateUrl(CancelUrl, "Stripe:CancelUrl", environmentName);
 
         if (CheckoutSessionMinutes < 30 || CheckoutSessionMinutes > 1440)
         {
             throw new InvalidOperationException("Stripe:CheckoutSessionMinutes must be between 30 and 1440 minutes.");
         }
+    }
+
+    private static void ValidateUrl(string? url, string settingName, string? environmentName)
+    {
+        if (string.IsNullOrWhiteSpace(url) || !Uri.TryCreate(url, UriKind.Absolute, out var uri))
+        {
+            throw new InvalidOperationException($"{settingName} must be a valid absolute URL.");
+        }
+
+        var isDevelopment = string.Equals(environmentName, "Development", StringComparison.OrdinalIgnoreCase);
+
+        if (uri.Scheme == Uri.UriSchemeHttps)
+        {
+            return;
+        }
+
+        if (isDevelopment && uri.Scheme == Uri.UriSchemeHttp && uri.IsLoopback)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(
+            $"{settingName} must be an absolute HTTPS URL (or HTTP loopback only in Development environment).");
     }
 }
