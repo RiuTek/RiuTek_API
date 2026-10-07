@@ -20,9 +20,26 @@ public class StripeSettings
             throw new InvalidOperationException("Stripe:SecretKey is required and cannot be a placeholder when Stripe is enabled.");
         }
 
+        var trimmedSecretKey = SecretKey.Trim();
+        if (trimmedSecretKey.StartsWith("sk_live_", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("Stripe:SecretKey live keys ('sk_live_') are rejected. Phase C4 only supports Stripe sandbox test keys ('sk_test_').");
+        }
+
+        if (!trimmedSecretKey.StartsWith("sk_test_", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Stripe:SecretKey must start with 'sk_test_' when Stripe is enabled.");
+        }
+
         if (string.IsNullOrWhiteSpace(WebhookSecret) || WebhookSecret.Trim().StartsWith("placeholder", StringComparison.OrdinalIgnoreCase))
         {
             throw new InvalidOperationException("Stripe:WebhookSecret is required and cannot be a placeholder when Stripe is enabled.");
+        }
+
+        var trimmedWebhookSecret = WebhookSecret.Trim();
+        if (!trimmedWebhookSecret.StartsWith("whsec_", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Stripe:WebhookSecret must start with 'whsec_' when Stripe is enabled.");
         }
 
         ValidateUrl(SuccessUrl, "Stripe:SuccessUrl", environmentName);

@@ -3,9 +3,13 @@ using System.Text;
 using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using Moq;
 using RiuTek.Application.Common.Interfaces;
+using RiuTek.Core.Common;
 using RiuTek.Infrastructure.Services;
 using RiuTek.Infrastructure.Settings;
+using Stripe;
+using Stripe.Checkout;
 using Xunit;
 
 namespace RiuTek.Application.Test.Features.Payments;
@@ -296,5 +300,460 @@ public class StripePaymentGatewayUnitTests
         result.IsSuccess.Should().BeTrue();
         result.Value.EventType.Should().Be(StripeWebhookEventType.Unknown);
         result.Value.EventId.Should().Be("evt_test_payment_intent");
+    }
+
+    [Fact]
+    public async Task EnsureCheckoutSessionAsync_SetsAllowedPaymentMethodTypesToCardOnly()
+    {
+        var settings = Options.Create(new StripeSettings
+        {
+            Enabled = true,
+            SecretKey = "sk_test_mock_123",
+            WebhookSecret = WebhookSecret,
+            SuccessUrl = "https://riutek.com/success",
+            CancelUrl = "https://riutek.com/cancel"
+        });
+
+        SessionCreateOptions? capturedOptions = null;
+        var mockClient = new Mock<IStripeClient>();
+        mockClient.Setup(c => c.RequestAsync<Session>(
+            HttpMethod.Post,
+            "/v1/checkout/sessions",
+            It.IsAny<BaseOptions>(),
+            It.IsAny<RequestOptions>(),
+            It.IsAny<CancellationToken>()))
+            .Callback<HttpMethod, string, BaseOptions, RequestOptions, CancellationToken>((_, _, opts, _, _) =>
+            {
+                capturedOptions = opts as SessionCreateOptions;
+            })
+            .ReturnsAsync(new Session
+            {
+                Id = "cs_test_session_card_1",
+                Url = "https://checkout.stripe.com/pay/cs_test_session_card_1",
+                ExpiresAt = DateTime.UtcNow.AddMinutes(30)
+            });
+
+        var gateway = new StripePaymentGateway(settings, NullLogger<StripePaymentGateway>.Instance, mockClient.Object);
+
+        var orderId = Guid.NewGuid();
+        var attemptId = Guid.NewGuid();
+        var expiresAt = DateTime.UtcNow.AddMinutes(30);
+        var request = new CreateStripeCheckoutSessionRequest(
+            OrderId: orderId,
+            PaymentAttemptId: attemptId,
+            OrderNumber: "ORD-12345",
+            Amount: 250_000m,
+            Currency: "VND",
+            CustomerEmail: "customer@riutek.com",
+            ProviderIdempotencyKey: "idem-key-123",
+            ExpiresAt: expiresAt
+        );
+
+        var result = await gateway.EnsureCheckoutSessionAsync(request, null);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Value.SessionId.Should().Be("cs_test_session_card_1");
+        result.Value.Url.Should().Be("https://checkout.stripe.com/pay/cs_test_session_card_1");
+
+        capturedOptions.Should().NotBeNull();
+        capturedOptions!.AllowedPaymentMethodTypes.Should().NotBeNull();
+        capturedOptions.AllowedPaymentMethodTypes.Should().ContainSingle().Which.Should().Be("card");
+        capturedOptions.Mode.Should().Be("payment");
+        capturedOptions.CustomerEmail.Should().Be("customer@riutek.com");
+        capturedOptions.SuccessUrl.Should().Be("https://riutek.com/success");
+        capturedOptions.CancelUrl.Should().Be("https://riutek.com/cancel");
+        capturedOptions.ExpiresAt.Should().Be(expiresAt);
+        capturedOptions.Metadata["OrderId"].Should().Be(orderId.ToString());
+        capturedOptions.Metadata["PaymentAttemptId"].Should().Be(attemptId.ToString());
+        capturedOptions.LineItems.Should().HaveCount(1);
+        capturedOptions.LineItems[0].PriceData.Currency.Should().Be("vnd");
+        capturedOptions.LineItems[0].PriceData.UnitAmount.Should().Be(250_000);
+    }
+
+    [Fact]
+    public async Task EnsureCheckoutSessionAsync_WhenReplayingValidOpenSession_ReturnsExistingSessionAndNeverCallsCreate()
+    {
+        var settings = Options.Create(new StripeSettings
+        {
+            Enabled = true,
+            SecretKey = "sk_test_mock_123",
+            WebhookSecret = WebhookSecret,
+            SuccessUrl = "https://riutek.com/success",
+            CancelUrl = "https://riutek.com/cancel"
+        });
+
+        var existingSessionId = "cs_existing_open_session";
+        var existingExpiresAt = DateTime.UtcNow.AddMinutes(20);
+        var mockClient = new Mock<IStripeClient>();
+        mockClient.Setup(c => c.RequestAsync<Session>(
+            HttpMethod.Get,
+            $"/v1/checkout/sessions/{existingSessionId}",
+            It.IsAny<BaseOptions>(),
+            It.IsAny<RequestOptions>(),
+            It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new Session
+            {
+                Id = existingSessionId,
+                Status = "open",
+                Url = $"https://checkout.stripe.com/pay/{existingSessionId}",
+                ExpiresAt = existingExpiresAt
+            });
+
+        var gateway = new StripePaymentGateway(settings, NullLogger<StripePaymentGateway>.Instance, mockClient.Object);
+
+        var request = new CreateStripeCheckoutSessionRequest(
+            OrderId: Guid.NewGuid(),
+            PaymentAttemptId: Guid.NewGuid(),
+            OrderNumber: "ORD-REPLAY-1",
+            Amount: 100_000m,
+            Currency: "VND",
+            CustomerEmail: "replay@riutek.com",
+            ProviderIdempotencyKey: "key-replay-1",
+            ExpiresAt: DateTime.UtcNow.AddMinutes(30)
+        );
+
+        var result = await gateway.EnsureCheckoutSessionAsync(request, existingSessionId);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Value.SessionId.Should().Be(existingSessionId);
+        result.Value.Url.Should().Be($"https://checkout.stripe.com/pay/{existingSessionId}");
+        result.Value.ExpiresAt.Should().Be(existingExpiresAt);
+
+        mockClient.Verify(c => c.RequestAsync<Session>(
+            HttpMethod.Post,
+            It.IsAny<string>(),
+            It.IsAny<BaseOptions>(),
+            It.IsAny<RequestOptions>(),
+            It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task EnsureCheckoutSessionAsync_WhenReplaySessionNotFound_ReturnsConflictPaymentInvalidSessionStateAndNeverCallsCreate()
+    {
+        var settings = Options.Create(new StripeSettings
+        {
+            Enabled = true,
+            SecretKey = "sk_test_mock_123",
+            WebhookSecret = WebhookSecret
+        });
+
+        var mockClient = new Mock<IStripeClient>();
+        mockClient.Setup(c => c.RequestAsync<Session>(
+            HttpMethod.Get,
+            It.IsAny<string>(),
+            It.IsAny<BaseOptions>(),
+            It.IsAny<RequestOptions>(),
+            It.IsAny<CancellationToken>()))
+            .ReturnsAsync((Session)null!);
+
+        var gateway = new StripePaymentGateway(settings, NullLogger<StripePaymentGateway>.Instance, mockClient.Object);
+
+        var request = new CreateStripeCheckoutSessionRequest(
+            OrderId: Guid.NewGuid(),
+            PaymentAttemptId: Guid.NewGuid(),
+            OrderNumber: "ORD-NOTFOUND",
+            Amount: 100_000m,
+            Currency: "VND",
+            CustomerEmail: "test@riutek.com",
+            ProviderIdempotencyKey: "key-1",
+            ExpiresAt: DateTime.UtcNow.AddMinutes(30)
+        );
+
+        var result = await gateway.EnsureCheckoutSessionAsync(request, "cs_missing_session");
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be("Payment.InvalidSessionState");
+        result.Error.Type.Should().Be(ErrorType.Conflict);
+
+        mockClient.Verify(c => c.RequestAsync<Session>(
+            HttpMethod.Post,
+            It.IsAny<string>(),
+            It.IsAny<BaseOptions>(),
+            It.IsAny<RequestOptions>(),
+            It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Theory]
+    [InlineData("complete")]
+    [InlineData("expired")]
+    [InlineData("canceled")]
+    [InlineData("unknown_status")]
+    public async Task EnsureCheckoutSessionAsync_WhenReplaySessionNotOpen_ReturnsConflictPaymentInvalidSessionStateAndNeverCallsCreate(string status)
+    {
+        var settings = Options.Create(new StripeSettings
+        {
+            Enabled = true,
+            SecretKey = "sk_test_mock_123",
+            WebhookSecret = WebhookSecret
+        });
+
+        var existingSessionId = "cs_status_test";
+        var mockClient = new Mock<IStripeClient>();
+        mockClient.Setup(c => c.RequestAsync<Session>(
+            HttpMethod.Get,
+            $"/v1/checkout/sessions/{existingSessionId}",
+            It.IsAny<BaseOptions>(),
+            It.IsAny<RequestOptions>(),
+            It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new Session
+            {
+                Id = existingSessionId,
+                Status = status,
+                Url = $"https://checkout.stripe.com/pay/{existingSessionId}",
+                ExpiresAt = DateTime.UtcNow.AddMinutes(20)
+            });
+
+        var gateway = new StripePaymentGateway(settings, NullLogger<StripePaymentGateway>.Instance, mockClient.Object);
+
+        var request = new CreateStripeCheckoutSessionRequest(
+            OrderId: Guid.NewGuid(),
+            PaymentAttemptId: Guid.NewGuid(),
+            OrderNumber: "ORD-STATUS",
+            Amount: 100_000m,
+            Currency: "VND",
+            CustomerEmail: "test@riutek.com",
+            ProviderIdempotencyKey: "key-1",
+            ExpiresAt: DateTime.UtcNow.AddMinutes(30)
+        );
+
+        var result = await gateway.EnsureCheckoutSessionAsync(request, existingSessionId);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be("Payment.InvalidSessionState");
+        result.Error.Type.Should().Be(ErrorType.Conflict);
+
+        mockClient.Verify(c => c.RequestAsync<Session>(
+            HttpMethod.Post,
+            It.IsAny<string>(),
+            It.IsAny<BaseOptions>(),
+            It.IsAny<RequestOptions>(),
+            It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("not-a-valid-url")]
+    public async Task EnsureCheckoutSessionAsync_WhenReplaySessionUrlInvalidOrMissing_ReturnsConflictPaymentInvalidSessionStateAndNeverCallsCreate(string? url)
+    {
+        var settings = Options.Create(new StripeSettings
+        {
+            Enabled = true,
+            SecretKey = "sk_test_mock_123",
+            WebhookSecret = WebhookSecret
+        });
+
+        var existingSessionId = "cs_url_test";
+        var mockClient = new Mock<IStripeClient>();
+        mockClient.Setup(c => c.RequestAsync<Session>(
+            HttpMethod.Get,
+            $"/v1/checkout/sessions/{existingSessionId}",
+            It.IsAny<BaseOptions>(),
+            It.IsAny<RequestOptions>(),
+            It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new Session
+            {
+                Id = existingSessionId,
+                Status = "open",
+                Url = url,
+                ExpiresAt = DateTime.UtcNow.AddMinutes(20)
+            });
+
+        var gateway = new StripePaymentGateway(settings, NullLogger<StripePaymentGateway>.Instance, mockClient.Object);
+
+        var request = new CreateStripeCheckoutSessionRequest(
+            OrderId: Guid.NewGuid(),
+            PaymentAttemptId: Guid.NewGuid(),
+            OrderNumber: "ORD-URL",
+            Amount: 100_000m,
+            Currency: "VND",
+            CustomerEmail: "test@riutek.com",
+            ProviderIdempotencyKey: "key-1",
+            ExpiresAt: DateTime.UtcNow.AddMinutes(30)
+        );
+
+        var result = await gateway.EnsureCheckoutSessionAsync(request, existingSessionId);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be("Payment.InvalidSessionState");
+        result.Error.Type.Should().Be(ErrorType.Conflict);
+
+        mockClient.Verify(c => c.RequestAsync<Session>(
+            HttpMethod.Post,
+            It.IsAny<string>(),
+            It.IsAny<BaseOptions>(),
+            It.IsAny<RequestOptions>(),
+            It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task EnsureCheckoutSessionAsync_WhenReplaySessionExpiresInPast_ReturnsConflictPaymentInvalidSessionStateAndNeverCallsCreate()
+    {
+        var settings = Options.Create(new StripeSettings
+        {
+            Enabled = true,
+            SecretKey = "sk_test_mock_123",
+            WebhookSecret = WebhookSecret
+        });
+
+        var existingSessionId = "cs_expired_test";
+        var mockClient = new Mock<IStripeClient>();
+        mockClient.Setup(c => c.RequestAsync<Session>(
+            HttpMethod.Get,
+            $"/v1/checkout/sessions/{existingSessionId}",
+            It.IsAny<BaseOptions>(),
+            It.IsAny<RequestOptions>(),
+            It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new Session
+            {
+                Id = existingSessionId,
+                Status = "open",
+                Url = $"https://checkout.stripe.com/pay/{existingSessionId}",
+                ExpiresAt = DateTime.UtcNow.AddMinutes(-5)
+            });
+
+        var gateway = new StripePaymentGateway(settings, NullLogger<StripePaymentGateway>.Instance, mockClient.Object);
+
+        var request = new CreateStripeCheckoutSessionRequest(
+            OrderId: Guid.NewGuid(),
+            PaymentAttemptId: Guid.NewGuid(),
+            OrderNumber: "ORD-EXPIRED",
+            Amount: 100_000m,
+            Currency: "VND",
+            CustomerEmail: "test@riutek.com",
+            ProviderIdempotencyKey: "key-1",
+            ExpiresAt: DateTime.UtcNow.AddMinutes(30)
+        );
+
+        var result = await gateway.EnsureCheckoutSessionAsync(request, existingSessionId);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be("Payment.InvalidSessionState");
+        result.Error.Type.Should().Be(ErrorType.Conflict);
+
+        mockClient.Verify(c => c.RequestAsync<Session>(
+            HttpMethod.Post,
+            It.IsAny<string>(),
+            It.IsAny<BaseOptions>(),
+            It.IsAny<RequestOptions>(),
+            It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task EnsureCheckoutSessionAsync_WhenRequestCancellationRequested_RethrowsOperationCanceledException()
+    {
+        var settings = Options.Create(new StripeSettings
+        {
+            Enabled = true,
+            SecretKey = "sk_test_mock_123",
+            WebhookSecret = WebhookSecret
+        });
+
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        var mockClient = new Mock<IStripeClient>();
+        mockClient.Setup(c => c.RequestAsync<Session>(
+            HttpMethod.Post,
+            It.IsAny<string>(),
+            It.IsAny<BaseOptions>(),
+            It.IsAny<RequestOptions>(),
+            It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new OperationCanceledException(cts.Token));
+
+        var gateway = new StripePaymentGateway(settings, NullLogger<StripePaymentGateway>.Instance, mockClient.Object);
+
+        var request = new CreateStripeCheckoutSessionRequest(
+            OrderId: Guid.NewGuid(),
+            PaymentAttemptId: Guid.NewGuid(),
+            OrderNumber: "ORD-CANCEL",
+            Amount: 100_000m,
+            Currency: "VND",
+            CustomerEmail: "test@riutek.com",
+            ProviderIdempotencyKey: "key-1",
+            ExpiresAt: DateTime.UtcNow.AddMinutes(30)
+        );
+
+        var act = () => gateway.EnsureCheckoutSessionAsync(request, null, cts.Token);
+        await act.Should().ThrowAsync<OperationCanceledException>();
+    }
+
+    [Fact]
+    public async Task EnsureCheckoutSessionAsync_WhenInternalOperationCanceledExceptionAndRequestNotCancelled_Returns503PaymentGatewayUnavailable()
+    {
+        var settings = Options.Create(new StripeSettings
+        {
+            Enabled = true,
+            SecretKey = "sk_test_mock_123",
+            WebhookSecret = WebhookSecret
+        });
+
+        var mockClient = new Mock<IStripeClient>();
+        mockClient.Setup(c => c.RequestAsync<Session>(
+            HttpMethod.Post,
+            It.IsAny<string>(),
+            It.IsAny<BaseOptions>(),
+            It.IsAny<RequestOptions>(),
+            It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new OperationCanceledException());
+
+        var gateway = new StripePaymentGateway(settings, NullLogger<StripePaymentGateway>.Instance, mockClient.Object);
+
+        var request = new CreateStripeCheckoutSessionRequest(
+            OrderId: Guid.NewGuid(),
+            PaymentAttemptId: Guid.NewGuid(),
+            OrderNumber: "ORD-TIMEOUT",
+            Amount: 100_000m,
+            Currency: "VND",
+            CustomerEmail: "test@riutek.com",
+            ProviderIdempotencyKey: "key-1",
+            ExpiresAt: DateTime.UtcNow.AddMinutes(30)
+        );
+
+        var result = await gateway.EnsureCheckoutSessionAsync(request, null, CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be("Payment.GatewayUnavailable");
+        result.Error.Type.Should().Be(ErrorType.Unavailable);
+    }
+
+    [Fact]
+    public async Task EnsureCheckoutSessionAsync_WhenInternalTaskCanceledExceptionAndRequestNotCancelled_Returns503PaymentGatewayUnavailable()
+    {
+        var settings = Options.Create(new StripeSettings
+        {
+            Enabled = true,
+            SecretKey = "sk_test_mock_123",
+            WebhookSecret = WebhookSecret
+        });
+
+        var mockClient = new Mock<IStripeClient>();
+        mockClient.Setup(c => c.RequestAsync<Session>(
+            HttpMethod.Post,
+            It.IsAny<string>(),
+            It.IsAny<BaseOptions>(),
+            It.IsAny<RequestOptions>(),
+            It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new TaskCanceledException());
+
+        var gateway = new StripePaymentGateway(settings, NullLogger<StripePaymentGateway>.Instance, mockClient.Object);
+
+        var request = new CreateStripeCheckoutSessionRequest(
+            OrderId: Guid.NewGuid(),
+            PaymentAttemptId: Guid.NewGuid(),
+            OrderNumber: "ORD-TIMEOUT-TASK",
+            Amount: 100_000m,
+            Currency: "VND",
+            CustomerEmail: "test@riutek.com",
+            ProviderIdempotencyKey: "key-1",
+            ExpiresAt: DateTime.UtcNow.AddMinutes(30)
+        );
+
+        var result = await gateway.EnsureCheckoutSessionAsync(request, null, CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be("Payment.GatewayUnavailable");
+        result.Error.Type.Should().Be(ErrorType.Unavailable);
     }
 }

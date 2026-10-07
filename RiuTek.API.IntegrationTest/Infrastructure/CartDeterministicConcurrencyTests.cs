@@ -387,6 +387,7 @@ internal sealed class TestHookApplicationDbContext : IApplicationDbContext
 {
     private readonly ApplicationDbContext _inner;
     private readonly Func<CancellationToken, Task>? _beforeSaveChangesAsync;
+    public int ConcurrencyExceptionsCaught { get; private set; }
 
     public TestHookApplicationDbContext(
         ApplicationDbContext inner,
@@ -420,7 +421,15 @@ internal sealed class TestHookApplicationDbContext : IApplicationDbContext
             await _beforeSaveChangesAsync(cancellationToken);
         }
 
-        return await _inner.SaveChangesAsync(cancellationToken);
+        try
+        {
+            return await _inner.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            ConcurrencyExceptionsCaught++;
+            throw;
+        }
     }
 
     public bool IsUniqueViolation(DbUpdateException ex, string? constraintName = null)

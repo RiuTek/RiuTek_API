@@ -79,19 +79,45 @@ public class StripePaymentGateway : IStripePaymentGateway
                     existingProviderReference.Trim(),
                     cancellationToken: cancellationToken);
 
-                if (existingSession is not null && !string.IsNullOrWhiteSpace(existingSession.Url))
+                if (existingSession is null)
                 {
-                    return Result.Success(new StripeCheckoutSessionResult(
-                        existingSession.Id,
-                        existingSession.Url,
-                        existingSession.ExpiresAt
-                    ));
+                    return Result.Failure<StripeCheckoutSessionResult>(Error.Conflict(
+                        "Payment.InvalidSessionState",
+                        "Checkout session was not found on Stripe."));
                 }
+
+                if (!string.Equals(existingSession.Status, "open", StringComparison.OrdinalIgnoreCase))
+                {
+                    return Result.Failure<StripeCheckoutSessionResult>(Error.Conflict(
+                        "Payment.InvalidSessionState",
+                        $"Checkout session is not in open state (Status: {existingSession.Status})."));
+                }
+
+                if (string.IsNullOrWhiteSpace(existingSession.Url) || !Uri.TryCreate(existingSession.Url, UriKind.Absolute, out _))
+                {
+                    return Result.Failure<StripeCheckoutSessionResult>(Error.Conflict(
+                        "Payment.InvalidSessionState",
+                        "Checkout session does not have a valid URL."));
+                }
+
+                if (existingSession.ExpiresAt == default || existingSession.ExpiresAt <= DateTime.UtcNow)
+                {
+                    return Result.Failure<StripeCheckoutSessionResult>(Error.Conflict(
+                        "Payment.InvalidSessionState",
+                        "Checkout session has expired."));
+                }
+
+                return Result.Success(new StripeCheckoutSessionResult(
+                    existingSession.Id,
+                    existingSession.Url,
+                    existingSession.ExpiresAt
+                ));
             }
 
             var options = new SessionCreateOptions
             {
                 Mode = "payment",
+                AllowedPaymentMethodTypes = ["card"],
                 CustomerEmail = !string.IsNullOrWhiteSpace(request.CustomerEmail) ? request.CustomerEmail.Trim() : null,
                 SuccessUrl = _settings.SuccessUrl,
                 CancelUrl = _settings.CancelUrl,
@@ -131,9 +157,16 @@ public class StripePaymentGateway : IStripePaymentGateway
                 session.ExpiresAt
             ));
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogError("Stripe API call timed out or was canceled internally.");
+            return Result.Failure<StripeCheckoutSessionResult>(Error.Unavailable(
+                "Payment.GatewayUnavailable",
+                "Stripe payment gateway is temporarily unavailable. Please retry."));
         }
         catch (StripeException ex)
         {

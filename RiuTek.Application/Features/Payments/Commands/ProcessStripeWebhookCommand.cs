@@ -11,9 +11,6 @@ public record ProcessStripeWebhookCommand(string Payload, string Signature) : IR
 
 public class ProcessStripeWebhookCommandHandler : IRequestHandler<ProcessStripeWebhookCommand, Result>
 {
-    // Test-only signal to verify concurrency recovery branch execution
-    public static int ConcurrencyRecoveryExecutionCount;
-
     private readonly IApplicationDbContext _context;
     private readonly IStripePaymentGateway _stripeGateway;
 
@@ -71,7 +68,7 @@ public class ProcessStripeWebhookCommandHandler : IRequestHandler<ProcessStripeW
         }
 
         // 5. Shared Webhook Integrity Validation & ProviderReference Binding
-        var validationResult = ValidateAndBindWebhookEvent(webhookEvent, order, attempt);
+        var validationResult = ValidateAndBindWebhookEvent(webhookEvent, attempt);
         if (validationResult.IsFailure)
         {
             return validationResult;
@@ -150,8 +147,6 @@ public class ProcessStripeWebhookCommandHandler : IRequestHandler<ProcessStripeW
             }
             catch (DbUpdateConcurrencyException)
             {
-                Interlocked.Increment(ref ConcurrencyRecoveryExecutionCount);
-
                 // Reload order state to check if duplicate concurrent webhook already succeeded
                 var reloadedOrder = await _context.Orders
                     .AsNoTracking()
@@ -174,7 +169,6 @@ public class ProcessStripeWebhookCommandHandler : IRequestHandler<ProcessStripeW
 
     private static Result ValidateAndBindWebhookEvent(
         StripeWebhookEvent webhookEvent,
-        Order order,
         PaymentAttempt attempt)
     {
         if (attempt.Method != PaymentMethod.Stripe)

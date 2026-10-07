@@ -806,8 +806,6 @@ public class PaymentStripeIntegrationTests : IAsyncLifetime
             await tcsAllowDb2ToSave.Task.WaitAsync(TimeSpan.FromSeconds(15), ct);
         });
 
-        ProcessStripeWebhookCommandHandler.ConcurrencyRecoveryExecutionCount = 0;
-
         var handler1 = new ProcessStripeWebhookCommandHandler(hookDb1, fakeGateway);
         var handler2 = new ProcessStripeWebhookCommandHandler(hookDb2, fakeGateway);
 
@@ -829,9 +827,9 @@ public class PaymentStripeIntegrationTests : IAsyncLifetime
         res1.IsSuccess.Should().BeTrue();
         res2.IsSuccess.Should().BeTrue();
 
-        // Concurrency recovery branch was executed deterministically
-        ProcessStripeWebhookCommandHandler.ConcurrencyRecoveryExecutionCount.Should().BeGreaterThanOrEqualTo(1,
-            "At least one request must have executed the concurrency recovery branch");
+        // Concurrency recovery branch was executed deterministically via scoped hook
+        hookDb2.ConcurrencyExceptionsCaught.Should().Be(1,
+            "The second concurrent webhook handler must have caught DbUpdateConcurrencyException and recovered");
 
         // Verify stock restored exactly once to 10
         using (var scope = _fixture.Factory.Services.CreateScope())

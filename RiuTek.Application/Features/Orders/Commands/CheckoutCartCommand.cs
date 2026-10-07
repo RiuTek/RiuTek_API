@@ -306,20 +306,34 @@ public class CheckoutCartCommandHandler : IRequestHandler<CheckoutCartCommand, R
         PaymentAttempt attempt,
         CancellationToken cancellationToken)
     {
-        var sessionResult = await _stripeGateway!.EnsureCheckoutSessionAsync(
-            new CreateStripeCheckoutSessionRequest(
-                order.Id,
-                attempt.Id,
-                order.OrderNumber,
-                attempt.Amount,
-                attempt.Currency,
-                order.CustomerEmail,
-                attempt.IdempotencyKey,
-                attempt.ExpiresAt
-            ),
-            attempt.ProviderReference,
-            cancellationToken
-        );
+        Result<StripeCheckoutSessionResult> sessionResult;
+        try
+        {
+            sessionResult = await _stripeGateway!.EnsureCheckoutSessionAsync(
+                new CreateStripeCheckoutSessionRequest(
+                    order.Id,
+                    attempt.Id,
+                    order.OrderNumber,
+                    attempt.Amount,
+                    attempt.Currency,
+                    order.CustomerEmail,
+                    attempt.IdempotencyKey,
+                    attempt.ExpiresAt
+                ),
+                attempt.ProviderReference,
+                cancellationToken
+            );
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+            return Result.Failure<CheckoutOrderDto>(Error.Unavailable(
+                "Payment.GatewayUnavailable",
+                "Stripe payment gateway is temporarily unavailable. Please retry."));
+        }
 
         if (sessionResult.IsFailure)
         {
@@ -377,20 +391,34 @@ public class CheckoutCartCommandHandler : IRequestHandler<CheckoutCartCommand, R
 
             if (attempt.Status == PaymentAttemptStatus.Pending)
             {
-                var sessionResult = await _stripeGateway.EnsureCheckoutSessionAsync(
-                    new CreateStripeCheckoutSessionRequest(
-                        existingOrder.Id,
-                        attempt.Id,
-                        existingOrder.OrderNumber,
-                        attempt.Amount,
-                        attempt.Currency,
-                        existingOrder.CustomerEmail,
-                        attempt.IdempotencyKey,
-                        attempt.ExpiresAt
-                    ),
-                    attempt.ProviderReference,
-                    cancellationToken
-                );
+                Result<StripeCheckoutSessionResult> sessionResult;
+                try
+                {
+                    sessionResult = await _stripeGateway.EnsureCheckoutSessionAsync(
+                        new CreateStripeCheckoutSessionRequest(
+                            existingOrder.Id,
+                            attempt.Id,
+                            existingOrder.OrderNumber,
+                            attempt.Amount,
+                            attempt.Currency,
+                            existingOrder.CustomerEmail,
+                            attempt.IdempotencyKey,
+                            attempt.ExpiresAt
+                        ),
+                        attempt.ProviderReference,
+                        cancellationToken
+                    );
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (OperationCanceledException)
+                {
+                    return Result.Failure<CheckoutOrderDto>(Error.Unavailable(
+                        "Payment.GatewayUnavailable",
+                        "Stripe payment gateway is temporarily unavailable. Please retry."));
+                }
 
                 if (sessionResult.IsFailure)
                 {
