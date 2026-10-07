@@ -19,6 +19,10 @@ public class UpdateProfileCommandValidator : AbstractValidator<UpdateProfileComm
         RuleFor(x => x.FullName)
             .NotEmpty().WithMessage("Họ và tên không được để trống.")
             .MaximumLength(150).WithMessage("Họ và tên không được vượt quá 150 ký tự.");
+
+        RuleFor(x => x.PhoneNumber)
+            .MaximumLength(20).WithMessage("Số điện thoại không được vượt quá 20 ký tự.")
+            .When(x => !string.IsNullOrEmpty(x.PhoneNumber));
     }
 }
 
@@ -39,11 +43,11 @@ public class UpdateProfileCommandHandler : IRequestHandler<UpdateProfileCommand,
         UpdateProfileCommand request,
         CancellationToken cancellationToken)
     {
-        if (!_currentUserService.IsAuthenticated || _currentUserService.UserId == null)
+        if (!_currentUserService.IsAuthenticated || _currentUserService.UserId == null || _currentUserService.UserId == Guid.Empty)
         {
             return Result.Failure<UserDto>(Error.Unauthorized(
                 "Auth.Unauthorized",
-                "Bạn cần đăng nhập để thực hiện thao tác này."));
+                "Authentication is required."));
         }
 
         var userId = _currentUserService.UserId.Value;
@@ -55,11 +59,18 @@ public class UpdateProfileCommandHandler : IRequestHandler<UpdateProfileCommand,
         {
             return Result.Failure<UserDto>(Error.NotFound(
                 "User.NotFound",
-                "Không tìm thấy tài khoản."));
+                "User account was not found."));
+        }
+
+        if (!user.IsActive)
+        {
+            return Result.Failure<UserDto>(Error.Forbidden(
+                "User.AccountInactive",
+                "User account is inactive."));
         }
 
         user.FullName = request.FullName.Trim();
-        user.PhoneNumber = request.PhoneNumber?.Trim();
+        user.PhoneNumber = string.IsNullOrWhiteSpace(request.PhoneNumber) ? null : request.PhoneNumber.Trim();
         user.UpdatedAt = DateTime.UtcNow;
 
         await _context.SaveChangesAsync(cancellationToken);

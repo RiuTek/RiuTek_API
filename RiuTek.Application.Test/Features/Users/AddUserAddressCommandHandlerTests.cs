@@ -10,12 +10,24 @@ namespace RiuTek.Application.Test.Features.Users;
 
 public class AddUserAddressCommandHandlerTests
 {
+    private static async Task<User> SeedActiveUserAsync(TestApplicationDbContext context, bool isActive = true)
+    {
+        var user = new User($"user_{Guid.NewGuid():N}@riutek.test", "hash", "Test User")
+        {
+            IsActive = isActive
+        };
+        context.Users.Add(user);
+        await context.SaveChangesAsync();
+        return user;
+    }
+
     [Fact]
     public async Task Handle_WhenUserHasNoAddress_FirstAddressAutomaticallyBecomesDefault_EvenIfRequestIsDefaultFalse()
     {
         // Arrange
         await using var context = TestDbContextFactory.CreateInMemoryDbContext();
-        var userId = Guid.NewGuid();
+        var user = await SeedActiveUserAsync(context);
+        var userId = user.Id;
 
         var currentUserMock = new Mock<ICurrentUserService>();
         currentUserMock.Setup(x => x.IsAuthenticated).Returns(true);
@@ -50,7 +62,8 @@ public class AddUserAddressCommandHandlerTests
     {
         // Arrange
         await using var context = TestDbContextFactory.CreateInMemoryDbContext();
-        var userId = Guid.NewGuid();
+        var user = await SeedActiveUserAsync(context);
+        var userId = user.Id;
 
         var existingAddress = new UserAddress(
             userId: userId,
@@ -99,12 +112,62 @@ public class AddUserAddressCommandHandlerTests
     }
 
     [Fact]
+    public async Task Handle_WhenSecondAddressIsDefaultFalse_KeepsExistingDefaultAddress()
+    {
+        // Arrange
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var user = await SeedActiveUserAsync(context);
+        var userId = user.Id;
+
+        var existingAddress = new UserAddress(
+            userId: userId,
+            receiverName: "Existing Default",
+            phoneNumber: "0901111111",
+            addressLine: "Old St",
+            ward: "Ward 1",
+            district: "District 1",
+            city: "HCM",
+            isDefault: true
+        );
+        context.UserAddresses.Add(existingAddress);
+        await context.SaveChangesAsync();
+
+        var currentUserMock = new Mock<ICurrentUserService>();
+        currentUserMock.Setup(x => x.IsAuthenticated).Returns(true);
+        currentUserMock.Setup(x => x.UserId).Returns(userId);
+
+        var handler = new AddUserAddressCommandHandler(context, currentUserMock.Object);
+
+        var command = new AddUserAddressCommand(
+            ReceiverName: "Second Address",
+            PhoneNumber: "0903333333",
+            AddressLine: "Second St",
+            Ward: "Ward 2",
+            District: "District 2",
+            City: "HN",
+            IsDefault: false
+        );
+
+        // Act
+        var result = await handler.Handle(command, CancellationToken.None);
+
+        // Assert
+        result.IsSuccess.Should().BeTrue();
+        result.Value.IsDefault.Should().BeFalse();
+
+        var oldAddress = await context.UserAddresses.FirstAsync(a => a.Id == existingAddress.Id);
+        oldAddress.IsDefault.Should().BeTrue();
+    }
+
+    [Fact]
     public async Task Handle_WhenUserAddsDefaultAddress_DoesNotAffectOtherUsersAddresses()
     {
         // Arrange
         await using var context = TestDbContextFactory.CreateInMemoryDbContext();
-        var user1Id = Guid.NewGuid();
-        var user2Id = Guid.NewGuid();
+        var user1 = await SeedActiveUserAsync(context);
+        var user2 = await SeedActiveUserAsync(context);
+        var user1Id = user1.Id;
+        var user2Id = user2.Id;
 
         var user2DefaultAddress = new UserAddress(
             userId: user2Id,
@@ -144,5 +207,36 @@ public class AddUserAddressCommandHandlerTests
         // User 2's default address should remain true
         var reloadedUser2Address = await context.UserAddresses.FirstOrDefaultAsync(a => a.Id == user2DefaultAddress.Id);
         reloadedUser2Address!.IsDefault.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Handle_WhenUserIsInactive_ReturnsForbiddenAndDoesNotMutateDb()
+    {
+        // Arrange
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var user = await SeedActiveUserAsync(context, isActive: false);
+
+        var currentUserMock = new Mock<ICurrentUserService>();
+        currentUserMock.Setup(x => x.IsAuthenticated).Returns(true);
+        currentUserMock.Setup(x => x.UserId).Returns(user.Id);
+
+        var handler = new AddUserAddressCommandHandler(context, currentUserMock.Object);
+
+        var command = new AddUserAddressCommand(
+            ReceiverName: "Inactive User",
+            PhoneNumber: "0901234567",
+            AddressLine: "123 Street",
+            Ward: "Ward 1",
+            District: "District 1",
+            City: "HCM"
+        );
+
+        // Act
+        var result = await handler.Handle(command, CancellationToken.None);
+
+        // Assert
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Code.Should().Be("User.AccountInactive");
+        (await context.UserAddresses.CountAsync()).Should().Be(0);
     }
 }

@@ -35,9 +35,9 @@ public class ActualEndpointMetadataTests
 
             endpoints.Should().NotBeEmpty();
 
-            // Total controller actions: 6 Posts + 6 Comments + 5 Products + 5 Categories + 5 Carts + 4 Auth + 4 Orders + 1 Payments = 36
+            // Total controller actions: 6 Posts + 6 Comments + 5 Products + 5 Categories + 5 Carts + 4 Auth + 4 Orders + 1 Payments + 6 Users = 42
             var controllerEndpoints = endpoints.Where(e => e.Metadata.GetMetadata<ControllerActionDescriptor>() != null).ToList();
-            controllerEndpoints.Should().HaveCount(36);
+            controllerEndpoints.Should().HaveCount(42);
 
             // Helper to get action descriptor
             ControllerActionDescriptor GetDescriptor(RouteEndpoint e) => e.Metadata.GetMetadata<ControllerActionDescriptor>()!;
@@ -335,6 +335,52 @@ public class ActualEndpointMetadataTests
             webhookEndpoint.Should().NotBeNull();
             GetFullRoutePattern(webhookEndpoint!).Should().BeEquivalentTo("api/v1/payments/stripe/webhook");
             AssertPublicEndpoint(webhookEndpoint!);
+
+            #endregion
+
+            #region Users Endpoints (6)
+
+            var userEndpoints = endpoints.Where(e =>
+                e.Metadata.GetMetadata<ControllerActionDescriptor>()?.ControllerTypeInfo.AsType() == typeof(UsersController))
+                .ToList();
+
+            userEndpoints.Should().HaveCount(6);
+
+            // 37. PUT api/v1/users/me (Authorize) - Action: UpdateProfile
+            var updateProfile = userEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(UsersController.UpdateProfile) && GetHttpMethods(e).Contains("PUT"));
+            updateProfile.Should().NotBeNull();
+            GetFullRoutePattern(updateProfile!).Should().BeEquivalentTo("api/v1/users/me");
+            AssertAuthorized(updateProfile!);
+
+            // 38. GET api/v1/users/me/addresses (Authorize) - Action: GetMyAddresses
+            var getMyAddresses = userEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(UsersController.GetMyAddresses) && GetHttpMethods(e).Contains("GET"));
+            getMyAddresses.Should().NotBeNull();
+            GetFullRoutePattern(getMyAddresses!).Should().BeEquivalentTo("api/v1/users/me/addresses");
+            AssertAuthorized(getMyAddresses!);
+
+            // 39. POST api/v1/users/me/addresses (Authorize) - Action: AddAddress
+            var addAddress = userEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(UsersController.AddAddress) && GetHttpMethods(e).Contains("POST"));
+            addAddress.Should().NotBeNull();
+            GetFullRoutePattern(addAddress!).Should().BeEquivalentTo("api/v1/users/me/addresses");
+            AssertAuthorized(addAddress!);
+
+            // 40. PUT api/v1/users/me/addresses/{addressId:guid} (Authorize) - Action: UpdateAddress
+            var updateAddress = userEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(UsersController.UpdateAddress) && GetHttpMethods(e).Contains("PUT"));
+            updateAddress.Should().NotBeNull();
+            GetFullRoutePattern(updateAddress!).Should().BeEquivalentTo("api/v1/users/me/addresses/{addressId:guid}");
+            AssertAuthorized(updateAddress!);
+
+            // 41. PATCH api/v1/users/me/addresses/{addressId:guid}/default (Authorize) - Action: SetDefaultAddress
+            var setDefaultAddress = userEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(UsersController.SetDefaultAddress) && GetHttpMethods(e).Contains("PATCH"));
+            setDefaultAddress.Should().NotBeNull();
+            GetFullRoutePattern(setDefaultAddress!).Should().BeEquivalentTo("api/v1/users/me/addresses/{addressId:guid}/default");
+            AssertAuthorized(setDefaultAddress!);
+
+            // 42. DELETE api/v1/users/me/addresses/{addressId:guid} (Authorize) - Action: DeleteAddress
+            var deleteAddress = userEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(UsersController.DeleteAddress) && GetHttpMethods(e).Contains("DELETE"));
+            deleteAddress.Should().NotBeNull();
+            GetFullRoutePattern(deleteAddress!).Should().BeEquivalentTo("api/v1/users/me/addresses/{addressId:guid}");
+            AssertAuthorized(deleteAddress!);
 
             #endregion
         }
