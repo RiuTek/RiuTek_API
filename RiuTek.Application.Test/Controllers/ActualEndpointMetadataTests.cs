@@ -35,9 +35,9 @@ public class ActualEndpointMetadataTests
 
             endpoints.Should().NotBeEmpty();
 
-            // Total controller actions: 6 Posts + 6 Comments + 5 Products + 5 Categories + 5 Carts + 4 Auth + 4 Orders + 1 Payments + 6 Users = 42
+            // Total controller actions: 6 Posts + 6 Comments + 5 Products + 5 Categories + 5 Carts + 4 Auth + 4 Orders + 1 Payments + 6 Users + 3 ProductMedia = 45
             var controllerEndpoints = endpoints.Where(e => e.Metadata.GetMetadata<ControllerActionDescriptor>() != null).ToList();
-            controllerEndpoints.Should().HaveCount(42);
+            controllerEndpoints.Should().HaveCount(45);
 
             // Helper to get action descriptor
             ControllerActionDescriptor GetDescriptor(RouteEndpoint e) => e.Metadata.GetMetadata<ControllerActionDescriptor>()!;
@@ -381,6 +381,34 @@ public class ActualEndpointMetadataTests
             deleteAddress.Should().NotBeNull();
             GetFullRoutePattern(deleteAddress!).Should().BeEquivalentTo("api/v1/users/me/addresses/{addressId:guid}");
             AssertAuthorized(deleteAddress!);
+
+            #endregion
+
+            #region ProductMedia Endpoints (3)
+
+            var mediaEndpoints = endpoints.Where(e =>
+                e.Metadata.GetMetadata<ControllerActionDescriptor>()?.ControllerTypeInfo.AsType() == typeof(ProductMediaController))
+                .ToList();
+
+            mediaEndpoints.Should().HaveCount(3);
+
+            // 43. POST api/v1/product-media/upload-requests (Policies.ContentManager) - Action: CreateUploadRequest
+            var createUploadRequest = mediaEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(ProductMediaController.CreateUploadRequest) && GetHttpMethods(e).Contains("POST"));
+            createUploadRequest.Should().NotBeNull();
+            GetFullRoutePattern(createUploadRequest!).Should().BeEquivalentTo("api/v1/product-media/upload-requests");
+            AssertAuthorizePolicy(createUploadRequest!, Policies.ContentManager);
+
+            // 44. POST api/v1/product-media/confirmations (Policies.ContentManager) - Action: ConfirmUpload
+            var confirmUpload = mediaEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(ProductMediaController.ConfirmUpload) && GetHttpMethods(e).Contains("POST"));
+            confirmUpload.Should().NotBeNull();
+            GetFullRoutePattern(confirmUpload!).Should().BeEquivalentTo("api/v1/product-media/confirmations");
+            AssertAuthorizePolicy(confirmUpload!, Policies.ContentManager);
+
+            // 45. DELETE api/v1/product-media (Policies.ContentManager) - Action: DeleteMedia
+            var deleteMedia = mediaEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(ProductMediaController.DeleteMedia) && GetHttpMethods(e).Contains("DELETE"));
+            deleteMedia.Should().NotBeNull();
+            GetFullRoutePattern(deleteMedia!).Should().BeEquivalentTo("api/v1/product-media");
+            AssertAuthorizePolicy(deleteMedia!, Policies.ContentManager);
 
             #endregion
         }

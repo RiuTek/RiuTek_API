@@ -56,7 +56,7 @@ public class RouteAmbiguityTests
 
         foreach (var controller in controllerTypes)
         {
-            var routeAttr = controller.GetCustomAttribute<RouteAttribute>();
+            var routeAttr = controller.GetCustomAttributes<RouteAttribute>().FirstOrDefault();
             var baseRoute = routeAttr != null
                 ? routeAttr.Template.Replace("[controller]", controller.Name.Replace("Controller", "", StringComparison.OrdinalIgnoreCase), StringComparison.OrdinalIgnoreCase)
                 : "";

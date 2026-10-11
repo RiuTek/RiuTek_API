@@ -126,6 +126,22 @@ public static class DependencyInjection
         services.Configure<Settings.StripeSettings>(configuration.GetSection(Settings.StripeSettings.SectionName));
         services.AddScoped<IStripePaymentGateway, Services.StripePaymentGateway>();
 
+        // Cloudflare R2 Settings & Product Media Storage
+        var r2Settings = new Settings.R2Settings();
+        configuration.GetSection(Settings.R2Settings.SectionName).Bind(r2Settings);
+        r2Settings.Validate();
+        services.AddSingleton(r2Settings);
+        services.Configure<Settings.R2Settings>(configuration.GetSection(Settings.R2Settings.SectionName));
+
+        if (r2Settings.Enabled)
+        {
+            services.AddSingleton<IProductMediaStorage, Services.R2ProductMediaStorage>();
+        }
+        else
+        {
+            services.AddSingleton<IProductMediaStorage, Services.DisabledProductMediaStorage>();
+        }
+
         return services;
     }
 }

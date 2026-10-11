@@ -6,6 +6,7 @@ using RiuTek.Application.Common.Interfaces;
 using RiuTek.Application.Common.Mappings;
 using RiuTek.Application.Common.Utils;
 using RiuTek.Application.DTOs;
+using RiuTek.Application.Features.Products.Common;
 using RiuTek.Application.Features.Products.Validation;
 using RiuTek.Core.Common;
 using RiuTek.Core.Entities;
@@ -60,16 +61,34 @@ public class CreateProductCommandValidator : AbstractValidator<CreateProductComm
 
         RuleFor(x => x.ImageUrl)
             .NotEmpty().WithMessage("Ảnh sản phẩm chính không được để trống.")
-            .MaximumLength(1000).WithMessage("Đường dẫn ảnh chính không được vượt quá 1000 ký tự.");
+            .MaximumLength(1000).WithMessage("Đường dẫn ảnh chính không được vượt quá 1000 ký tự.")
+            .Must(ProductMediaHelper.IsValidHttpsUrl).WithMessage("Ảnh sản phẩm chính phải là đường dẫn HTTPS hợp lệ.");
 
         When(x => x.AdditionalImages != null, () =>
         {
-            RuleFor(x => x.AdditionalImages)
-                .Must(imgs => imgs!.Count <= 10).WithMessage("Tối đa 10 ảnh phụ.");
-
             RuleForEach(x => x.AdditionalImages)
                 .NotEmpty().WithMessage("Đường dẫn ảnh phụ không được để trống.")
-                .MaximumLength(1000).WithMessage("Đường dẫn ảnh phụ không được vượt quá 1000 ký tự.");
+                .MaximumLength(1000).WithMessage("Đường dẫn ảnh phụ không được vượt quá 1000 ký tự.")
+                .Must(ProductMediaHelper.IsValidHttpsUrl).WithMessage("Đường dẫn ảnh phụ phải là đường dẫn HTTPS hợp lệ.");
+
+            RuleFor(x => x.AdditionalImages)
+                .Must((cmd, images) =>
+                {
+                    if (images == null) return true;
+                    return !images.Any(img =>
+                        !string.IsNullOrWhiteSpace(img) &&
+                        string.Equals(img.Trim(), cmd.ImageUrl?.Trim(), StringComparison.OrdinalIgnoreCase));
+                })
+                .WithMessage("Ảnh phụ không được trùng với ảnh chính.");
+
+            RuleFor(x => x.AdditionalImages)
+                .Must((cmd, images) =>
+                {
+                    if (images == null) return true;
+                    var normalized = ProductMediaHelper.NormalizeAdditionalImages(cmd.ImageUrl, images);
+                    return normalized.Count <= 10;
+                })
+                .WithMessage("Tối đa 10 ảnh phụ.");
         });
 
         RuleFor(x => x.ComponentType)
@@ -164,11 +183,7 @@ public class CreateProductCommandHandler : IRequestHandler<CreateProductCommand,
                 "Slug của sản phẩm này đã tồn tại."));
         }
 
-        var cleanImages = request.AdditionalImages?
-            .Where(img => !string.IsNullOrWhiteSpace(img))
-            .Select(img => img.Trim())
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList() ?? [];
+        var cleanImages = ProductMediaHelper.NormalizeAdditionalImages(request.ImageUrl, request.AdditionalImages);
 
         var product = new Product(
             categoryId: category.Id,
