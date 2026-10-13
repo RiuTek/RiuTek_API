@@ -11,6 +11,7 @@ public class DisabledProductMediaStorage : IProductMediaStorage
         "Cloudflare R2 storage is disabled.");
 
     public bool IsEnabled => false;
+    public long MaxFileSizeBytes => 5242880L; // 5 MiB default safe limit
 
     public string GetPublicUrl(string objectKey) => string.Empty;
 

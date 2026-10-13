@@ -30,6 +30,7 @@ public class CreateProductMediaUploadCommandHandlerTests
         await using var context = TestDbContextFactory.CreateInMemoryDbContext();
         var storageMock = new Mock<IProductMediaStorage>();
         storageMock.Setup(s => s.IsEnabled).Returns(true);
+        storageMock.Setup(s => s.MaxFileSizeBytes).Returns(5242880L);
 
         var currentUserMock = new Mock<ICurrentUserService>();
         currentUserMock.Setup(u => u.IsAuthenticated).Returns(false);
@@ -52,6 +53,7 @@ public class CreateProductMediaUploadCommandHandlerTests
 
         var storageMock = new Mock<IProductMediaStorage>();
         storageMock.Setup(s => s.IsEnabled).Returns(true);
+        storageMock.Setup(s => s.MaxFileSizeBytes).Returns(5242880L);
 
         var currentUserMock = new Mock<ICurrentUserService>();
         currentUserMock.Setup(u => u.IsAuthenticated).Returns(true);
@@ -76,6 +78,7 @@ public class CreateProductMediaUploadCommandHandlerTests
 
         var storageMock = new Mock<IProductMediaStorage>();
         storageMock.Setup(s => s.IsEnabled).Returns(true);
+        storageMock.Setup(s => s.MaxFileSizeBytes).Returns(5242880L);
 
         var currentUserMock = new Mock<ICurrentUserService>();
         currentUserMock.Setup(u => u.IsAuthenticated).Returns(true);
@@ -93,13 +96,14 @@ public class CreateProductMediaUploadCommandHandlerTests
     }
 
     [Fact]
-    public async Task Handle_WhenStorageDisabled_ReturnsUnavailable()
+    public async Task Handle_WhenStorageDisabled_ReturnsUnavailableBeforeSizeValidation()
     {
         await using var context = TestDbContextFactory.CreateInMemoryDbContext();
         var user = await SeedUserAsync(context, role: UserRole.Admin);
 
         var storageMock = new Mock<IProductMediaStorage>();
         storageMock.Setup(s => s.IsEnabled).Returns(false);
+        storageMock.Setup(s => s.MaxFileSizeBytes).Returns(1048576L); // 1 MiB
 
         var currentUserMock = new Mock<ICurrentUserService>();
         currentUserMock.Setup(u => u.IsAuthenticated).Returns(true);
@@ -108,12 +112,74 @@ public class CreateProductMediaUploadCommandHandlerTests
 
         var handler = new CreateProductMediaUploadCommandHandler(storageMock.Object, context, currentUserMock.Object);
 
+        // 2 MiB request against 1 MiB storage, but storage is disabled
         var result = await handler.Handle(
-            new CreateProductMediaUploadCommand("test.jpg", "image/jpeg", 1024),
+            new CreateProductMediaUploadCommand("test.jpg", "image/jpeg", 2097152),
             CancellationToken.None);
 
         result.IsSuccess.Should().BeFalse();
         result.Error.Code.Should().Be("ProductMedia.StorageDisabled");
+    }
+
+    [Fact]
+    public async Task Handle_WhenContentLengthExceedsStorageMaxFileSizeBytes_ReturnsFileTooLarge()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var user = await SeedUserAsync(context, role: UserRole.Admin);
+
+        var storageMock = new Mock<IProductMediaStorage>();
+        storageMock.Setup(s => s.IsEnabled).Returns(true);
+        storageMock.Setup(s => s.MaxFileSizeBytes).Returns(1048576L); // Configured max 1 MiB
+
+        var currentUserMock = new Mock<ICurrentUserService>();
+        currentUserMock.Setup(u => u.IsAuthenticated).Returns(true);
+        currentUserMock.Setup(u => u.UserId).Returns(user.Id);
+        currentUserMock.Setup(u => u.UserRole).Returns(UserRole.Admin.ToString());
+
+        var handler = new CreateProductMediaUploadCommandHandler(storageMock.Object, context, currentUserMock.Object);
+
+        // 2 MiB request against 1 MiB configured storage
+        var result = await handler.Handle(
+            new CreateProductMediaUploadCommand("test.jpg", "image/jpeg", 2097152),
+            CancellationToken.None);
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Code.Should().Be("ProductMedia.FileTooLarge");
+        result.Error.Description.Should().Contain("1048576");
+    }
+
+    [Fact]
+    public async Task Handle_WhenContentLengthWithinConfigured10MiBStorage_Succeeds()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var user = await SeedUserAsync(context, role: UserRole.Admin);
+
+        var storageMock = new Mock<IProductMediaStorage>();
+        storageMock.Setup(s => s.IsEnabled).Returns(true);
+        storageMock.Setup(s => s.MaxFileSizeBytes).Returns(10485760L); // Configured max 10 MiB
+        storageMock.Setup(s => s.CreatePresignedUploadUrlAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((string key, string ct, CancellationToken _) =>
+                Result.Success(new ProductMediaUploadDto(
+                    key,
+                    $"https://upload.r2.test/{key}",
+                    $"https://cdn.riutek.com/{key}",
+                    DateTimeOffset.UtcNow.AddMinutes(10),
+                    "PUT",
+                    new Dictionary<string, string> { { "Content-Type", ct } })));
+
+        var currentUserMock = new Mock<ICurrentUserService>();
+        currentUserMock.Setup(u => u.IsAuthenticated).Returns(true);
+        currentUserMock.Setup(u => u.UserId).Returns(user.Id);
+        currentUserMock.Setup(u => u.UserRole).Returns(UserRole.Admin.ToString());
+
+        var handler = new CreateProductMediaUploadCommandHandler(storageMock.Object, context, currentUserMock.Object);
+
+        // 6 MiB request against 10 MiB configured storage
+        var result = await handler.Handle(
+            new CreateProductMediaUploadCommand("test.jpg", "image/jpeg", 6291456),
+            CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
     }
 
     [Theory]
@@ -128,6 +194,7 @@ public class CreateProductMediaUploadCommandHandlerTests
         string? generatedKey = null;
         var storageMock = new Mock<IProductMediaStorage>();
         storageMock.Setup(s => s.IsEnabled).Returns(true);
+        storageMock.Setup(s => s.MaxFileSizeBytes).Returns(5242880L);
         storageMock.Setup(s => s.CreatePresignedUploadUrlAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync((string key, string ct, CancellationToken _) =>
             {
@@ -182,7 +249,7 @@ public class CreateProductMediaUploadCommandHandlerTests
     [InlineData("test.png", "image/gif", 100)]
     [InlineData("test.png", "image/png", 0)]
     [InlineData("test.png", "image/png", -10)]
-    [InlineData("test.png", "image/png", 5242881)] // > 5 MiB
+    [InlineData("test.png", "image/png", 20971521)] // > 20 MiB safety ceiling
     public void Validator_WhenInputInvalid_FailsValidation(string filename, string mime, long length)
     {
         var validator = new CreateProductMediaUploadCommandValidator();

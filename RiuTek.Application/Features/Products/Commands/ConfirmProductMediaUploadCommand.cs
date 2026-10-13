@@ -22,8 +22,6 @@ public class ConfirmProductMediaUploadCommandValidator : AbstractValidator<Confi
 
 public class ConfirmProductMediaUploadCommandHandler : IRequestHandler<ConfirmProductMediaUploadCommand, Result<ProductMediaDto>>
 {
-    public const long DefaultMaxFileSizeBytes = 5242880; // 5 MiB
-
     private readonly IProductMediaStorage _storage;
     private readonly IApplicationDbContext _context;
     private readonly ICurrentUserService _currentUserService;
@@ -79,7 +77,7 @@ public class ConfirmProductMediaUploadCommandHandler : IRequestHandler<ConfirmPr
         var isMimeValid = ProductMediaHelper.IsSupportedMimeType(metadata.ContentType) &&
                           string.Equals(metadata.ContentType, expectedMime, StringComparison.OrdinalIgnoreCase);
 
-        var isSizeValid = metadata.ContentLength > 0 && metadata.ContentLength <= DefaultMaxFileSizeBytes;
+        var isSizeValid = metadata.ContentLength > 0 && metadata.ContentLength <= _storage.MaxFileSizeBytes;
 
         if (!isMimeValid || !isSizeValid)
         {

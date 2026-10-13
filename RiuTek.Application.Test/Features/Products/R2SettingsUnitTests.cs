@@ -43,6 +43,9 @@ public class R2SettingsUnitTests
     [InlineData("   ")]
     [InlineData("placeholder")]
     [InlineData("PLACEHOLDER_SERVICE_URL")]
+    [InlineData("YOUR_ACCOUNT_ID.r2.cloudflarestorage.com")]
+    [InlineData("https://CHANGE_ME.r2.cloudflarestorage.com")]
+    [InlineData("https://DO_NOT_COMMIT.r2.cloudflarestorage.com")]
     public void Validate_WhenEnabled_AndServiceUrlInvalidOrPlaceholder_Throws(string? serviceUrl)
     {
         var settings = CreateValidSettings();
@@ -68,9 +71,38 @@ public class R2SettingsUnitTests
     }
 
     [Theory]
+    [InlineData("https://test.r2.cloudflarestorage.com/some-bucket")]
+    [InlineData("https://test.r2.cloudflarestorage.com/path/segment")]
+    public void Validate_WhenEnabled_AndServiceUrlHasPathSegments_Throws(string url)
+    {
+        var settings = CreateValidSettings();
+        settings.ServiceUrl = url;
+
+        var act = () => settings.Validate();
+        act.Should().Throw<InvalidOperationException>()
+            .WithMessage("*R2:ServiceUrl*root endpoint*");
+    }
+
+    [Theory]
+    [InlineData("https://user:pass@test.r2.cloudflarestorage.com")]
+    [InlineData("https://test.r2.cloudflarestorage.com?param=value")]
+    [InlineData("https://test.r2.cloudflarestorage.com#anchor")]
+    public void Validate_WhenEnabled_AndServiceUrlHasUserInfoOrQueryOrFragment_Throws(string url)
+    {
+        var settings = CreateValidSettings();
+        settings.ServiceUrl = url;
+
+        var act = () => settings.Validate();
+        act.Should().Throw<InvalidOperationException>();
+    }
+
+    [Theory]
     [InlineData(null)]
     [InlineData("")]
     [InlineData("placeholder_key")]
+    [InlineData("YOUR_ACCESS_KEY_ID")]
+    [InlineData("CHANGE_ME_KEY")]
+    [InlineData("DO_NOT_COMMIT_KEY")]
     public void Validate_WhenEnabled_AndAccessKeyIdInvalidOrPlaceholder_Throws(string? accessKey)
     {
         var settings = CreateValidSettings();
@@ -85,6 +117,9 @@ public class R2SettingsUnitTests
     [InlineData(null)]
     [InlineData("")]
     [InlineData("placeholder_secret_abc123")]
+    [InlineData("YOUR_SECRET_ACCESS_KEY_123")]
+    [InlineData("CHANGE_ME_SECRET")]
+    [InlineData("DO_NOT_COMMIT_SECRET")]
     public void Validate_WhenEnabled_AndSecretAccessKeyInvalidOrPlaceholder_ThrowsAndNeverLeaksSecret(string? secret)
     {
         var settings = CreateValidSettings();
@@ -103,6 +138,9 @@ public class R2SettingsUnitTests
     [InlineData(null)]
     [InlineData("")]
     [InlineData("placeholder_bucket")]
+    [InlineData("YOUR_BUCKET_NAME")]
+    [InlineData("CHANGE_ME_BUCKET")]
+    [InlineData("DO_NOT_COMMIT_BUCKET")]
     public void Validate_WhenEnabled_AndBucketNameInvalidOrPlaceholder_Throws(string? bucket)
     {
         var settings = CreateValidSettings();
@@ -114,11 +152,30 @@ public class R2SettingsUnitTests
     }
 
     [Theory]
+    [InlineData("bucket with spaces")]
+    [InlineData(" bucket")]
+    [InlineData("bucket\tname")]
+    public void Validate_WhenEnabled_AndBucketNameContainsWhitespace_Throws(string bucket)
+    {
+        var settings = CreateValidSettings();
+        settings.BucketName = bucket;
+
+        var act = () => settings.Validate();
+        act.Should().Throw<InvalidOperationException>()
+            .WithMessage("*R2:BucketName*whitespace*");
+    }
+
+    [Theory]
     [InlineData(null)]
     [InlineData("")]
     [InlineData("http://cdn.riutek.com")]
     [InlineData("not-a-url")]
-    public void Validate_WhenEnabled_AndPublicBaseUrlInvalidOrNotHttps_Throws(string? url)
+    [InlineData("https://YOUR_CDN_DOMAIN.com")]
+    [InlineData("https://CHANGE_ME.com")]
+    [InlineData("https://user:pass@cdn.riutek.com")]
+    [InlineData("https://cdn.riutek.com?key=1")]
+    [InlineData("https://cdn.riutek.com#hash")]
+    public void Validate_WhenEnabled_AndPublicBaseUrlInvalid_Throws(string? url)
     {
         var settings = CreateValidSettings();
         settings.PublicBaseUrl = url!;

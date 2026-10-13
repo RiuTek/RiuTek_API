@@ -15,7 +15,7 @@ public record CreateProductMediaUploadCommand(
 
 public class CreateProductMediaUploadCommandValidator : AbstractValidator<CreateProductMediaUploadCommand>
 {
-    public const long DefaultMaxFileSizeBytes = 5242880; // 5 MiB
+    public const long AbsoluteMaxFileSizeBytes = 20971520; // 20 MiB safety ceiling
 
     public CreateProductMediaUploadCommandValidator()
     {
@@ -30,8 +30,8 @@ public class CreateProductMediaUploadCommandValidator : AbstractValidator<Create
 
         RuleFor(x => x.ContentLength)
             .GreaterThan(0).WithMessage("Dung lượng tệp phải lớn hơn 0.")
-            .LessThanOrEqualTo(DefaultMaxFileSizeBytes)
-            .WithMessage($"Dung lượng tệp không được vượt quá {DefaultMaxFileSizeBytes} bytes (5 MiB).");
+            .LessThanOrEqualTo(AbsoluteMaxFileSizeBytes)
+            .WithMessage($"Dung lượng tệp không được vượt quá {AbsoluteMaxFileSizeBytes} bytes (20 MiB).");
     }
 }
 
@@ -70,6 +70,13 @@ public class CreateProductMediaUploadCommandHandler : IRequestHandler<CreateProd
             return Result.Failure<ProductMediaUploadDto>(Error.Unavailable(
                 "ProductMedia.StorageDisabled",
                 "Cloudflare R2 storage is disabled."));
+        }
+
+        if (request.ContentLength > _storage.MaxFileSizeBytes)
+        {
+            return Result.Failure<ProductMediaUploadDto>(Error.Validation(
+                "ProductMedia.FileTooLarge",
+                $"Kích thước tệp vượt quá giới hạn cho phép ({_storage.MaxFileSizeBytes} bytes)."));
         }
 
         var normalizedContentType = request.ContentType.Trim().ToLowerInvariant();

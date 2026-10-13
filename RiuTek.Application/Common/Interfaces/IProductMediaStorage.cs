@@ -6,6 +6,7 @@ namespace RiuTek.Application.Common.Interfaces;
 public interface IProductMediaStorage
 {
     bool IsEnabled { get; }
+    long MaxFileSizeBytes { get; }
 
     Task<Result<ProductMediaUploadDto>> CreatePresignedUploadUrlAsync(
         string objectKey,

@@ -42,6 +42,7 @@ public class R2ProductMediaStorage : IProductMediaStorage
     }
 
     public bool IsEnabled => true;
+    public long MaxFileSizeBytes => _settings.MaxFileSizeBytes;
 
     public string GetPublicUrl(string objectKey)
     {

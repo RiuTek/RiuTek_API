@@ -175,16 +175,17 @@ public class ConfirmProductMediaUploadCommandHandlerTests
     }
 
     [Fact]
-    public async Task Handle_WhenMetadataSizeExceedsLimit_CleansUpAndReturnsValidation()
+    public async Task Handle_WhenMetadataSizeExceedsConfigured1MiBLimit_CleansUpAndReturnsValidation()
     {
         await using var context = TestDbContextFactory.CreateInMemoryDbContext();
         var user = await SeedUserAsync(context, role: UserRole.Admin);
 
         var storageMock = new Mock<IProductMediaStorage>();
         storageMock.Setup(s => s.IsEnabled).Returns(true);
-        // Size > 5 MiB (5242880)
+        storageMock.Setup(s => s.MaxFileSizeBytes).Returns(1048576L); // 1 MiB configured limit
+        // Metadata is 2 MiB (2097152)
         storageMock.Setup(s => s.GetObjectMetadataAsync(ValidKey, It.IsAny<CancellationToken>()))
-            .ReturnsAsync(Result.Success(new ProductMediaMetadata(ValidKey, "image/jpeg", 5242881, "\"etag-123\"")));
+            .ReturnsAsync(Result.Success(new ProductMediaMetadata(ValidKey, "image/jpeg", 2097152, "\"etag-123\"")));
         storageMock.Setup(s => s.DeleteObjectAsync(ValidKey, It.IsAny<CancellationToken>()))
             .ReturnsAsync(Result.Success());
 
@@ -205,6 +206,37 @@ public class ConfirmProductMediaUploadCommandHandlerTests
     }
 
     [Fact]
+    public async Task Handle_WhenMetadataSizeWithinConfigured10MiBLimit_Succeeds()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var user = await SeedUserAsync(context, role: UserRole.Staff);
+
+        var storageMock = new Mock<IProductMediaStorage>();
+        storageMock.Setup(s => s.IsEnabled).Returns(true);
+        storageMock.Setup(s => s.MaxFileSizeBytes).Returns(10485760L); // 10 MiB configured limit
+        // Metadata is 6 MiB (6291456)
+        storageMock.Setup(s => s.GetObjectMetadataAsync(ValidKey, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Result.Success(new ProductMediaMetadata(ValidKey, "image/jpeg", 6291456, "\"etag-10mib\"")));
+        storageMock.Setup(s => s.GetPublicUrl(ValidKey))
+            .Returns($"https://media.riutek.com/{ValidKey}");
+
+        var currentUserMock = new Mock<ICurrentUserService>();
+        currentUserMock.Setup(u => u.IsAuthenticated).Returns(true);
+        currentUserMock.Setup(u => u.UserId).Returns(user.Id);
+        currentUserMock.Setup(u => u.UserRole).Returns(UserRole.Staff.ToString());
+
+        var handler = new ConfirmProductMediaUploadCommandHandler(storageMock.Object, context, currentUserMock.Object);
+
+        var result = await handler.Handle(
+            new ConfirmProductMediaUploadCommand(ValidKey),
+            CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Value.ObjectKey.Should().Be(ValidKey);
+        result.Value.ContentLength.Should().Be(6291456);
+    }
+
+    [Fact]
     public async Task Handle_WhenValid_ReturnsProductMediaDto()
     {
         await using var context = TestDbContextFactory.CreateInMemoryDbContext();
@@ -212,6 +244,7 @@ public class ConfirmProductMediaUploadCommandHandlerTests
 
         var storageMock = new Mock<IProductMediaStorage>();
         storageMock.Setup(s => s.IsEnabled).Returns(true);
+        storageMock.Setup(s => s.MaxFileSizeBytes).Returns(5242880L);
         storageMock.Setup(s => s.GetObjectMetadataAsync(ValidKey, It.IsAny<CancellationToken>()))
             .ReturnsAsync(Result.Success(new ProductMediaMetadata(ValidKey, "image/jpeg", 2048, "\"etag-abc\"")));
         storageMock.Setup(s => s.GetPublicUrl(ValidKey))

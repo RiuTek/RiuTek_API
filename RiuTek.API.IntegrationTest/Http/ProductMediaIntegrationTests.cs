@@ -22,6 +22,7 @@ namespace RiuTek.API.IntegrationTest.Http;
 public class FakeProductMediaStorage : IProductMediaStorage
 {
     public bool IsEnabled { get; set; } = true;
+    public long MaxFileSizeBytes { get; set; } = 5242880L;
     public string PublicBaseUrl { get; set; } = "https://media.riutek.com";
     public HashSet<string> ExistingKeys { get; } = new(StringComparer.OrdinalIgnoreCase);
 
@@ -318,6 +319,60 @@ public class ProductMediaIntegrationTests : IAsyncLifetime
                 SupportedMemoryType = RamType.DDR5,
                 MaxMemorySpeedMhz = 5600
             });
+        db.Products.Add(product);
+        await db.SaveChangesAsync();
+
+        var (client, fakeStorage) = await CreateClientWithFakeStorageAsync(UserRole.Admin, s => s.ExistingKeys.Add(key));
+        using (client)
+        {
+            using var deleteReq = CreateDeleteMediaRequest(key);
+            var deleteRes = await client.SendAsync(deleteReq);
+
+            deleteRes.StatusCode.Should().Be(HttpStatusCode.Conflict);
+            fakeStorage.ExistingKeys.Should().Contain(key); // Not deleted
+        }
+    }
+
+    [Fact]
+    public async Task DeleteProductMedia_WhenMediaIsInUseInAdditionalImages_Returns409Conflict()
+    {
+        const string key = "products/2026/10/01925b30-c9a7-7e61-a8d9-6012e1a3bc4d.jpg";
+        const string publicUrl = $"https://media.riutek.com/{key}";
+        const string primaryUrl = "https://media.riutek.com/products/2026/10/primary.jpg";
+
+        // Seed product using target publicUrl in AdditionalImages, with a distinct primary ImageUrl
+        using var scope = _fixture.Factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        var category = new Category("CPU", $"cpu-{Guid.NewGuid():N}", ComponentType.Cpu);
+        db.Categories.Add(category);
+        await db.SaveChangesAsync();
+
+        var product = new Product(
+            category.Id,
+            "Intel i9 Additional",
+            $"intel-i9-{Guid.NewGuid():N}",
+            $"SKU-ADD-{Guid.NewGuid():N}",
+            "Intel",
+            500m,
+            10,
+            primaryUrl,
+            ComponentType.Cpu,
+            new CpuSpecification
+            {
+                Socket = CpuSocket.LGA1700,
+                CoreCount = 16,
+                ThreadCount = 24,
+                BaseClockGhz = 3.2,
+                BoostClockGhz = 5.6,
+                TdpWattage = 125,
+                HasIntegratedGpu = true,
+                SupportedMemoryType = RamType.DDR5,
+                MaxMemorySpeedMhz = 5600
+            })
+        {
+            AdditionalImages = [publicUrl]
+        };
         db.Products.Add(product);
         await db.SaveChangesAsync();
 
