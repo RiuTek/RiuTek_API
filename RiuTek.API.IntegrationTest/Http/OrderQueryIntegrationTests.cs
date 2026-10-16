@@ -5,6 +5,7 @@ using System.Text.Json;
 using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using RiuTek.API.Contracts;
 using RiuTek.API.IntegrationTest.Infrastructure;
 using RiuTek.Application.Common.Interfaces;
 using RiuTek.Application.Common.Models;
@@ -82,6 +83,34 @@ public class OrderQueryIntegrationTests : IAsyncLifetime
         var client = _fixture.Factory.CreateClient();
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
+        return (client, user);
+    }
+
+    private async Task<(HttpClient Client, User User)> CreateAuthenticatedUserForRoleAsync(
+        UserRole role,
+        bool isUserActive = true)
+    {
+        using var scope = _fixture.Factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var jwtGenerator = scope.ServiceProvider.GetRequiredService<IJwtTokenGenerator>();
+
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var user = new User(
+            email: $"managed_{role.ToString().ToLowerInvariant()}_{suffix}@riutek.test",
+            passwordHash: "dummy_hashed_password",
+            fullName: $"{role} Order Manager {suffix}",
+            role: role,
+            phoneNumber: "0901234567")
+        {
+            IsActive = isUserActive
+        };
+        db.Users.Add(user);
+        await db.SaveChangesAsync();
+
+        var client = _fixture.Factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
+            "Bearer",
+            jwtGenerator.GenerateAccessToken(user));
         return (client, user);
     }
 
@@ -414,5 +443,181 @@ public class OrderQueryIntegrationTests : IAsyncLifetime
 
         var response = await client.GetAsync(uri);
         response.StatusCode.Should().Be(expectedStatus);
+    }
+
+    [Fact]
+    public async Task ManagedOrders_CustomerIsForbidden_WhileStaffCanSearchAcrossCustomers()
+    {
+        var (customerClient, customer) = await CreateAuthenticatedUserAsync();
+        var (staffClient, _) = await CreateAuthenticatedUserForRoleAsync(UserRole.Staff);
+        var (_, otherCustomer) = await CreateAuthenticatedUserAsync();
+        var customerOrder = await SeedOrderAsync(customer.Id);
+        var otherOrder = await SeedOrderAsync(otherCustomer.Id);
+
+        var forbidden = await customerClient.GetAsync("/api/v1/orders/admin");
+        var response = await staffClient.GetAsync(
+            $"/api/v1/orders/admin?paymentMethod=COD&search={otherOrder.OrderNumber}");
+
+        forbidden.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        var page = await response.Content.ReadFromJsonAsync<PagedResult<ManagedOrderSummaryDto>>(JsonOptions);
+        page.Should().NotBeNull();
+        page!.TotalCount.Should().Be(1);
+        page.Items.Should().ContainSingle(item => item.Id == otherOrder.Id);
+        page.Items.Should().NotContain(item => item.Id == customerOrder.Id);
+
+        var detailResponse = await staffClient.GetAsync($"/api/v1/orders/admin/{otherOrder.Id}");
+        detailResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+    }
+
+    [Fact]
+    public async Task ManagedOrder_CodLifecycle_CompletesPaymentOnlyAfterCompleted()
+    {
+        var (adminClient, _) = await CreateAuthenticatedUserForRoleAsync(UserRole.Admin);
+        var (_, customer) = await CreateAuthenticatedUserAsync();
+        var order = await SeedOrderAsync(customer.Id, paymentMethod: PaymentMethod.COD);
+
+        async Task<OrderDetailDto> ChangeStatusAsync(OrderStatus expected, OrderStatus next)
+        {
+            var response = await adminClient.PatchAsJsonAsync(
+                $"/api/v1/orders/admin/{order.Id}/status",
+                new UpdateOrderStatusRequest(expected, next));
+            response.StatusCode.Should().Be(HttpStatusCode.OK);
+            return (await response.Content.ReadFromJsonAsync<OrderDetailDto>(JsonOptions))!;
+        }
+
+        var processing = await ChangeStatusAsync(OrderStatus.Confirmed, OrderStatus.Processing);
+        processing.PaymentStatus.Should().Be(PaymentStatus.Pending);
+
+        var shipping = await ChangeStatusAsync(OrderStatus.Processing, OrderStatus.Shipping);
+        shipping.PaymentStatus.Should().Be(PaymentStatus.Pending);
+
+        var completed = await ChangeStatusAsync(OrderStatus.Shipping, OrderStatus.Completed);
+        completed.Status.Should().Be(OrderStatus.Completed);
+        completed.PaymentStatus.Should().Be(PaymentStatus.Completed);
+    }
+
+    [Fact]
+    public async Task ManagedOrder_Cancellation_RestoresStockExactlyOnce()
+    {
+        var (staffClient, _) = await CreateAuthenticatedUserForRoleAsync(UserRole.Staff);
+        var (_, customer) = await CreateAuthenticatedUserAsync();
+        var product = await SeedProductAsync(price: 500_000m, stockQuantity: 7);
+        var order = await SeedOrderAsync(
+            customer.Id,
+            items: [(product.Id, product.Name, product.Sku, product.Price, 3)]);
+        var request = new UpdateOrderStatusRequest(OrderStatus.Confirmed, OrderStatus.Cancelled);
+
+        var first = await staffClient.PatchAsJsonAsync(
+            $"/api/v1/orders/admin/{order.Id}/status",
+            request);
+        var replay = await staffClient.PatchAsJsonAsync(
+            $"/api/v1/orders/admin/{order.Id}/status",
+            request);
+
+        first.StatusCode.Should().Be(HttpStatusCode.OK);
+        replay.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        using var scope = _fixture.Factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        (await db.Products.AsNoTracking().SingleAsync(entity => entity.Id == product.Id))
+            .StockQuantity.Should().Be(10);
+        (await db.Orders.AsNoTracking().SingleAsync(entity => entity.Id == order.Id))
+            .Status.Should().Be(OrderStatus.Cancelled);
+    }
+
+    [Fact]
+    public async Task ManagedOrder_InvalidJump_Returns409WithoutChangingStateOrStock()
+    {
+        var (adminClient, _) = await CreateAuthenticatedUserForRoleAsync(UserRole.Admin);
+        var (_, customer) = await CreateAuthenticatedUserAsync();
+        var product = await SeedProductAsync(stockQuantity: 9);
+        var order = await SeedOrderAsync(
+            customer.Id,
+            items: [(product.Id, product.Name, product.Sku, product.Price, 1)]);
+
+        var response = await adminClient.PatchAsJsonAsync(
+            $"/api/v1/orders/admin/{order.Id}/status",
+            new UpdateOrderStatusRequest(OrderStatus.Confirmed, OrderStatus.Completed));
+
+        response.StatusCode.Should().Be(HttpStatusCode.Conflict);
+        using var scope = _fixture.Factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        (await db.Orders.AsNoTracking().SingleAsync(entity => entity.Id == order.Id))
+            .Status.Should().Be(OrderStatus.Confirmed);
+        (await db.Products.AsNoTracking().SingleAsync(entity => entity.Id == product.Id))
+            .StockQuantity.Should().Be(9);
+    }
+
+    [Fact]
+    public async Task OrderStatusConcurrency_SecondWriterIsRejectedByPostgreSql()
+    {
+        var (_, customer) = await CreateAuthenticatedUserAsync();
+        var order = await SeedOrderAsync(customer.Id);
+
+        using var firstScope = _fixture.Factory.Services.CreateScope();
+        using var secondScope = _fixture.Factory.Services.CreateScope();
+        var firstDb = firstScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var secondDb = secondScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var firstOrder = await firstDb.Orders.SingleAsync(entity => entity.Id == order.Id);
+        var secondOrder = await secondDb.Orders.SingleAsync(entity => entity.Id == order.Id);
+
+        firstOrder.ChangeFulfillmentStatus(OrderStatus.Confirmed, OrderStatus.Processing)
+            .IsSuccess.Should().BeTrue();
+        secondOrder.ChangeFulfillmentStatus(OrderStatus.Confirmed, OrderStatus.Cancelled)
+            .IsSuccess.Should().BeTrue();
+
+        await firstDb.SaveChangesAsync();
+        var act = () => secondDb.SaveChangesAsync();
+
+        await act.Should().ThrowAsync<DbUpdateConcurrencyException>();
+    }
+
+    [Fact]
+    public async Task CustomerCancellation_OwnConfirmedCodOrder_RestoresStockOnce()
+    {
+        var (customerClient, customer) = await CreateAuthenticatedUserAsync();
+        var product = await SeedProductAsync(stockQuantity: 6);
+        var order = await SeedOrderAsync(
+            customer.Id,
+            items: [(product.Id, product.Name, product.Sku, product.Price, 4)]);
+
+        var first = await customerClient.PostAsync(
+            $"/api/v1/orders/{order.Id}/cancel",
+            content: null);
+        var replay = await customerClient.PostAsync(
+            $"/api/v1/orders/{order.Id}/cancel",
+            content: null);
+
+        first.StatusCode.Should().Be(HttpStatusCode.OK);
+        replay.StatusCode.Should().Be(HttpStatusCode.OK);
+        var result = await first.Content.ReadFromJsonAsync<OrderDetailDto>(JsonOptions);
+        result!.Status.Should().Be(OrderStatus.Cancelled);
+
+        using var scope = _fixture.Factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        (await db.Products.AsNoTracking().SingleAsync(entity => entity.Id == product.Id))
+            .StockQuantity.Should().Be(10);
+    }
+
+    [Fact]
+    public async Task CustomerCancellation_OtherUsersOrProcessingOrder_IsRejected()
+    {
+        var (customerClient, customer) = await CreateAuthenticatedUserAsync();
+        var (_, otherCustomer) = await CreateAuthenticatedUserAsync();
+        var processingOrder = await SeedOrderAsync(
+            customer.Id,
+            status: OrderStatus.Processing);
+        var otherOrder = await SeedOrderAsync(otherCustomer.Id);
+
+        var processingResponse = await customerClient.PostAsync(
+            $"/api/v1/orders/{processingOrder.Id}/cancel",
+            content: null);
+        var otherResponse = await customerClient.PostAsync(
+            $"/api/v1/orders/{otherOrder.Id}/cancel",
+            content: null);
+
+        processingResponse.StatusCode.Should().Be(HttpStatusCode.Conflict);
+        otherResponse.StatusCode.Should().Be(HttpStatusCode.NotFound);
     }
 }

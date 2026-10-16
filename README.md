@@ -18,7 +18,7 @@ Buying PC parts requires more than adding products to a cart: sockets, memory ge
 - Polymorphic JSON hardware specifications, filtering, search, sorting, and deterministic pagination.
 - PC Builder aggregate and rule-based hardware compatibility checks.
 - Authenticated persistent cart with version-based conflict detection and automatic cleanup of inactive carts after 30 days.
-- Checkout quotation, idempotent order creation, stock reservation, order history, Stripe Checkout sandbox integration, signed webhook processing, and COD checkout support.
+- Checkout quotation, idempotent order creation, stock reservation, customer order history, Staff/Admin order management, COD fulfillment, Stripe Checkout sandbox integration, and signed webhook processing.
 - Posts and reusable comments for products and posts.
 - Redis-backed caching with a database fallback when Redis is unavailable.
 - Cloudflare R2 product-media uploads through presigned URLs, with validation and ownership rules verified in the deployed environment.
@@ -200,6 +200,7 @@ Completed or operationally verified:
 - authentication and profile/address management;
 - catalog, compatibility rules, authenticated cart, checkout, order history;
 - Stripe sandbox success, signed webhook, and duplicate-event handling;
+- Staff/Admin order search and fulfillment workflow with concurrency protection, one-time cancellation restock, customer COD cancellation, and COD payment completion;
 - Cloudflare R2 product-media upload and deletion lifecycle;
 - versioned Excel template, dry-run validation, and all-or-nothing product import for all nine component types;
 - Docker image, PostgreSQL integration testing, CI/CD, Azure/Supabase/Redis deployment.
@@ -207,7 +208,7 @@ Completed or operationally verified:
 In progress or planned:
 
 - product import history and richer administrative audit reporting;
-- complete administrative order lifecycle and COD delivery/payment confirmation;
+- advanced refund, return, and failed-delivery workflows;
 - product reviews and inventory-management workflows;
 - AI-assisted PC recommendations using embeddings and pgvector;
 - React + Vite customer and administration frontend;

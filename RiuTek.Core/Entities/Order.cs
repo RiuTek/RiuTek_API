@@ -236,6 +236,67 @@ public class Order : BaseEntity, IAggregateRoot
         return Result.Success();
     }
 
+    public Result ChangeFulfillmentStatus(
+        OrderStatus expectedStatus,
+        OrderStatus newStatus,
+        DateTime? changedAtUtc = null)
+    {
+        if (!Enum.IsDefined(expectedStatus) || !Enum.IsDefined(newStatus))
+        {
+            return Result.Failure(Error.Validation(
+                "Order.InvalidStatus",
+                "Order status is invalid."));
+        }
+
+        // Safe replay: the desired state was already applied by this or another request.
+        if (Status == newStatus)
+        {
+            return Result.Success();
+        }
+
+        if (Status != expectedStatus)
+        {
+            return Result.Failure(Error.Conflict(
+                "Order.StatusConflict",
+                $"Order status changed from the expected state '{expectedStatus}'."));
+        }
+
+        if (newStatus == OrderStatus.Cancelled &&
+            PaymentMethod != PaymentMethod.COD &&
+            PaymentStatus == PaymentStatus.Completed)
+        {
+            return Result.Failure(Error.Conflict(
+                "Order.PaidOrderRequiresRefund",
+                "A paid online order must use the refund workflow instead of direct cancellation."));
+        }
+
+        var isAllowed = (Status, newStatus) switch
+        {
+            (OrderStatus.Confirmed, OrderStatus.Processing) => true,
+            (OrderStatus.Confirmed, OrderStatus.Cancelled) => true,
+            (OrderStatus.Processing, OrderStatus.Shipping) => true,
+            (OrderStatus.Processing, OrderStatus.Cancelled) => true,
+            (OrderStatus.Shipping, OrderStatus.Completed) => true,
+            _ => false
+        };
+
+        if (!isAllowed)
+        {
+            return Result.Failure(Error.Conflict(
+                "Order.InvalidStatusTransition",
+                $"Cannot change order status from '{Status}' to '{newStatus}'."));
+        }
+
+        Status = newStatus;
+        if (newStatus == OrderStatus.Completed && PaymentMethod == PaymentMethod.COD)
+        {
+            PaymentStatus = PaymentStatus.Completed;
+        }
+
+        UpdatedAt = changedAtUtc ?? DateTime.UtcNow;
+        return Result.Success();
+    }
+
     private Result<PaymentAttempt> FindPaymentAttempt(Guid paymentAttemptId)
     {
         if (paymentAttemptId == Guid.Empty)

@@ -35,9 +35,9 @@ public class ActualEndpointMetadataTests
 
             endpoints.Should().NotBeEmpty();
 
-            // Total controller actions: 6 Posts + 6 Comments + 5 Products + 5 Categories + 5 Carts + 4 Auth + 4 Orders + 1 Payments + 6 Users + 3 ProductMedia + 3 ProductImports = 48
+            // Total controller actions: 6 Posts + 6 Comments + 5 Products + 5 Categories + 5 Carts + 4 Auth + 8 Orders + 1 Payments + 6 Users + 3 ProductMedia + 3 ProductImports = 52
             var controllerEndpoints = endpoints.Where(e => e.Metadata.GetMetadata<ControllerActionDescriptor>() != null).ToList();
-            controllerEndpoints.Should().HaveCount(48);
+            controllerEndpoints.Should().HaveCount(52);
 
             // Helper to get action descriptor
             ControllerActionDescriptor GetDescriptor(RouteEndpoint e) => e.Metadata.GetMetadata<ControllerActionDescriptor>()!;
@@ -288,13 +288,28 @@ public class ActualEndpointMetadataTests
 
             #endregion
 
-            #region Orders Endpoints (4)
+            #region Orders Endpoints (8)
 
             var orderEndpoints = endpoints.Where(e =>
                 e.Metadata.GetMetadata<ControllerActionDescriptor>()?.ControllerTypeInfo.AsType() == typeof(OrdersController))
                 .ToList();
 
-            orderEndpoints.Should().HaveCount(4);
+            orderEndpoints.Should().HaveCount(8);
+
+            var getManagedOrdersEndpoint = orderEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(OrdersController.GetManagedOrders) && GetHttpMethods(e).Contains("GET"));
+            getManagedOrdersEndpoint.Should().NotBeNull();
+            GetFullRoutePattern(getManagedOrdersEndpoint!).Should().BeEquivalentTo("api/v1/orders/admin");
+            AssertAuthorizePolicy(getManagedOrdersEndpoint!, Policies.ContentManager);
+
+            var getManagedOrderByIdEndpoint = orderEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(OrdersController.GetManagedOrderById) && GetHttpMethods(e).Contains("GET"));
+            getManagedOrderByIdEndpoint.Should().NotBeNull();
+            GetFullRoutePattern(getManagedOrderByIdEndpoint!).Should().BeEquivalentTo("api/v1/orders/admin/{id:guid}");
+            AssertAuthorizePolicy(getManagedOrderByIdEndpoint!, Policies.ContentManager);
+
+            var updateManagedOrderStatusEndpoint = orderEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(OrdersController.UpdateManagedOrderStatus) && GetHttpMethods(e).Contains("PATCH"));
+            updateManagedOrderStatusEndpoint.Should().NotBeNull();
+            GetFullRoutePattern(updateManagedOrderStatusEndpoint!).Should().BeEquivalentTo("api/v1/orders/admin/{id:guid}/status");
+            AssertAuthorizePolicy(updateManagedOrderStatusEndpoint!, Policies.ContentManager);
 
             // 32. GET api/v1/orders ([Authorize]) - Action: GetMyOrders
             var getMyOrdersEndpoint = orderEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(OrdersController.GetMyOrders) && GetHttpMethods(e).Contains("GET"));
@@ -307,6 +322,11 @@ public class ActualEndpointMetadataTests
             getMyOrderByIdEndpoint.Should().NotBeNull();
             GetFullRoutePattern(getMyOrderByIdEndpoint!).Should().BeEquivalentTo("api/v1/orders/{id:guid}");
             AssertAuthorized(getMyOrderByIdEndpoint!);
+
+            var cancelMyOrderEndpoint = orderEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(OrdersController.CancelMyOrder) && GetHttpMethods(e).Contains("POST"));
+            cancelMyOrderEndpoint.Should().NotBeNull();
+            GetFullRoutePattern(cancelMyOrderEndpoint!).Should().BeEquivalentTo("api/v1/orders/{id:guid}/cancel");
+            AssertAuthorized(cancelMyOrderEndpoint!);
 
             // 34. POST api/v1/orders/checkout/quote ([Authorize]) - Action: GetCheckoutQuote
             var quoteEndpoint = orderEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(OrdersController.GetCheckoutQuote) && GetHttpMethods(e).Contains("POST"));

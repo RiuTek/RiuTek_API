@@ -57,6 +57,25 @@ public record OrderSummaryDto(
     DateTime CreatedAt
 );
 
+public record ManagedOrderSummaryDto(
+    Guid Id,
+    string OrderNumber,
+    [property: JsonConverter(typeof(JsonStringEnumConverter))]
+    OrderStatus Status,
+    [property: JsonConverter(typeof(JsonStringEnumConverter))]
+    PaymentMethod PaymentMethod,
+    [property: JsonConverter(typeof(JsonStringEnumConverter))]
+    PaymentStatus PaymentStatus,
+    string CustomerName,
+    string CustomerEmail,
+    string CustomerPhone,
+    string Currency,
+    decimal FinalAmount,
+    int ItemCount,
+    DateTime CreatedAt,
+    DateTime? UpdatedAt
+);
+
 public record OrderDetailDto(
     Guid Id,
     string OrderNumber,

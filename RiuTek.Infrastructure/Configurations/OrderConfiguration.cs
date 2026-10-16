@@ -59,6 +59,12 @@ public class OrderConfiguration : IEntityTypeConfiguration<Order>
         builder.Property(o => o.Notes)
             .HasMaxLength(1000);
 
+        builder.Property(o => o.Status)
+            .IsConcurrencyToken();
+
+        builder.Property(o => o.PaymentStatus)
+            .IsConcurrencyToken();
+
         builder.HasOne(o => o.User)
             .WithMany(u => u.Orders)
             .HasForeignKey(o => o.UserId)

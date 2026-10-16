@@ -34,4 +34,30 @@ public static class OrderAuthHelper
 
         return Result.Success(user);
     }
+
+    public static async Task<Result<User>> ValidateActiveContentManagerAsync(
+        ICurrentUserService currentUserService,
+        IApplicationDbContext context,
+        CancellationToken cancellationToken)
+    {
+        var userResult = await ValidateActiveUserAsync(
+            currentUserService,
+            context,
+            cancellationToken);
+
+        if (userResult.IsFailure)
+        {
+            return userResult;
+        }
+
+        if (!RiuTek.Application.Common.Authorization.AuthorizationRules.IsContentManager(
+                userResult.Value.Role.ToString()))
+        {
+            return Result.Failure<User>(Error.Forbidden(
+                "OrderManagement.Forbidden",
+                "Content manager privileges are required."));
+        }
+
+        return userResult;
+    }
 }

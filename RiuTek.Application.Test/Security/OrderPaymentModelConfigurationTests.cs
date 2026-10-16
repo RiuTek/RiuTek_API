@@ -21,6 +21,8 @@ public class OrderPaymentModelConfigurationTests
         entity!.FindProperty(nameof(Order.UserId))!.IsNullable.Should().BeFalse();
         entity.FindProperty(nameof(Order.CheckoutIdempotencyKey))!.GetMaxLength().Should().Be(128);
         entity.FindProperty(nameof(Order.Currency))!.GetMaxLength().Should().Be(3);
+        entity.FindProperty(nameof(Order.Status))!.IsConcurrencyToken.Should().BeTrue();
+        entity.FindProperty(nameof(Order.PaymentStatus))!.IsConcurrencyToken.Should().BeTrue();
 
         var userForeignKey = entity.GetForeignKeys().Single(foreignKey =>
             foreignKey.PrincipalEntityType.ClrType == typeof(User));

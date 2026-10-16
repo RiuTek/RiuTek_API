@@ -12,3 +12,10 @@ public record CheckoutCartRequest(
     PaymentMethod PaymentMethod,
     string? Notes
 );
+
+public record UpdateOrderStatusRequest(
+    [property: JsonConverter(typeof(JsonStringEnumConverter))]
+    OrderStatus ExpectedStatus,
+    [property: JsonConverter(typeof(JsonStringEnumConverter))]
+    OrderStatus NewStatus
+);
