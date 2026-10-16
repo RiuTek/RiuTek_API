@@ -142,6 +142,9 @@ public static class DependencyInjection
             services.AddSingleton<IProductMediaStorage, Services.DisabledProductMediaStorage>();
         }
 
+        // Product Bulk Import Workbook Service (ClosedXML)
+        services.AddSingleton<IProductImportWorkbookService, Services.ClosedXmlProductImportWorkbookService>();
+
         return services;
     }
 }

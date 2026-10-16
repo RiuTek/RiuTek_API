@@ -21,7 +21,8 @@ Buying PC parts requires more than adding products to a cart: sockets, memory ge
 - Checkout quotation, idempotent order creation, stock reservation, order history, Stripe Checkout sandbox integration, signed webhook processing, and COD checkout support.
 - Posts and reusable comments for products and posts.
 - Redis-backed caching with a database fallback when Redis is unavailable.
-- Cloudflare R2-compatible product-media upload foundation using presigned URLs; disabled by default until environment configuration and operational verification are completed.
+- Cloudflare R2 product-media uploads through presigned URLs, with validation and ownership rules verified in the deployed environment.
+- Versioned Excel template generation and dry-run bulk product validation for all nine component types, without modifying the database.
 - PostgreSQL integration tests with Testcontainers and automated container deployment through GitHub Actions.
 
 ## Architecture
@@ -68,6 +69,7 @@ Key design choices:
 | Caching | Redis / Upstash-compatible Redis |
 | Payments | Stripe Checkout and webhooks, COD |
 | Media | Cloudflare R2 through the S3-compatible API |
+| Imports | ClosedXML, versioned `.xlsx` contracts, dry-run validation |
 | Testing | xUnit, FluentAssertions, ASP.NET Core integration testing, Testcontainers |
 | Delivery | Docker, GitHub Actions, Azure Container Registry, Azure Web App, Supabase |
 
@@ -198,12 +200,13 @@ Completed or operationally verified:
 - authentication and profile/address management;
 - catalog, compatibility rules, authenticated cart, checkout, order history;
 - Stripe sandbox success, signed webhook, and duplicate-event handling;
+- Cloudflare R2 product-media upload and deletion lifecycle;
+- versioned Excel template and dry-run bulk validation for all nine component types;
 - Docker image, PostgreSQL integration testing, CI/CD, Azure/Supabase/Redis deployment.
 
 In progress or planned:
 
-- harden and operationally verify Cloudflare R2 product media;
-- bulk product import using a versioned Excel workbook with common and component-specific sheets;
+- persist valid bulk-import rows and report partial import outcomes;
 - complete administrative order lifecycle and COD delivery/payment confirmation;
 - product reviews and inventory-management workflows;
 - AI-assisted PC recommendations using embeddings and pgvector;
