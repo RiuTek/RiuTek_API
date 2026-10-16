@@ -35,9 +35,9 @@ public class ActualEndpointMetadataTests
 
             endpoints.Should().NotBeEmpty();
 
-            // Total controller actions: 6 Posts + 6 Comments + 5 Products + 5 Categories + 5 Carts + 4 Auth + 4 Orders + 1 Payments + 6 Users + 3 ProductMedia + 2 ProductImports = 47
+            // Total controller actions: 6 Posts + 6 Comments + 5 Products + 5 Categories + 5 Carts + 4 Auth + 4 Orders + 1 Payments + 6 Users + 3 ProductMedia + 3 ProductImports = 48
             var controllerEndpoints = endpoints.Where(e => e.Metadata.GetMetadata<ControllerActionDescriptor>() != null).ToList();
-            controllerEndpoints.Should().HaveCount(47);
+            controllerEndpoints.Should().HaveCount(48);
 
             // Helper to get action descriptor
             ControllerActionDescriptor GetDescriptor(RouteEndpoint e) => e.Metadata.GetMetadata<ControllerActionDescriptor>()!;
@@ -412,13 +412,13 @@ public class ActualEndpointMetadataTests
 
             #endregion
 
-            #region ProductImports Endpoints (2)
+            #region ProductImports Endpoints (3)
 
             var importEndpoints = endpoints.Where(e =>
                 e.Metadata.GetMetadata<ControllerActionDescriptor>()?.ControllerTypeInfo.AsType() == typeof(ProductImportsController))
                 .ToList();
 
-            importEndpoints.Should().HaveCount(2);
+            importEndpoints.Should().HaveCount(3);
 
             // 46. GET api/v1/product-imports/template (Policies.ContentManager) - Action: DownloadTemplate
             var downloadTemplate = importEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(ProductImportsController.DownloadTemplate) && GetHttpMethods(e).Contains("GET"));
@@ -431,6 +431,12 @@ public class ActualEndpointMetadataTests
             validateImport.Should().NotBeNull();
             GetFullRoutePattern(validateImport!).Should().BeEquivalentTo("api/v1/product-imports/validate");
             AssertAuthorizePolicy(validateImport!, Policies.ContentManager);
+
+            // 48. POST api/v1/product-imports/import (Policies.ContentManager) - Action: Import
+            var commitImport = importEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(ProductImportsController.Import) && GetHttpMethods(e).Contains("POST"));
+            commitImport.Should().NotBeNull();
+            GetFullRoutePattern(commitImport!).Should().BeEquivalentTo("api/v1/product-imports/import");
+            AssertAuthorizePolicy(commitImport!, Policies.ContentManager);
 
             #endregion
         }

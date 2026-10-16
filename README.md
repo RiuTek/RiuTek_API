@@ -22,7 +22,7 @@ Buying PC parts requires more than adding products to a cart: sockets, memory ge
 - Posts and reusable comments for products and posts.
 - Redis-backed caching with a database fallback when Redis is unavailable.
 - Cloudflare R2 product-media uploads through presigned URLs, with validation and ownership rules verified in the deployed environment.
-- Versioned Excel template generation and dry-run bulk product validation for all nine component types, without modifying the database.
+- Versioned Excel template generation, dry-run validation, and transactional create-only bulk import for all nine component types.
 - PostgreSQL integration tests with Testcontainers and automated container deployment through GitHub Actions.
 
 ## Architecture
@@ -69,7 +69,7 @@ Key design choices:
 | Caching | Redis / Upstash-compatible Redis |
 | Payments | Stripe Checkout and webhooks, COD |
 | Media | Cloudflare R2 through the S3-compatible API |
-| Imports | ClosedXML, versioned `.xlsx` contracts, dry-run validation |
+| Imports | ClosedXML, versioned `.xlsx` contracts, dry-run validation, transactional batch creation |
 | Testing | xUnit, FluentAssertions, ASP.NET Core integration testing, Testcontainers |
 | Delivery | Docker, GitHub Actions, Azure Container Registry, Azure Web App, Supabase |
 
@@ -201,12 +201,12 @@ Completed or operationally verified:
 - catalog, compatibility rules, authenticated cart, checkout, order history;
 - Stripe sandbox success, signed webhook, and duplicate-event handling;
 - Cloudflare R2 product-media upload and deletion lifecycle;
-- versioned Excel template and dry-run bulk validation for all nine component types;
+- versioned Excel template, dry-run validation, and all-or-nothing product import for all nine component types;
 - Docker image, PostgreSQL integration testing, CI/CD, Azure/Supabase/Redis deployment.
 
 In progress or planned:
 
-- persist valid bulk-import rows and report partial import outcomes;
+- product import history and richer administrative audit reporting;
 - complete administrative order lifecycle and COD delivery/payment confirmation;
 - product reviews and inventory-management workflows;
 - AI-assisted PC recommendations using embeddings and pgvector;

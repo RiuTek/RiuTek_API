@@ -81,6 +81,59 @@ public class ProductImportIntegrationTests : IAsyncLifetime
         return client;
     }
 
+    private async Task<byte[]> CreateCpuWorkbookAsync(
+        string sku,
+        string name,
+        bool includeSpecification = true)
+    {
+        using var scope = _fixture.Factory.Services.CreateScope();
+        var workbookService = scope.ServiceProvider.GetRequiredService<IProductImportWorkbookService>();
+        var template = await workbookService.GenerateTemplateAsync(
+            [new("cpu", "Vi xử lý", ComponentType.Cpu)]);
+
+        using var input = new MemoryStream(template.Content);
+        using var workbook = new XLWorkbook(input);
+        var products = workbook.Worksheet("Products");
+        products.Cell(2, 1).Value = sku;
+        products.Cell(2, 2).Value = name;
+        products.Cell(2, 3).Value = "cpu";
+        products.Cell(2, 4).Value = "Cpu";
+        products.Cell(2, 5).Value = "AMD";
+        products.Cell(2, 6).Value = 5_000_000;
+        products.Cell(2, 7).Value = 5_500_000;
+        products.Cell(2, 8).Value = 10;
+        products.Cell(2, 10).Value = "https://media.riutek.test/cpu.webp";
+
+        if (includeSpecification)
+        {
+            var cpu = workbook.Worksheet("CPU");
+            cpu.Cell(2, 1).Value = sku;
+            cpu.Cell(2, 2).Value = "AM5";
+            cpu.Cell(2, 3).Value = 6;
+            cpu.Cell(2, 4).Value = 12;
+            cpu.Cell(2, 5).Value = 3.8;
+            cpu.Cell(2, 6).Value = 5.1;
+            cpu.Cell(2, 7).Value = 65;
+            cpu.Cell(2, 8).Value = true;
+            cpu.Cell(2, 9).Value = "DDR5";
+            cpu.Cell(2, 10).Value = 5200;
+        }
+
+        using var output = new MemoryStream();
+        workbook.SaveAs(output);
+        return output.ToArray();
+    }
+
+    private static MultipartFormDataContent CreateWorkbookContent(byte[] bytes)
+    {
+        var content = new MultipartFormDataContent();
+        var fileContent = new ByteArrayContent(bytes);
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+        content.Add(fileContent, "file", "products.xlsx");
+        return content;
+    }
+
     [Fact]
     public async Task DownloadTemplate_WhenAnonymous_Returns401Unauthorized()
     {
@@ -395,5 +448,102 @@ public class ProductImportIntegrationTests : IAsyncLifetime
         }
 
         finalProductCount.Should().Be(initialProductCount);
+    }
+
+    [Fact]
+    public async Task Import_ValidWorkbook_CreatesWholeBatchAndReturns201()
+    {
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            db.Categories.Add(new Category("Vi xử lý", "cpu", ComponentType.Cpu));
+            await db.SaveChangesAsync();
+        }
+
+        var bytes = await CreateCpuWorkbookAsync("CPU-IMPORT-7600", "AMD Ryzen 5 7600");
+        var client = await CreateClientForRoleAsync(UserRole.Staff);
+        using var content = CreateWorkbookContent(bytes);
+
+        var response = await client.PostAsync("/api/v1/product-imports/import", content);
+
+        response.StatusCode.Should().Be(HttpStatusCode.Created);
+        var result = await response.Content.ReadFromJsonAsync<ProductImportCommitResultDto>(JsonOptions);
+        result.Should().NotBeNull();
+        result!.IsCommitted.Should().BeTrue();
+        result.CreatedCount.Should().Be(1);
+        result.CreatedProducts.Should().ContainSingle(item =>
+            item.Sku == "CPU-IMPORT-7600" && item.Slug == "amd-ryzen-5-7600");
+
+        using var assertScope = _fixture.Factory.Services.CreateScope();
+        var assertDb = assertScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var product = await assertDb.Products.AsNoTracking().SingleAsync();
+        product.Sku.Should().Be("CPU-IMPORT-7600");
+        product.StockQuantity.Should().Be(10);
+        product.IsActive.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Import_InvalidWorkbook_IsAllOrNothingAndReturnsValidationReport()
+    {
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            db.Categories.Add(new Category("Vi xử lý", "cpu", ComponentType.Cpu));
+            await db.SaveChangesAsync();
+        }
+
+        var bytes = await CreateCpuWorkbookAsync(
+            "CPU-MISSING-SPEC",
+            "CPU Missing Specification",
+            includeSpecification: false);
+        var client = await CreateClientForRoleAsync(UserRole.Admin);
+        using var content = CreateWorkbookContent(bytes);
+
+        var response = await client.PostAsync("/api/v1/product-imports/import", content);
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        var result = await response.Content.ReadFromJsonAsync<ProductImportCommitResultDto>(JsonOptions);
+        result.Should().NotBeNull();
+        result!.IsCommitted.Should().BeFalse();
+        result.CreatedCount.Should().Be(0);
+        result.Validation.Errors.Should().Contain(error =>
+            error.Code == "ProductImport.MissingSpecification" && error.Sku == "CPU-MISSING-SPEC");
+
+        using var assertScope = _fixture.Factory.Services.CreateScope();
+        var assertDb = assertScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        (await assertDb.Products.CountAsync()).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Import_ReplayingSameWorkbook_DoesNotCreateDuplicates()
+    {
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            db.Categories.Add(new Category("Vi xử lý", "cpu", ComponentType.Cpu));
+            await db.SaveChangesAsync();
+        }
+
+        var bytes = await CreateCpuWorkbookAsync("CPU-REPLAY-01", "CPU Replay Safe");
+        var client = await CreateClientForRoleAsync(UserRole.Admin);
+        using var firstContent = CreateWorkbookContent(bytes);
+        using var secondContent = CreateWorkbookContent(bytes);
+
+        var firstResponse = await client.PostAsync("/api/v1/product-imports/import", firstContent);
+        var secondResponse = await client.PostAsync("/api/v1/product-imports/import", secondContent);
+
+        firstResponse.StatusCode.Should().Be(HttpStatusCode.Created);
+        secondResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+        var replayResult = await secondResponse.Content.ReadFromJsonAsync<ProductImportCommitResultDto>(JsonOptions);
+        replayResult.Should().NotBeNull();
+        replayResult!.IsCommitted.Should().BeFalse();
+        replayResult.CreatedCount.Should().Be(0);
+        replayResult.Validation.Errors.Should().Contain(error =>
+            error.Code == "ProductImport.SkuConflict" ||
+            error.Code == "ProductImport.SlugConflict");
+
+        using var assertScope = _fixture.Factory.Services.CreateScope();
+        var assertDb = assertScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        (await assertDb.Products.CountAsync()).Should().Be(1);
     }
 }

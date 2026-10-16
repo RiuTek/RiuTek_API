@@ -51,3 +51,15 @@ public record ProductImportParsedWorkbook(
     int TotalProductRows,
     IReadOnlyList<ProductImportRowDraft> Rows,
     IReadOnlyList<ProductImportErrorDto> ParseErrors);
+
+public record ProductImportCreatedProductDto(
+    Guid Id,
+    string Sku,
+    string Slug);
+
+public record ProductImportCommitResultDto(
+    string TemplateVersion,
+    bool IsCommitted,
+    int CreatedCount,
+    IReadOnlyList<ProductImportCreatedProductDto> CreatedProducts,
+    ProductImportValidationResultDto Validation);
