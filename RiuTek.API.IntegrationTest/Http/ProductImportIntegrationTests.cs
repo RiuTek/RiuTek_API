@@ -546,5 +546,152 @@ public class ProductImportIntegrationTests : IAsyncLifetime
         using var assertScope = _fixture.Factory.Services.CreateScope();
         var assertDb = assertScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
         (await assertDb.Products.CountAsync()).Should().Be(1);
+
+        var movements = await assertDb.StockMovements.ToListAsync();
+        movements.Should().ContainSingle("Replay rejected must not add duplicate movements");
+        movements[0].Reason.Should().Be(StockMovementReason.BulkImport);
+        movements[0].QuantityDelta.Should().Be(10);
+    }
+
+    [Fact]
+    public async Task Import_MovementAudit_PositiveStockCreatesMovement_ZeroStockDoesNot()
+    {
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            db.Categories.Add(new Category("Vi xử lý", "cpu", ComponentType.Cpu));
+            await db.SaveChangesAsync();
+        }
+
+        using var scopeServices = _fixture.Factory.Services.CreateScope();
+        var workbookService = scopeServices.ServiceProvider.GetRequiredService<IProductImportWorkbookService>();
+        var template = await workbookService.GenerateTemplateAsync([
+            new("cpu", "Vi xử lý", ComponentType.Cpu)
+        ]);
+
+        using var ms = new MemoryStream(template.Content);
+        using var wb = new XLWorkbook(ms);
+
+        var pWs = wb.Worksheet("Products");
+        // Row 1: Stock 10
+        pWs.Cell(2, 1).Value = "SKU-AUDIT-CPU-1";
+        pWs.Cell(2, 2).Value = "AMD Ryzen 5 7600";
+        pWs.Cell(2, 3).Value = "cpu";
+        pWs.Cell(2, 4).Value = "Cpu";
+        pWs.Cell(2, 5).Value = "AMD";
+        pWs.Cell(2, 6).Value = 5000000;
+        pWs.Cell(2, 8).Value = 10;
+        pWs.Cell(2, 10).Value = "https://media.riutek.test/7600.png";
+
+        // Row 2: Stock 0
+        pWs.Cell(3, 1).Value = "SKU-AUDIT-CPU-2";
+        pWs.Cell(3, 2).Value = "AMD Ryzen 5 7600X";
+        pWs.Cell(3, 3).Value = "cpu";
+        pWs.Cell(3, 4).Value = "Cpu";
+        pWs.Cell(3, 5).Value = "AMD";
+        pWs.Cell(3, 6).Value = 5500000;
+        pWs.Cell(3, 8).Value = 0;
+        pWs.Cell(3, 10).Value = "https://media.riutek.test/7600x.png";
+
+        var cpuWs = wb.Worksheet("CPU");
+        cpuWs.Cell(2, 1).Value = "SKU-AUDIT-CPU-1";
+        cpuWs.Cell(2, 2).Value = "AM5";
+        cpuWs.Cell(2, 3).Value = 6;
+        cpuWs.Cell(2, 4).Value = 12;
+        cpuWs.Cell(2, 5).Value = 3.8;
+        cpuWs.Cell(2, 6).Value = 5.1;
+        cpuWs.Cell(2, 7).Value = 65;
+        cpuWs.Cell(2, 8).Value = true;
+        cpuWs.Cell(2, 9).Value = "DDR5";
+        cpuWs.Cell(2, 10).Value = 5200;
+
+        cpuWs.Cell(3, 1).Value = "SKU-AUDIT-CPU-2";
+        cpuWs.Cell(3, 2).Value = "AM5";
+        cpuWs.Cell(3, 3).Value = 6;
+        cpuWs.Cell(3, 4).Value = 12;
+        cpuWs.Cell(3, 5).Value = 4.7;
+        cpuWs.Cell(3, 6).Value = 5.3;
+        cpuWs.Cell(3, 7).Value = 105;
+        cpuWs.Cell(3, 8).Value = true;
+        cpuWs.Cell(3, 9).Value = "DDR5";
+        cpuWs.Cell(3, 10).Value = 5200;
+
+        using var saveMs = new MemoryStream();
+        wb.SaveAs(saveMs);
+        var bytes = saveMs.ToArray();
+
+        var client = await CreateClientForRoleAsync(UserRole.Admin);
+        using var content = CreateWorkbookContent(bytes);
+
+        var response = await client.PostAsync("/api/v1/product-imports/import", content);
+        response.StatusCode.Should().Be(HttpStatusCode.Created);
+
+        using var assertScope = _fixture.Factory.Services.CreateScope();
+        var assertDb = assertScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        var products = await assertDb.Products.OrderBy(p => p.Sku).ToListAsync();
+        products.Should().HaveCount(2);
+
+        var p1 = products.Single(p => p.Sku == "SKU-AUDIT-CPU-1");
+        var p2 = products.Single(p => p.Sku == "SKU-AUDIT-CPU-2");
+        p2.StockQuantity.Should().Be(0);
+
+        var movements = await assertDb.StockMovements.ToListAsync();
+        movements.Should().ContainSingle("Only product with stock > 0 should have BulkImport movement");
+
+        movements[0].ProductId.Should().Be(p1.Id);
+        movements[0].QuantityDelta.Should().Be(10);
+        movements[0].StockBefore.Should().Be(0);
+        movements[0].StockAfter.Should().Be(10);
+        movements[0].Reason.Should().Be(StockMovementReason.BulkImport);
+        movements[0].ActorUserId.Should().NotBeNull();
+        movements[0].OrderId.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Import_WhenConcurrentUniqueConflictOccurs_RollsBackBothProductsAndMovements()
+    {
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            db.Categories.Add(new Category("Vi xử lý", "cpu", ComponentType.Cpu));
+            await db.SaveChangesAsync();
+        }
+
+        // Pre-seed an existing product in DB with SKU-CONFLICT
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var cat = await db.Categories.FirstAsync();
+            var existing = new Product(
+                cat.Id, "Pre-existing", "pre-existing", "SKU-CONFLICT", "Intel", 1000, 5,
+                "https://media.riutek.test/cpu.webp", ComponentType.Cpu,
+                new CpuSpecification { Socket = CpuSocket.LGA1700, CoreCount = 4, ThreadCount = 8, BaseClockGhz = 3.0, BoostClockGhz = 4.0, TdpWattage = 65, HasIntegratedGpu = false, SupportedMemoryType = RamType.DDR4, MaxMemorySpeedMhz = 3200 });
+            db.Products.Add(existing);
+            await db.SaveChangesAsync();
+        }
+
+        // Workbook tries to import SKU-CONFLICT
+        var bytes = await CreateCpuWorkbookAsync("SKU-CONFLICT", "Conflicting CPU");
+        var client = await CreateClientForRoleAsync(UserRole.Admin);
+        using var content = CreateWorkbookContent(bytes);
+
+        var response = await client.PostAsync("/api/v1/product-imports/import", content);
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        var result = await response.Content.ReadFromJsonAsync<ProductImportCommitResultDto>(JsonOptions);
+        result.Should().NotBeNull();
+        result!.IsCommitted.Should().BeFalse();
+        result.CreatedCount.Should().Be(0);
+
+        using var assertScope = _fixture.Factory.Services.CreateScope();
+        var assertDb = assertScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        // Only the pre-seeded product exists; 0 movements were committed
+        var allProducts = await assertDb.Products.ToListAsync();
+        allProducts.Should().ContainSingle();
+        allProducts[0].Name.Should().Be("Pre-existing");
+
+        var allMovements = await assertDb.StockMovements.ToListAsync();
+        allMovements.Should().BeEmpty();
     }
 }

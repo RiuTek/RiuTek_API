@@ -121,19 +121,17 @@ public class CreateProductCommandHandler : IRequestHandler<CreateProductCommand,
         CreateProductCommand request,
         CancellationToken cancellationToken)
     {
-        if (!_currentUserService.IsAuthenticated || _currentUserService.UserId == null)
+        var authResult = await ProductMediaHelper.ValidateActiveContentManagerAsync(
+            _currentUserService,
+            _context,
+            cancellationToken);
+
+        if (authResult.IsFailure)
         {
-            return Result.Failure<ProductDto>(Error.Unauthorized(
-                "Auth.Unauthorized",
-                "Bạn cần đăng nhập để tạo sản phẩm."));
+            return Result.Failure<ProductDto>(authResult.Error);
         }
 
-        if (!AuthorizationRules.IsContentManager(_currentUserService.UserRole))
-        {
-            return Result.Failure<ProductDto>(Error.Forbidden(
-                "Product.Forbidden",
-                "Bạn không có quyền tạo sản phẩm."));
-        }
+        var actorUserId = authResult.Value;
 
         var category = await _context.Categories
             .FirstOrDefaultAsync(c => c.Id == request.CategoryId, cancellationToken);
@@ -216,7 +214,7 @@ public class CreateProductCommandHandler : IRequestHandler<CreateProductCommand,
                 stockAfter: request.StockQuantity,
                 reason: StockMovementReason.ProductCreated,
                 note: null,
-                actorUserId: _currentUserService.UserId,
+                actorUserId: actorUserId,
                 orderId: null);
             _context.StockMovements.Add(initialMovement);
         }

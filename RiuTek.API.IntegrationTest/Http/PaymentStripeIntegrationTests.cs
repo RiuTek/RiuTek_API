@@ -612,7 +612,7 @@ public class PaymentStripeIntegrationTests : IAsyncLifetime
         responses[0].StatusCode.Should().Be(HttpStatusCode.OK);
         responses[1].StatusCode.Should().Be(HttpStatusCode.OK);
 
-        // Verify stock was restored EXACTLY ONCE to 10 (not 12!)
+        // Verify stock was restored EXACTLY ONCE to 10 (not 12!) and audit movement recorded
         using (var scope = _fixture.Factory.Services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
@@ -623,6 +623,35 @@ public class PaymentStripeIntegrationTests : IAsyncLifetime
             dbOrder.Status.Should().Be(OrderStatus.Cancelled);
             dbOrder.PaymentStatus.Should().Be(PaymentStatus.Failed);
             dbOrder.PaymentAttempts.First().Status.Should().Be(PaymentAttemptStatus.Expired);
+
+            var expiredMovements = await db.StockMovements
+                .Where(m => m.OrderId == orderDto.Id && m.Reason == StockMovementReason.PaymentExpiration)
+                .ToListAsync();
+
+            expiredMovements.Should().ContainSingle("Concurrent expired webhooks must create exactly one PaymentExpiration stock movement");
+            var em = expiredMovements.Single();
+            em.ProductId.Should().Be(product.Id);
+            em.QuantityDelta.Should().Be(2);
+            em.StockBefore.Should().Be(8);
+            em.StockAfter.Should().Be(10);
+            em.ActorUserId.Should().BeNull("System-driven payment expiration movement must have null ActorUserId");
+            em.OrderId.Should().Be(orderDto.Id);
+        }
+
+        // Send a 3rd duplicate expired webhook (replay)
+        var replayResponse = await sendWebhookFunc();
+        replayResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var dbProduct = await db.Products.FindAsync(product.Id);
+            dbProduct!.StockQuantity.Should().Be(10, "Replay must NOT double restore stock");
+
+            var count = await db.StockMovements
+                .Where(m => m.OrderId == orderDto.Id && m.Reason == StockMovementReason.PaymentExpiration)
+                .CountAsync();
+            count.Should().Be(1, "Replay must NOT add duplicate PaymentExpiration movement");
         }
     }
 

@@ -254,5 +254,116 @@ public class GetStockMovementsQueryHandlerTests
         result.Value.Items[0].Reason.Should().Be(StockMovementReason.ManualAdjustment);
     }
 
+    [Fact]
+    public async Task Handle_WhenPageIndexCauses32BitIntegerOverflow_ReturnsEmptyItemsWithoutThrowing()
+    {
+        using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var staff = CreateStaffUser(role: UserRole.Staff);
+        var product = CreateSampleProduct(stock: 10);
+        context.Users.Add(staff);
+        context.Products.Add(product);
+
+        // Seed 10 movements so a 32-bit wrap around offset of 4 would incorrectly hit items
+        for (var i = 0; i < 10; i++)
+        {
+            context.StockMovements.Add(new StockMovement(
+                product.Id, 1, i, i + 1, StockMovementReason.ManualAdjustment, $"Step {i}", staff.Id));
+        }
+        await context.SaveChangesAsync();
+
+        var currentUserMock = new Mock<ICurrentUserService>();
+        currentUserMock.Setup(u => u.IsAuthenticated).Returns(true);
+        currentUserMock.Setup(u => u.UserId).Returns(staff.Id);
+        currentUserMock.Setup(u => u.UserRole).Returns(UserRole.Staff.ToString());
+
+        var handler = new GetStockMovementsQueryHandler(context, currentUserMock.Object);
+        // (214748366 - 1) * 20 = 4,294,967,300 which in signed 32-bit wraps around to 4!
+        var query = new GetStockMovementsQuery(product.Id, PageIndex: 214748366, PageSize: 20);
+
+        var result = await handler.Handle(query, CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Value.Items.Should().BeEmpty();
+        result.Value.TotalCount.Should().Be(10);
+        result.Value.TotalPages.Should().Be(1);
+        result.Value.PageIndex.Should().Be(214748366);
+        result.Value.PageSize.Should().Be(20);
+        result.Value.HasPreviousPage.Should().BeTrue();
+        result.Value.HasNextPage.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Handle_WhenPageIndexIsIntMaxValue_ReturnsEmptyItemsWithoutThrowing()
+    {
+        using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var staff = CreateStaffUser(role: UserRole.Staff);
+        var product = CreateSampleProduct(stock: 10);
+        context.Users.Add(staff);
+        context.Products.Add(product);
+
+        for (var i = 0; i < 5; i++)
+        {
+            context.StockMovements.Add(new StockMovement(
+                product.Id, 1, i, i + 1, StockMovementReason.ManualAdjustment, $"Step {i}", staff.Id));
+        }
+        await context.SaveChangesAsync();
+
+        var currentUserMock = new Mock<ICurrentUserService>();
+        currentUserMock.Setup(u => u.IsAuthenticated).Returns(true);
+        currentUserMock.Setup(u => u.UserId).Returns(staff.Id);
+        currentUserMock.Setup(u => u.UserRole).Returns(UserRole.Staff.ToString());
+
+        var handler = new GetStockMovementsQueryHandler(context, currentUserMock.Object);
+        var query = new GetStockMovementsQuery(product.Id, PageIndex: int.MaxValue, PageSize: 100);
+
+        var result = await handler.Handle(query, CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Value.Items.Should().BeEmpty();
+        result.Value.TotalCount.Should().Be(5);
+        result.Value.TotalPages.Should().Be(1);
+        result.Value.PageIndex.Should().Be(int.MaxValue);
+        result.Value.PageSize.Should().Be(100);
+        result.Value.HasPreviousPage.Should().BeTrue();
+        result.Value.HasNextPage.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Handle_WhenPageIndexIsPageAfterLastPage_ReturnsEmptyItemsAndCorrectMetadata()
+    {
+        using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var staff = CreateStaffUser(role: UserRole.Staff);
+        var product = CreateSampleProduct(stock: 5);
+        context.Users.Add(staff);
+        context.Products.Add(product);
+
+        // 5 items, PageSize = 2 -> 3 pages (page 1: 2, page 2: 2, page 3: 1). Page 4 is right after last page.
+        for (var i = 0; i < 5; i++)
+        {
+            context.StockMovements.Add(new StockMovement(
+                product.Id, 1, i, i + 1, StockMovementReason.ManualAdjustment, $"Step {i}", staff.Id));
+        }
+        await context.SaveChangesAsync();
+
+        var currentUserMock = new Mock<ICurrentUserService>();
+        currentUserMock.Setup(u => u.IsAuthenticated).Returns(true);
+        currentUserMock.Setup(u => u.UserId).Returns(staff.Id);
+        currentUserMock.Setup(u => u.UserRole).Returns(UserRole.Staff.ToString());
+
+        var handler = new GetStockMovementsQueryHandler(context, currentUserMock.Object);
+        var query = new GetStockMovementsQuery(product.Id, PageIndex: 4, PageSize: 2);
+
+        var result = await handler.Handle(query, CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Value.Items.Should().BeEmpty();
+        result.Value.TotalCount.Should().Be(5);
+        result.Value.TotalPages.Should().Be(3);
+        result.Value.PageIndex.Should().Be(4);
+        result.Value.PageSize.Should().Be(2);
+        result.Value.HasPreviousPage.Should().BeTrue();
+        result.Value.HasNextPage.Should().BeFalse();
+    }
+
     #endregion
 }

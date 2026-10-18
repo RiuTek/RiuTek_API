@@ -110,6 +110,76 @@ public class OrderCheckoutIntegrationTests : IAsyncLifetime
         return (client, user, address, cart);
     }
 
+    private async Task<(HttpClient Client, User User, UserAddress Address, Cart Cart)> CreateUserWithAddressAndMultiProductCartAsync(
+        params (Guid ProductId, int Quantity)[] items)
+    {
+        using var scope = _fixture.Factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var jwtGenerator = scope.ServiceProvider.GetRequiredService<IJwtTokenGenerator>();
+
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var user = new User(
+            email: $"checkout_user_{suffix}@riutek.test",
+            passwordHash: "dummy_hashed_password",
+            fullName: $"Checkout User {suffix}",
+            role: UserRole.Customer,
+            phoneNumber: "0901234567"
+        )
+        {
+            IsActive = true
+        };
+        db.Users.Add(user);
+
+        var address = new UserAddress(
+            userId: user.Id,
+            receiverName: $"Receiver {suffix}",
+            phoneNumber: "0909999999",
+            addressLine: "456 Le Loi",
+            ward: "Ben Nghe",
+            district: "Quan 1",
+            city: "TP Ho Chi Minh",
+            isDefault: true
+        );
+        db.UserAddresses.Add(address);
+
+        var cart = new Cart(user.Id);
+        foreach (var item in items)
+        {
+            cart.AddItem(item.ProductId, item.Quantity);
+        }
+        db.Carts.Add(cart);
+
+        await db.SaveChangesAsync();
+
+        var token = jwtGenerator.GenerateAccessToken(user);
+        var client = _fixture.Factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        return (client, user, address, cart);
+    }
+
+    private async Task<(HttpClient Client, User User)> CreateStaffUserClientAsync()
+    {
+        using var scope = _fixture.Factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var jwtGenerator = scope.ServiceProvider.GetRequiredService<IJwtTokenGenerator>();
+
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var user = new User(
+            email: $"staff_{suffix}@riutek.test",
+            passwordHash: "dummy_hashed_password",
+            fullName: $"Staff User {suffix}",
+            role: UserRole.Staff
+        ) { IsActive = true };
+        db.Users.Add(user);
+        await db.SaveChangesAsync();
+
+        var token = jwtGenerator.GenerateAccessToken(user);
+        var client = _fixture.Factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        return (client, user);
+    }
+
     private async Task<(User User, UserAddress Address, Cart Cart)> SeedUserWithAddressAndCartAsync(
         Guid productId,
         int quantity = 1)
@@ -802,5 +872,268 @@ public class OrderCheckoutIntegrationTests : IAsyncLifetime
         var act = () => handler.Handle(command, CancellationToken.None);
 
         await act.Should().ThrowAsync<DbUpdateException>();
+    }
+
+    // 13. Multi-product checkout: each product has exactly 1 negative Checkout movement with correct deltas,
+    // before/after, ActorUserId = customer, OrderId = order.Id. Replay does NOT add duplicate movements.
+    [Fact]
+    public async Task Scenario13_MultiProductCheckoutAndReplay_PersistsStockMovementsAndIsIdempotent()
+    {
+        var (_, p1) = await SeedProductAsync(price: 100_000m, stockQuantity: 20);
+        var (_, p2) = await SeedProductAsync(price: 200_000m, stockQuantity: 15);
+
+        var (client, user, address, cart) = await CreateUserWithAddressAndMultiProductCartAsync(
+            (p1.Id, 2),
+            (p2.Id, 3));
+
+        var idempotencyKey = Guid.NewGuid().ToString("N");
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/v1/orders/checkout")
+        {
+            Content = JsonContent.Create(new CheckoutCartRequest(
+                AddressId: address.Id,
+                ExpectedCartVersion: cart.Version,
+                PaymentMethod: PaymentMethod.COD,
+                Notes: "Multi-product checkout"
+            ))
+        };
+        request.Headers.Add("Idempotency-Key", idempotencyKey);
+
+        var response = await client.SendAsync(request);
+        response.StatusCode.Should().Be(HttpStatusCode.Created);
+        var orderDto = (await response.Content.ReadFromJsonAsync<CheckoutOrderDto>(JsonOptions))!;
+
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+            var p1Db = await db.Products.FindAsync(p1.Id);
+            p1Db!.StockQuantity.Should().Be(18);
+
+            var p2Db = await db.Products.FindAsync(p2.Id);
+            p2Db!.StockQuantity.Should().Be(12);
+
+            var movements = await db.StockMovements
+                .Where(m => m.OrderId == orderDto.Id)
+                .OrderBy(m => m.ProductId)
+                .ToListAsync();
+
+            movements.Should().HaveCount(2);
+
+            var m1 = movements.Single(m => m.ProductId == p1.Id);
+            m1.Reason.Should().Be(StockMovementReason.Checkout);
+            m1.QuantityDelta.Should().Be(-2);
+            m1.StockBefore.Should().Be(20);
+            m1.StockAfter.Should().Be(18);
+            m1.ActorUserId.Should().Be(user.Id);
+            m1.OrderId.Should().Be(orderDto.Id);
+
+            var m2 = movements.Single(m => m.ProductId == p2.Id);
+            m2.Reason.Should().Be(StockMovementReason.Checkout);
+            m2.QuantityDelta.Should().Be(-3);
+            m2.StockBefore.Should().Be(15);
+            m2.StockAfter.Should().Be(12);
+            m2.ActorUserId.Should().Be(user.Id);
+            m2.OrderId.Should().Be(orderDto.Id);
+        }
+
+        // Replay with exact same idempotency key
+        using var replayReq = new HttpRequestMessage(HttpMethod.Post, "/api/v1/orders/checkout")
+        {
+            Content = JsonContent.Create(new CheckoutCartRequest(
+                AddressId: address.Id,
+                ExpectedCartVersion: cart.Version,
+                PaymentMethod: PaymentMethod.COD,
+                Notes: "Multi-product checkout replay"
+            ))
+        };
+        replayReq.Headers.Add("Idempotency-Key", idempotencyKey);
+
+        var replayResp = await client.SendAsync(replayReq);
+        replayResp.StatusCode.Should().Be(HttpStatusCode.Created);
+
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+            var p1Db = await db.Products.FindAsync(p1.Id);
+            p1Db!.StockQuantity.Should().Be(18);
+
+            var p2Db = await db.Products.FindAsync(p2.Id);
+            p2Db!.StockQuantity.Should().Be(12);
+
+            var totalMovements = await db.StockMovements
+                .Where(m => m.OrderId == orderDto.Id)
+                .CountAsync();
+            totalMovements.Should().Be(2, "Replay must NOT add duplicate stock movements");
+        }
+    }
+
+    // 14. Customer cancellation: creates positive OrderCancellation movements for each product,
+    // restores stock, sets ActorUserId = customer, OrderId = order.Id. Replay does NOT create duplicate movements.
+    [Fact]
+    public async Task Scenario14_CustomerCancellationAfterCod_PersistsPositiveMovementsAndIsIdempotent()
+    {
+        var (_, p1) = await SeedProductAsync(price: 100_000m, stockQuantity: 20);
+        var (_, p2) = await SeedProductAsync(price: 200_000m, stockQuantity: 15);
+
+        var (client, user, address, cart) = await CreateUserWithAddressAndMultiProductCartAsync(
+            (p1.Id, 2),
+            (p2.Id, 3));
+
+        var idempotencyKey = Guid.NewGuid().ToString("N");
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/v1/orders/checkout")
+        {
+            Content = JsonContent.Create(new CheckoutCartRequest(
+                AddressId: address.Id,
+                ExpectedCartVersion: cart.Version,
+                PaymentMethod: PaymentMethod.COD,
+                Notes: null
+            ))
+        };
+        request.Headers.Add("Idempotency-Key", idempotencyKey);
+
+        var response = await client.SendAsync(request);
+        response.StatusCode.Should().Be(HttpStatusCode.Created);
+        var orderDto = (await response.Content.ReadFromJsonAsync<CheckoutOrderDto>(JsonOptions))!;
+
+        // Customer cancels order
+        var cancelResp = await client.PostAsync($"/api/v1/orders/{orderDto.Id}/cancel", null);
+        cancelResp.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+            var p1Db = await db.Products.FindAsync(p1.Id);
+            p1Db!.StockQuantity.Should().Be(20);
+
+            var p2Db = await db.Products.FindAsync(p2.Id);
+            p2Db!.StockQuantity.Should().Be(15);
+
+            var cancelMovements = await db.StockMovements
+                .Where(m => m.OrderId == orderDto.Id && m.Reason == StockMovementReason.OrderCancellation)
+                .ToListAsync();
+
+            cancelMovements.Should().HaveCount(2);
+
+            var cm1 = cancelMovements.Single(m => m.ProductId == p1.Id);
+            cm1.QuantityDelta.Should().Be(2);
+            cm1.StockBefore.Should().Be(18);
+            cm1.StockAfter.Should().Be(20);
+            cm1.ActorUserId.Should().Be(user.Id);
+
+            var cm2 = cancelMovements.Single(m => m.ProductId == p2.Id);
+            cm2.QuantityDelta.Should().Be(3);
+            cm2.StockBefore.Should().Be(12);
+            cm2.StockAfter.Should().Be(15);
+            cm2.ActorUserId.Should().Be(user.Id);
+        }
+
+        // Replay cancellation
+        var replayCancelResp = await client.PostAsync($"/api/v1/orders/{orderDto.Id}/cancel", null);
+        replayCancelResp.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+            var p1Db = await db.Products.FindAsync(p1.Id);
+            p1Db!.StockQuantity.Should().Be(20);
+
+            var p2Db = await db.Products.FindAsync(p2.Id);
+            p2Db!.StockQuantity.Should().Be(15);
+
+            var totalCancelMovements = await db.StockMovements
+                .Where(m => m.OrderId == orderDto.Id && m.Reason == StockMovementReason.OrderCancellation)
+                .CountAsync();
+            totalCancelMovements.Should().Be(2, "Replay cancellation must NOT create duplicate movements");
+        }
+    }
+
+    // 15. Admin cancellation: sets ActorUserId to Staff/Admin and creates positive OrderCancellation movement.
+    [Fact]
+    public async Task Scenario15_AdminCancellation_PersistsMovementsWithStaffAdminActor()
+    {
+        var (_, product) = await SeedProductAsync(price: 150_000m, stockQuantity: 10);
+        var (client, _, address, cart) = await CreateUserWithAddressAndCartAsync(product.Id, 4);
+
+        using var checkoutReq = new HttpRequestMessage(HttpMethod.Post, "/api/v1/orders/checkout")
+        {
+            Content = JsonContent.Create(new CheckoutCartRequest(
+                AddressId: address.Id,
+                ExpectedCartVersion: cart.Version,
+                PaymentMethod: PaymentMethod.COD,
+                Notes: null
+            ))
+        };
+        checkoutReq.Headers.Add("Idempotency-Key", Guid.NewGuid().ToString("N"));
+
+        var checkoutResp = await client.SendAsync(checkoutReq);
+        checkoutResp.StatusCode.Should().Be(HttpStatusCode.Created);
+        var orderDto = (await checkoutResp.Content.ReadFromJsonAsync<CheckoutOrderDto>(JsonOptions))!;
+
+        // Staff updates status to Cancelled
+        var (staffClient, staffUser) = await CreateStaffUserClientAsync();
+        var patchReq = new UpdateOrderStatusRequest(OrderStatus.Confirmed, OrderStatus.Cancelled);
+        var patchResp = await staffClient.PatchAsJsonAsync($"/api/v1/orders/admin/{orderDto.Id}/status", patchReq);
+        patchResp.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        using var scope = _fixture.Factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        var pDb = await db.Products.FindAsync(product.Id);
+        pDb!.StockQuantity.Should().Be(10);
+
+        var cancelMovements = await db.StockMovements
+            .Where(m => m.OrderId == orderDto.Id && m.Reason == StockMovementReason.OrderCancellation)
+            .ToListAsync();
+
+        cancelMovements.Should().ContainSingle();
+        var cm = cancelMovements.Single();
+        cm.ProductId.Should().Be(product.Id);
+        cm.QuantityDelta.Should().Be(4);
+        cm.StockBefore.Should().Be(6);
+        cm.StockAfter.Should().Be(10);
+        cm.ActorUserId.Should().Be(staffUser.Id);
+        cm.OrderId.Should().Be(orderDto.Id);
+    }
+
+    // 16. Failed checkout before SaveChanges (e.g. stock depleted) leaves 0 persisted movements.
+    [Fact]
+    public async Task Scenario16_FailedCheckoutBeforeSaveChanges_LeavesNoMovementsPersisted()
+    {
+        var (_, product) = await SeedProductAsync(price: 150_000m, stockQuantity: 2);
+        var (client, _, address, cart) = await CreateUserWithAddressAndCartAsync(product.Id, 2);
+
+        // Another actor drops the stock to 0 right before checkout
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var p = await db.Products.FindAsync(product.Id);
+            p!.StockQuantity = 0;
+            await db.SaveChangesAsync();
+        }
+
+        using var checkoutReq = new HttpRequestMessage(HttpMethod.Post, "/api/v1/orders/checkout")
+        {
+            Content = JsonContent.Create(new CheckoutCartRequest(
+                AddressId: address.Id,
+                ExpectedCartVersion: cart.Version,
+                PaymentMethod: PaymentMethod.COD,
+                Notes: null
+            ))
+        };
+        checkoutReq.Headers.Add("Idempotency-Key", Guid.NewGuid().ToString("N"));
+
+        var checkoutResp = await client.SendAsync(checkoutReq);
+        checkoutResp.StatusCode.Should().Be(HttpStatusCode.Conflict);
+
+        using var verifyScope = _fixture.Factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        var movements = await verifyDb.StockMovements
+            .Where(m => m.ProductId == product.Id && m.Reason == StockMovementReason.Checkout)
+            .ToListAsync();
+        movements.Should().BeEmpty("Failed checkout must leave 0 checkout stock movements");
     }
 }

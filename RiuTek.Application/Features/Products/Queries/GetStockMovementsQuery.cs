@@ -85,26 +85,36 @@ public class GetStockMovementsQueryHandler : IRequestHandler<GetStockMovementsQu
 
         var totalCount = await query.CountAsync(cancellationToken);
 
-        var items = await query
-            .OrderByDescending(m => m.CreatedAt)
-            .ThenByDescending(m => m.Id)
-            .Skip((request.PageIndex - 1) * request.PageSize)
-            .Take(request.PageSize)
-            .Select(m => new StockMovementDto(
-                m.Id,
-                m.ProductId,
-                product.Sku,
-                m.QuantityDelta,
-                m.StockBefore,
-                m.StockAfter,
-                m.Reason,
-                m.Note,
-                m.ActorUserId,
-                m.ActorUser != null ? m.ActorUser.FullName : null,
-                m.OrderId,
-                m.CreatedAt
-            ))
-            .ToListAsync(cancellationToken);
+        long offset = ((long)request.PageIndex - 1) * request.PageSize;
+
+        List<StockMovementDto> items;
+        if (totalCount == 0 || offset >= totalCount || offset > int.MaxValue)
+        {
+            items = [];
+        }
+        else
+        {
+            items = await query
+                .OrderByDescending(m => m.CreatedAt)
+                .ThenByDescending(m => m.Id)
+                .Skip((int)offset)
+                .Take(request.PageSize)
+                .Select(m => new StockMovementDto(
+                    m.Id,
+                    m.ProductId,
+                    product.Sku,
+                    m.QuantityDelta,
+                    m.StockBefore,
+                    m.StockAfter,
+                    m.Reason,
+                    m.Note,
+                    m.ActorUserId,
+                    m.ActorUser != null ? m.ActorUser.FullName : null,
+                    m.OrderId,
+                    m.CreatedAt
+                ))
+                .ToListAsync(cancellationToken);
+        }
 
         var pagedResult = PagedResult<StockMovementDto>.Create(items, totalCount, request.PageIndex, request.PageSize);
         return Result.Success(pagedResult);

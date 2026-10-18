@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using RiuTek.Core.Enums;
 
 namespace RiuTek.Application.DTOs;
@@ -15,7 +16,7 @@ public record StockAdjustmentResultDto(
     int QuantityDelta,
     int StockAfter,
     Guid MovementId,
-    StockMovementReason Reason,
+    [property: JsonConverter(typeof(JsonStringEnumConverter))] StockMovementReason Reason,
     string? Note,
     DateTime CreatedAt
 );
@@ -27,7 +28,7 @@ public record StockMovementDto(
     int QuantityDelta,
     int StockBefore,
     int StockAfter,
-    StockMovementReason Reason,
+    [property: JsonConverter(typeof(JsonStringEnumConverter))] StockMovementReason Reason,
     string? Note,
     Guid? ActorUserId,
     string? ActorUserName,

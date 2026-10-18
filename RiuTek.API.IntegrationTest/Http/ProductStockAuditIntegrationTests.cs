@@ -92,6 +92,10 @@ public class ProductStockAuditIntegrationTests : CatalogIntegrationTestBase
             $"/api/v1/products/{product.Id}/stock-adjustments", request1);
 
         response1.StatusCode.Should().Be(HttpStatusCode.OK);
+        var rawJson1 = await response1.Content.ReadAsStringAsync();
+        rawJson1.Should().Contain("\"reason\":\"ManualAdjustment\"");
+        rawJson1.Should().NotContain("\"reason\":3");
+
         var result1 = await response1.Content.ReadFromJsonAsync<StockAdjustmentResultDto>(JsonOptions);
         result1.Should().NotBeNull();
         result1!.ProductId.Should().Be(product.Id);
@@ -251,6 +255,12 @@ public class ProductStockAuditIntegrationTests : CatalogIntegrationTestBase
             $"/api/v1/products/{product.Id}/stock-movements?pageIndex=1&pageSize=10");
 
         response.StatusCode.Should().Be(HttpStatusCode.OK);
+        var rawGetJson = await response.Content.ReadAsStringAsync();
+        rawGetJson.Should().Contain("\"reason\":\"ManualAdjustment\"");
+        rawGetJson.Should().Contain("\"reason\":\"ProductCreated\"");
+        rawGetJson.Should().NotContain("\"reason\":3");
+        rawGetJson.Should().NotContain("\"reason\":0");
+
         var pagedResult = await response.Content.ReadFromJsonAsync<PagedResult<StockMovementDto>>(JsonOptions);
         pagedResult.Should().NotBeNull();
         pagedResult!.TotalCount.Should().Be(3);
@@ -338,6 +348,59 @@ public class ProductStockAuditIntegrationTests : CatalogIntegrationTestBase
         var movements = await db.StockMovements.Where(m => m.ProductId == product.Id).ToListAsync();
         movements.Should().ContainSingle();
         movements[0].Reason.Should().Be(StockMovementReason.ProductCreated);
+    }
+
+    [Fact]
+    public async Task AdjustStock_RealPostgreSqlConcurrency_ExactlyOneSucceedsAndOneReturns409Conflict()
+    {
+        using var adminClient = CreateAdminClient();
+        using var staffClient1 = CreateStaffClient();
+        using var staffClient2 = CreateStaffClient();
+        var (_, product) = await SeedCategoryAndProductAsync(adminClient, initialStock: 10);
+
+        var request1 = new AdjustStockRequest(
+            ExpectedStockQuantity: 10,
+            QuantityDelta: 5,
+            Note: "Concurrent writer 1"
+        );
+        var request2 = new AdjustStockRequest(
+            ExpectedStockQuantity: 10,
+            QuantityDelta: 3,
+            Note: "Concurrent writer 2"
+        );
+
+        var task1 = staffClient1.PostAsJsonAsync($"/api/v1/products/{product.Id}/stock-adjustments", request1);
+        var task2 = staffClient2.PostAsJsonAsync($"/api/v1/products/{product.Id}/stock-adjustments", request2);
+
+        var responses = await Task.WhenAll(task1, task2);
+
+        var okResponse = responses.SingleOrDefault(r => r.StatusCode == HttpStatusCode.OK);
+        var conflictResponse = responses.SingleOrDefault(r => r.StatusCode == HttpStatusCode.Conflict);
+
+        okResponse.Should().NotBeNull("Exactly one concurrent adjustment must succeed");
+        conflictResponse.Should().NotBeNull("Concurrent adjustment with stale expected stock must fail with 409 Conflict");
+
+        var conflictError = await conflictResponse!.Content.ReadFromJsonAsync<BusinessErrorResponse>(JsonOptions);
+        conflictError.Should().NotBeNull();
+        conflictError!.Code.Should().Be("Inventory.StockConflict");
+
+        using var scope = Fixture.Factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        var dbProduct = await db.Products.FindAsync(product.Id);
+        dbProduct!.StockQuantity.Should().BeOneOf(15, 13);
+
+        var movements = await db.StockMovements
+            .Where(m => m.ProductId == product.Id)
+            .OrderBy(m => m.CreatedAt)
+            .ToListAsync();
+
+        movements.Should().HaveCount(2, "Only initial ProductCreated and the single winning ManualAdjustment must be saved");
+        movements[0].Reason.Should().Be(StockMovementReason.ProductCreated);
+        movements[1].Reason.Should().Be(StockMovementReason.ManualAdjustment);
+        movements[1].StockBefore.Should().Be(10);
+        movements[1].StockAfter.Should().Be(dbProduct.StockQuantity);
+        movements[1].QuantityDelta.Should().Be(dbProduct.StockQuantity - 10);
     }
 
     private record BusinessErrorResponse(string Code, string Description);

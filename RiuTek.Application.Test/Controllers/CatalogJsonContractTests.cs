@@ -498,4 +498,83 @@ public class CatalogJsonContractTests
     }
 
     #endregion
+
+    #region 8. Stock DTOs JSON Enum String Serialization Contract
+
+    [Theory]
+    [InlineData(StockMovementReason.ProductCreated, "ProductCreated")]
+    [InlineData(StockMovementReason.Checkout, "Checkout")]
+    [InlineData(StockMovementReason.OrderCancellation, "OrderCancellation")]
+    [InlineData(StockMovementReason.ManualAdjustment, "ManualAdjustment")]
+    [InlineData(StockMovementReason.BulkImport, "BulkImport")]
+    [InlineData(StockMovementReason.PaymentExpiration, "PaymentExpiration")]
+    public void StockAdjustmentResultDto_SerializesReasonAsString_AndRoundTrips(StockMovementReason reason, string expectedReasonString)
+    {
+        var dto = new StockAdjustmentResultDto(
+            ProductId: Guid.NewGuid(),
+            Sku: "CPU-01",
+            StockBefore: 10,
+            QuantityDelta: 5,
+            StockAfter: 15,
+            MovementId: Guid.NewGuid(),
+            Reason: reason,
+            Note: "Adjustment note",
+            CreatedAt: DateTime.UtcNow
+        );
+
+        var json = JsonSerializer.Serialize(dto, _jsonOptions);
+
+        using var doc = JsonDocument.Parse(json);
+        var reasonProp = doc.RootElement.GetProperty("reason");
+        reasonProp.ValueKind.Should().Be(JsonValueKind.String);
+        reasonProp.GetString().Should().Be(expectedReasonString);
+
+        json.Should().NotContain($"\"reason\":{(int)reason}");
+
+        var deserialized = JsonSerializer.Deserialize<StockAdjustmentResultDto>(json, _jsonOptions);
+        deserialized.Should().NotBeNull();
+        deserialized!.Reason.Should().Be(reason);
+        deserialized.QuantityDelta.Should().Be(5);
+    }
+
+    [Theory]
+    [InlineData(StockMovementReason.ProductCreated, "ProductCreated")]
+    [InlineData(StockMovementReason.Checkout, "Checkout")]
+    [InlineData(StockMovementReason.OrderCancellation, "OrderCancellation")]
+    [InlineData(StockMovementReason.ManualAdjustment, "ManualAdjustment")]
+    [InlineData(StockMovementReason.BulkImport, "BulkImport")]
+    [InlineData(StockMovementReason.PaymentExpiration, "PaymentExpiration")]
+    public void StockMovementDto_SerializesReasonAsString_AndRoundTrips(StockMovementReason reason, string expectedReasonString)
+    {
+        var dto = new StockMovementDto(
+            Id: Guid.NewGuid(),
+            ProductId: Guid.NewGuid(),
+            Sku: "CPU-01",
+            QuantityDelta: -2,
+            StockBefore: 10,
+            StockAfter: 8,
+            Reason: reason,
+            Note: "Order checkout",
+            ActorUserId: Guid.NewGuid(),
+            ActorUserName: "Customer User",
+            OrderId: Guid.NewGuid(),
+            CreatedAt: DateTime.UtcNow
+        );
+
+        var json = JsonSerializer.Serialize(dto, _jsonOptions);
+
+        using var doc = JsonDocument.Parse(json);
+        var reasonProp = doc.RootElement.GetProperty("reason");
+        reasonProp.ValueKind.Should().Be(JsonValueKind.String);
+        reasonProp.GetString().Should().Be(expectedReasonString);
+
+        json.Should().NotContain($"\"reason\":{(int)reason}");
+
+        var deserialized = JsonSerializer.Deserialize<StockMovementDto>(json, _jsonOptions);
+        deserialized.Should().NotBeNull();
+        deserialized!.Reason.Should().Be(reason);
+        deserialized.QuantityDelta.Should().Be(-2);
+    }
+
+    #endregion
 }

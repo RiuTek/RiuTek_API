@@ -96,6 +96,17 @@ public class ProductCommandHandlerTests
         context.Products.Should().BeEmpty();
     }
 
+    private static async Task<User> SeedUserAsync(TestApplicationDbContext context, UserRole role = UserRole.Admin, bool isActive = true)
+    {
+        var user = new User($"user_{Guid.NewGuid():N}@riutek.test", "hash", "Test User", role)
+        {
+            IsActive = isActive
+        };
+        context.Users.Add(user);
+        await context.SaveChangesAsync();
+        return user;
+    }
+
     [Theory]
     [InlineData(UserRole.Admin)]
     [InlineData(UserRole.Staff)]
@@ -104,11 +115,11 @@ public class ProductCommandHandlerTests
         await using var context = TestDbContextFactory.CreateInMemoryDbContext();
         var category = CreateCpuCategory();
         context.Categories.Add(category);
-        await context.SaveChangesAsync();
+        var user = await SeedUserAsync(context, role: role);
 
         var currentUserMock = new Mock<ICurrentUserService>();
         currentUserMock.Setup(u => u.IsAuthenticated).Returns(true);
-        currentUserMock.Setup(u => u.UserId).Returns(Guid.NewGuid());
+        currentUserMock.Setup(u => u.UserId).Returns(user.Id);
         currentUserMock.Setup(u => u.UserRole).Returns(role.ToString());
 
         var handler = new CreateProductCommandHandler(context, currentUserMock.Object);
@@ -119,6 +130,139 @@ public class ProductCommandHandlerTests
 
         result.IsSuccess.Should().BeTrue();
         result.Value.Sku.Should().Be("CPU-INT-14600K");
+    }
+
+    [Fact]
+    public async Task CreateProduct_WhenUserNotFoundInDatabase_ReturnsNotFoundAndNoMutations()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var category = CreateCpuCategory();
+        context.Categories.Add(category);
+        await context.SaveChangesAsync();
+
+        var currentUserMock = new Mock<ICurrentUserService>();
+        currentUserMock.Setup(u => u.IsAuthenticated).Returns(true);
+        currentUserMock.Setup(u => u.UserId).Returns(Guid.NewGuid());
+        currentUserMock.Setup(u => u.UserRole).Returns(UserRole.Admin.ToString());
+
+        var handler = new CreateProductCommandHandler(context, currentUserMock.Object);
+        var command = new CreateProductCommand(
+            category.Id, "Product", "SKU1", "Intel", 100, null, 10, "img.jpg", null, ComponentType.Cpu, CreateCpuSpec());
+
+        var result = await handler.Handle(command, CancellationToken.None);
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Code.Should().Be("User.NotFound");
+        result.Error.Type.Should().Be(ErrorType.NotFound);
+        context.Products.Should().BeEmpty();
+        context.StockMovements.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task CreateProduct_WhenUserInactiveInDatabase_ReturnsForbiddenAndNoMutations()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var category = CreateCpuCategory();
+        context.Categories.Add(category);
+        var user = await SeedUserAsync(context, role: UserRole.Admin, isActive: false);
+
+        var currentUserMock = new Mock<ICurrentUserService>();
+        currentUserMock.Setup(u => u.IsAuthenticated).Returns(true);
+        currentUserMock.Setup(u => u.UserId).Returns(user.Id);
+        currentUserMock.Setup(u => u.UserRole).Returns(UserRole.Admin.ToString());
+
+        var handler = new CreateProductCommandHandler(context, currentUserMock.Object);
+        var command = new CreateProductCommand(
+            category.Id, "Product", "SKU1", "Intel", 100, null, 10, "img.jpg", null, ComponentType.Cpu, CreateCpuSpec());
+
+        var result = await handler.Handle(command, CancellationToken.None);
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Code.Should().Be("User.AccountInactive");
+        result.Error.Type.Should().Be(ErrorType.Forbidden);
+        context.Products.Should().BeEmpty();
+        context.StockMovements.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task CreateProduct_WhenTokenStaffAdminButDatabaseRoleIsCustomer_ReturnsForbiddenAndNoMutations()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var category = CreateCpuCategory();
+        context.Categories.Add(category);
+        var user = await SeedUserAsync(context, role: UserRole.Customer, isActive: true);
+
+        var currentUserMock = new Mock<ICurrentUserService>();
+        currentUserMock.Setup(u => u.IsAuthenticated).Returns(true);
+        currentUserMock.Setup(u => u.UserId).Returns(user.Id);
+        currentUserMock.Setup(u => u.UserRole).Returns(UserRole.Admin.ToString());
+
+        var handler = new CreateProductCommandHandler(context, currentUserMock.Object);
+        var command = new CreateProductCommand(
+            category.Id, "Product", "SKU1", "Intel", 100, null, 10, "img.jpg", null, ComponentType.Cpu, CreateCpuSpec());
+
+        var result = await handler.Handle(command, CancellationToken.None);
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Code.Should().Be("Auth.Forbidden");
+        result.Error.Type.Should().Be(ErrorType.Forbidden);
+        context.Products.Should().BeEmpty();
+        context.StockMovements.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task CreateProduct_WhenStockQuantityPositive_PersistsStockMovementWithVerifiedActorUserId()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var category = CreateCpuCategory();
+        context.Categories.Add(category);
+        var staffUser = await SeedUserAsync(context, role: UserRole.Staff, isActive: true);
+
+        var currentUserMock = new Mock<ICurrentUserService>();
+        currentUserMock.Setup(u => u.IsAuthenticated).Returns(true);
+        currentUserMock.Setup(u => u.UserId).Returns(staffUser.Id);
+        currentUserMock.Setup(u => u.UserRole).Returns(UserRole.Staff.ToString());
+
+        var handler = new CreateProductCommandHandler(context, currentUserMock.Object);
+        var command = new CreateProductCommand(
+            category.Id, "Intel Core i5-14600K", "CPU-INT-14600K", "Intel", 320, 350, 25, "img.jpg", null, ComponentType.Cpu, CreateCpuSpec());
+
+        var result = await handler.Handle(command, CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+        context.StockMovements.Should().HaveCount(1);
+        var movement = context.StockMovements.Single();
+        movement.ProductId.Should().Be(result.Value.Id);
+        movement.QuantityDelta.Should().Be(25);
+        movement.StockBefore.Should().Be(0);
+        movement.StockAfter.Should().Be(25);
+        movement.Reason.Should().Be(StockMovementReason.ProductCreated);
+        movement.ActorUserId.Should().Be(staffUser.Id);
+        movement.OrderId.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task CreateProduct_WhenStockQuantityZero_DoesNotCreateStockMovement()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var category = CreateCpuCategory();
+        context.Categories.Add(category);
+        var adminUser = await SeedUserAsync(context, role: UserRole.Admin, isActive: true);
+
+        var currentUserMock = new Mock<ICurrentUserService>();
+        currentUserMock.Setup(u => u.IsAuthenticated).Returns(true);
+        currentUserMock.Setup(u => u.UserId).Returns(adminUser.Id);
+        currentUserMock.Setup(u => u.UserRole).Returns(UserRole.Admin.ToString());
+
+        var handler = new CreateProductCommandHandler(context, currentUserMock.Object);
+        var command = new CreateProductCommand(
+            category.Id, "Intel Core i3-14100", "CPU-INT-14100", "Intel", 120, null, 0, "img.jpg", null, ComponentType.Cpu, CreateCpuSpec());
+
+        var result = await handler.Handle(command, CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+        context.Products.Should().HaveCount(1);
+        context.StockMovements.Should().BeEmpty();
     }
 
     [Fact]
@@ -249,9 +393,11 @@ public class ProductCommandHandlerTests
     public async Task CreateProduct_WhenCategoryNotFound_ReturnsCategoryNotFound()
     {
         await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var adminUser = await SeedUserAsync(context, role: UserRole.Admin);
+
         var currentUserMock = new Mock<ICurrentUserService>();
         currentUserMock.Setup(u => u.IsAuthenticated).Returns(true);
-        currentUserMock.Setup(u => u.UserId).Returns(Guid.NewGuid());
+        currentUserMock.Setup(u => u.UserId).Returns(adminUser.Id);
         currentUserMock.Setup(u => u.UserRole).Returns(UserRole.Admin.ToString());
 
         var handler = new CreateProductCommandHandler(context, currentUserMock.Object);
@@ -270,11 +416,12 @@ public class ProductCommandHandlerTests
         await using var context = TestDbContextFactory.CreateInMemoryDbContext();
         var gpuCategory = CreateGpuCategory();
         context.Categories.Add(gpuCategory);
+        var adminUser = await SeedUserAsync(context, role: UserRole.Admin);
         await context.SaveChangesAsync();
 
         var currentUserMock = new Mock<ICurrentUserService>();
         currentUserMock.Setup(u => u.IsAuthenticated).Returns(true);
-        currentUserMock.Setup(u => u.UserId).Returns(Guid.NewGuid());
+        currentUserMock.Setup(u => u.UserId).Returns(adminUser.Id);
         currentUserMock.Setup(u => u.UserRole).Returns(UserRole.Admin.ToString());
 
         var handler = new CreateProductCommandHandler(context, currentUserMock.Object);
@@ -296,11 +443,12 @@ public class ProductCommandHandlerTests
 
         var existing = new Product(category.Id, "Existing", "existing", "CPU-SKU-1", "Intel", 100, 10, "img.jpg", ComponentType.Cpu, CreateCpuSpec());
         context.Products.Add(existing);
+        var adminUser = await SeedUserAsync(context, role: UserRole.Admin);
         await context.SaveChangesAsync();
 
         var currentUserMock = new Mock<ICurrentUserService>();
         currentUserMock.Setup(u => u.IsAuthenticated).Returns(true);
-        currentUserMock.Setup(u => u.UserId).Returns(Guid.NewGuid());
+        currentUserMock.Setup(u => u.UserId).Returns(adminUser.Id);
         currentUserMock.Setup(u => u.UserRole).Returns(UserRole.Admin.ToString());
 
         var handler = new CreateProductCommandHandler(context, currentUserMock.Object);
@@ -323,11 +471,12 @@ public class ProductCommandHandlerTests
 
         var existing = new Product(category.Id, "Intel Core i9", "intel-core-i9", "SKU1", "Intel", 100, 10, "img.jpg", ComponentType.Cpu, CreateCpuSpec());
         context.Products.Add(existing);
+        var adminUser = await SeedUserAsync(context, role: UserRole.Admin);
         await context.SaveChangesAsync();
 
         var currentUserMock = new Mock<ICurrentUserService>();
         currentUserMock.Setup(u => u.IsAuthenticated).Returns(true);
-        currentUserMock.Setup(u => u.UserId).Returns(Guid.NewGuid());
+        currentUserMock.Setup(u => u.UserId).Returns(adminUser.Id);
         currentUserMock.Setup(u => u.UserRole).Returns(UserRole.Admin.ToString());
 
         var handler = new CreateProductCommandHandler(context, currentUserMock.Object);
@@ -347,11 +496,12 @@ public class ProductCommandHandlerTests
         await using var context = TestDbContextFactory.CreateInMemoryDbContext();
         var category = CreateCpuCategory("Processors", "processors");
         context.Categories.Add(category);
+        var adminUser = await SeedUserAsync(context, role: UserRole.Admin);
         await context.SaveChangesAsync();
 
         var currentUserMock = new Mock<ICurrentUserService>();
         currentUserMock.Setup(u => u.IsAuthenticated).Returns(true);
-        currentUserMock.Setup(u => u.UserId).Returns(Guid.NewGuid());
+        currentUserMock.Setup(u => u.UserId).Returns(adminUser.Id);
         currentUserMock.Setup(u => u.UserRole).Returns(UserRole.Admin.ToString());
 
         var handler = new CreateProductCommandHandler(context, currentUserMock.Object);
