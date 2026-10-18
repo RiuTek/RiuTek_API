@@ -127,7 +127,7 @@ public class ProductGalleryValidationTests
     public void UpdateProductValidator_WhenGalleryValid_Passes()
     {
         var command = new UpdateProductCommand(
-            Guid.NewGuid(), Guid.NewGuid(), "Updated CPU", "SKU1", "Intel", 150, null, 5, true,
+            Guid.NewGuid(), Guid.NewGuid(), "Updated CPU", "SKU1", "Intel", 150, null, true,
             "https://media.riutek.com/products/main.jpg",
             ["https://media.riutek.com/products/gallery-1.jpg"],
             ComponentType.Cpu,

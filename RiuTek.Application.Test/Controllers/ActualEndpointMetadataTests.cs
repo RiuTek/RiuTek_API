@@ -35,9 +35,9 @@ public class ActualEndpointMetadataTests
 
             endpoints.Should().NotBeEmpty();
 
-            // Total controller actions: 6 Posts + 6 Comments + 5 Products + 5 Categories + 5 Carts + 4 Auth + 8 Orders + 1 Payments + 6 Users + 3 ProductMedia + 3 ProductImports = 52
+            // Total controller actions: 6 Posts + 6 Comments + 7 Products + 5 Categories + 5 Carts + 4 Auth + 8 Orders + 1 Payments + 6 Users + 3 ProductMedia + 3 ProductImports = 54
             var controllerEndpoints = endpoints.Where(e => e.Metadata.GetMetadata<ControllerActionDescriptor>() != null).ToList();
-            controllerEndpoints.Should().HaveCount(52);
+            controllerEndpoints.Should().HaveCount(54);
 
             // Helper to get action descriptor
             ControllerActionDescriptor GetDescriptor(RouteEndpoint e) => e.Metadata.GetMetadata<ControllerActionDescriptor>()!;
@@ -134,13 +134,13 @@ public class ActualEndpointMetadataTests
 
             #endregion
 
-            #region Products Endpoints (5)
+            #region Products Endpoints (7)
 
             var productEndpoints = endpoints.Where(e =>
                 e.Metadata.GetMetadata<ControllerActionDescriptor>()?.ControllerTypeInfo.AsType() == typeof(ProductsController))
                 .ToList();
 
-            productEndpoints.Should().HaveCount(5);
+            productEndpoints.Should().HaveCount(7);
 
             // 13. GET api/v1/products (AllowAnonymous) - Action: GetProducts
             var getProducts = productEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(ProductsController.GetProducts) && GetHttpMethods(e).Contains("GET"));
@@ -171,6 +171,18 @@ public class ActualEndpointMetadataTests
             updateProduct.Should().NotBeNull();
             GetFullRoutePattern(updateProduct!).Should().BeEquivalentTo("api/v1/products/{id:guid}");
             AssertAuthorizePolicy(updateProduct!, Policies.ContentManager);
+
+            // 18. POST api/v1/products/{id:guid}/stock-adjustments (ContentManager policy) - Action: AdjustStock
+            var adjustStock = productEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(ProductsController.AdjustStock) && GetHttpMethods(e).Contains("POST"));
+            adjustStock.Should().NotBeNull();
+            GetFullRoutePattern(adjustStock!).Should().BeEquivalentTo("api/v1/products/{id:guid}/stock-adjustments");
+            AssertAuthorizePolicy(adjustStock!, Policies.ContentManager);
+
+            // 19. GET api/v1/products/{id:guid}/stock-movements (ContentManager policy) - Action: GetStockMovements
+            var getStockMovements = productEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(ProductsController.GetStockMovements) && GetHttpMethods(e).Contains("GET"));
+            getStockMovements.Should().NotBeNull();
+            GetFullRoutePattern(getStockMovements!).Should().BeEquivalentTo("api/v1/products/{id:guid}/stock-movements");
+            AssertAuthorizePolicy(getStockMovements!, Policies.ContentManager);
 
             #endregion
 

@@ -5,6 +5,7 @@ using RiuTek.Application.Common.Utils;
 using RiuTek.Application.DTOs;
 using RiuTek.Core.Common;
 using RiuTek.Core.Entities;
+using RiuTek.Core.Enums;
 
 namespace RiuTek.Application.Features.Products.Commands;
 
@@ -19,15 +20,18 @@ public class ImportProductsCommandHandler : IRequestHandler<ImportProductsComman
     private readonly IApplicationDbContext _context;
     private readonly IProductImportWorkbookService _workbookService;
     private readonly ISender _sender;
+    private readonly ICurrentUserService _currentUserService;
 
     public ImportProductsCommandHandler(
         IApplicationDbContext context,
         IProductImportWorkbookService workbookService,
-        ISender sender)
+        ISender sender,
+        ICurrentUserService currentUserService)
     {
         _context = context;
         _workbookService = workbookService;
         _sender = sender;
+        _currentUserService = currentUserService;
     }
 
     public async Task<Result<ProductImportCommitResultDto>> Handle(
@@ -118,6 +122,23 @@ public class ImportProductsCommandHandler : IRequestHandler<ImportProductsComman
         }
 
         _context.Products.AddRange(products);
+
+        foreach (var product in products)
+        {
+            if (product.StockQuantity > 0)
+            {
+                var movement = new StockMovement(
+                    productId: product.Id,
+                    quantityDelta: product.StockQuantity,
+                    stockBefore: 0,
+                    stockAfter: product.StockQuantity,
+                    reason: StockMovementReason.BulkImport,
+                    note: null,
+                    actorUserId: _currentUserService.UserId,
+                    orderId: null);
+                _context.StockMovements.Add(movement);
+            }
+        }
 
         try
         {

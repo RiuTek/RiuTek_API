@@ -28,6 +28,7 @@ public class ApplicationDbContext : DbContext, IUnitOfWork, IApplicationDbContex
     public DbSet<PostComment> PostComments => Set<PostComment>();
     public DbSet<Cart> Carts => Set<Cart>();
     public DbSet<CartItem> CartItems => Set<CartItem>();
+    public DbSet<StockMovement> StockMovements => Set<StockMovement>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

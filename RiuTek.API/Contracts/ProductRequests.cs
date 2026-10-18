@@ -26,7 +26,6 @@ public record UpdateProductRequest(
     string Brand,
     decimal Price,
     decimal? OriginalPrice,
-    int StockQuantity,
     [property: JsonRequired] bool IsActive,
     string ImageUrl,
     IReadOnlyList<string>? AdditionalImages,

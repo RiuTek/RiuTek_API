@@ -343,7 +343,6 @@ public class ProductsControllerContractTests : IDisposable
                     c.Brand == "Intel" &&
                     c.Price == 300m &&
                     c.OriginalPrice == null &&
-                    c.StockQuantity == 5 &&
                     c.IsActive == isActive &&
                     c.ImageUrl == "new-img.jpg" &&
                     c.AdditionalImages == null &&
@@ -359,7 +358,6 @@ public class ProductsControllerContractTests : IDisposable
             Brand: "Intel",
             Price: 300m,
             OriginalPrice: null,
-            StockQuantity: 5,
             IsActive: isActive,
             ImageUrl: "new-img.jpg",
             AdditionalImages: null,
@@ -445,7 +443,6 @@ public class ProductsControllerContractTests : IDisposable
             Brand: "Brand",
             Price: 100,
             OriginalPrice: null,
-            StockQuantity: 1,
             IsActive: true,
             ImageUrl: "img.jpg",
             AdditionalImages: null,

@@ -169,6 +169,7 @@ public class PaymentStripeIntegrationTests : IAsyncLifetime
         await using var tx = await db.Database.BeginTransactionAsync();
         try
         {
+            await db.StockMovements.ExecuteDeleteAsync();
             await db.PaymentAttempts.ExecuteDeleteAsync();
             await db.OrderItems.ExecuteDeleteAsync();
             await db.Orders.ExecuteDeleteAsync();

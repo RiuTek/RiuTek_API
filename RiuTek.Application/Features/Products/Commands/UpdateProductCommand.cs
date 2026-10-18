@@ -22,7 +22,6 @@ public record UpdateProductCommand(
     string Brand,
     decimal Price,
     decimal? OriginalPrice,
-    int StockQuantity,
     bool IsActive,
     string ImageUrl,
     IReadOnlyList<string>? AdditionalImages,
@@ -59,9 +58,6 @@ public class UpdateProductCommandValidator : AbstractValidator<UpdateProductComm
             .GreaterThanOrEqualTo(x => x.Price)
             .When(x => x.OriginalPrice.HasValue)
             .WithMessage("Giá gốc (nếu có) phải lớn hơn hoặc bằng giá bán.");
-
-        RuleFor(x => x.StockQuantity)
-            .GreaterThanOrEqualTo(0).WithMessage("Số lượng tồn kho không được âm.");
 
         RuleFor(x => x.ImageUrl)
             .NotEmpty().WithMessage("Ảnh sản phẩm chính không được để trống.")
@@ -208,7 +204,6 @@ public class UpdateProductCommandHandler : IRequestHandler<UpdateProductCommand,
         product.Brand = request.Brand.Trim();
         product.Price = request.Price;
         product.OriginalPrice = request.OriginalPrice;
-        product.StockQuantity = request.StockQuantity;
         product.IsActive = request.IsActive;
         product.ImageUrl = request.ImageUrl.Trim();
         product.AdditionalImages = cleanImages;

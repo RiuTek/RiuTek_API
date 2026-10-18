@@ -1,7 +1,9 @@
 using Microsoft.EntityFrameworkCore;
 using RiuTek.Application.Common.Interfaces;
+using RiuTek.Application.Features.Products.Common;
 using RiuTek.Core.Common;
 using RiuTek.Core.Entities;
+using RiuTek.Core.Enums;
 
 namespace RiuTek.Application.Features.Orders.Common;
 
@@ -10,6 +12,8 @@ public static class OrderStockHelper
     public static async Task<Result> RestoreCancelledOrderStockAsync(
         Order order,
         IApplicationDbContext context,
+        Guid? actorUserId,
+        StockMovementReason reason,
         CancellationToken cancellationToken)
     {
         var quantitiesByProduct = new Dictionary<Guid, int>();
@@ -40,25 +44,22 @@ public static class OrderStockHelper
                 "An order product no longer exists, so stock cannot be restored safely."));
         }
 
-        var restoredStock = new Dictionary<Guid, int>();
-        try
-        {
-            foreach (var product in products)
-            {
-                restoredStock[product.Id] = checked(
-                    product.StockQuantity + quantitiesByProduct[product.Id]);
-            }
-        }
-        catch (OverflowException)
-        {
-            return Result.Failure(Error.Conflict(
-                "Order.StockOverflow",
-                "Stock cannot be restored because the resulting quantity is too large."));
-        }
-
         foreach (var product in products)
         {
-            product.StockQuantity = restoredStock[product.Id];
+            var qty = quantitiesByProduct[product.Id];
+            var movementResult = StockMovementHelper.ApplyStockMovement(
+                product,
+                qty,
+                reason,
+                note: null,
+                actorUserId: actorUserId,
+                orderId: order.Id,
+                context: context);
+
+            if (movementResult.IsFailure)
+            {
+                return movementResult;
+            }
         }
 
         return Result.Success();

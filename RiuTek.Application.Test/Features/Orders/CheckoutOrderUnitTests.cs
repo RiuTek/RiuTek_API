@@ -806,7 +806,6 @@ public class CheckoutOrderUnitTests
             Brand: "Brand",
             Price: 150m,
             OriginalPrice: null,
-            StockQuantity: 15,
             IsActive: true,
             ImageUrl: "https://test.com/new.png",
             AdditionalImages: [],

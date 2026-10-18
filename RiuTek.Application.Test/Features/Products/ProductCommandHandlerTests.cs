@@ -137,7 +137,7 @@ public class ProductCommandHandlerTests
 
         var handler = new UpdateProductCommandHandler(context, currentUserMock.Object);
         var command = new UpdateProductCommand(
-            product.Id, category.Id, "Modified", "SKU-MOD", "Intel", 200, null, 5, false, "img2.jpg", null, ComponentType.Cpu, CreateCpuSpec());
+            product.Id, category.Id, "Modified", "SKU-MOD", "Intel", 200, null, false, "img2.jpg", null, ComponentType.Cpu, CreateCpuSpec());
 
         var result = await handler.Handle(command, CancellationToken.None);
 
@@ -166,7 +166,7 @@ public class ProductCommandHandlerTests
 
         var handler = new UpdateProductCommandHandler(context, currentUserMock.Object);
         var command = new UpdateProductCommand(
-            product.Id, category.Id, "Modified", "SKU-MOD", "Intel", 200, null, 5, false, "img2.jpg", null, ComponentType.Cpu, CreateCpuSpec());
+            product.Id, category.Id, "Modified", "SKU-MOD", "Intel", 200, null, false, "img2.jpg", null, ComponentType.Cpu, CreateCpuSpec());
 
         var result = await handler.Handle(command, CancellationToken.None);
 
@@ -202,7 +202,7 @@ public class ProductCommandHandlerTests
 
         var handler = new UpdateProductCommandHandler(context, currentUserMock.Object);
         var command = new UpdateProductCommand(
-            product.Id, category.Id, "Modified", "SKU-MOD", "Intel", 200, null, 5, false, "img2.jpg", null, ComponentType.Cpu, CreateCpuSpec());
+            product.Id, category.Id, "Modified", "SKU-MOD", "Intel", 200, null, false, "img2.jpg", null, ComponentType.Cpu, CreateCpuSpec());
 
         var result = await handler.Handle(command, CancellationToken.None);
 
@@ -233,7 +233,7 @@ public class ProductCommandHandlerTests
 
         var handler = new UpdateProductCommandHandler(context, currentUserMock.Object);
         var command = new UpdateProductCommand(
-            product.Id, category.Id, "Updated Product", "SKU-UPD", "Intel", 150, null, 8, true, "img2.jpg", null, ComponentType.Cpu, CreateCpuSpec());
+            product.Id, category.Id, "Updated Product", "SKU-UPD", "Intel", 150, null, true, "img2.jpg", null, ComponentType.Cpu, CreateCpuSpec());
 
         var result = await handler.Handle(command, CancellationToken.None);
 
@@ -401,7 +401,7 @@ public class ProductCommandHandlerTests
 
         var handler = new UpdateProductCommandHandler(context, currentUserMock.Object);
         var command = new UpdateProductCommand(
-            Guid.NewGuid(), Guid.NewGuid(), "Name", "SKU1", "Brand", 100, null, 10, true, "img.jpg", null, ComponentType.Cpu, CreateCpuSpec());
+            Guid.NewGuid(), Guid.NewGuid(), "Name", "SKU1", "Brand", 100, null, true, "img.jpg", null, ComponentType.Cpu, CreateCpuSpec());
 
         var result = await handler.Handle(command, CancellationToken.None);
 
@@ -427,7 +427,7 @@ public class ProductCommandHandlerTests
 
         var handler = new UpdateProductCommandHandler(context, currentUserMock.Object);
         var command = new UpdateProductCommand(
-            product.Id, Guid.NewGuid(), "Original", "SKU1", "Intel", 100, null, 10, true, "img.jpg", null, ComponentType.Cpu, CreateCpuSpec());
+            product.Id, Guid.NewGuid(), "Original", "SKU1", "Intel", 100, null, true, "img.jpg", null, ComponentType.Cpu, CreateCpuSpec());
 
         var result = await handler.Handle(command, CancellationToken.None);
 
@@ -454,7 +454,7 @@ public class ProductCommandHandlerTests
 
         var handler = new UpdateProductCommandHandler(context, currentUserMock.Object);
         var command = new UpdateProductCommand(
-            product.Id, gpuCategory.Id, "Original", "SKU1", "Intel", 100, null, 10, true, "img.jpg", null, ComponentType.Cpu, CreateCpuSpec());
+            product.Id, gpuCategory.Id, "Original", "SKU1", "Intel", 100, null, true, "img.jpg", null, ComponentType.Cpu, CreateCpuSpec());
 
         var result = await handler.Handle(command, CancellationToken.None);
 
@@ -483,14 +483,14 @@ public class ProductCommandHandlerTests
 
         // SKU conflict with prod1
         var skuConflictCmd = new UpdateProductCommand(
-            prod2.Id, category.Id, "Unique Name", "sku-one", "Intel", 100, null, 10, true, "img.jpg", null, ComponentType.Cpu, CreateCpuSpec());
+            prod2.Id, category.Id, "Unique Name", "sku-one", "Intel", 100, null, true, "img.jpg", null, ComponentType.Cpu, CreateCpuSpec());
         var skuResult = await handler.Handle(skuConflictCmd, CancellationToken.None);
         skuResult.IsSuccess.Should().BeFalse();
         skuResult.Error.Code.Should().Be("Product.SkuConflict");
 
         // Slug conflict with prod1
         var slugConflictCmd = new UpdateProductCommand(
-            prod2.Id, category.Id, "Product One", "SKU-TWO", "Intel", 100, null, 10, true, "img.jpg", null, ComponentType.Cpu, CreateCpuSpec());
+            prod2.Id, category.Id, "Product One", "SKU-TWO", "Intel", 100, null, true, "img.jpg", null, ComponentType.Cpu, CreateCpuSpec());
         var slugResult = await handler.Handle(slugConflictCmd, CancellationToken.None);
         slugResult.IsSuccess.Should().BeFalse();
         slugResult.Error.Code.Should().Be("Product.SlugConflict");
@@ -514,7 +514,7 @@ public class ProductCommandHandlerTests
 
         var handler = new UpdateProductCommandHandler(context, currentUserMock.Object);
         var command = new UpdateProductCommand(
-            product.Id, category.Id, "Intel Core i7", "SKU-I7", "Intel", 320, 350, 12, true, "img-new.jpg", null, ComponentType.Cpu, CreateCpuSpec());
+            product.Id, category.Id, "Intel Core i7", "SKU-I7", "Intel", 320, 350, true, "img-new.jpg", null, ComponentType.Cpu, CreateCpuSpec());
 
         var result = await handler.Handle(command, CancellationToken.None);
 
@@ -544,7 +544,7 @@ public class ProductCommandHandlerTests
 
         var handler = new UpdateProductCommandHandler(context, currentUserMock.Object);
         var command = new UpdateProductCommand(
-            product.Id, catB.Id, "Intel Core i5", "SKU-I5", "Intel", 200, null, 10, true, "img.jpg", null, ComponentType.Cpu, CreateCpuSpec());
+            product.Id, catB.Id, "Intel Core i5", "SKU-I5", "Intel", 200, null, true, "img.jpg", null, ComponentType.Cpu, CreateCpuSpec());
 
         var result = await handler.Handle(command, CancellationToken.None);
 
@@ -574,7 +574,7 @@ public class ProductCommandHandlerTests
 
         var handler = new UpdateProductCommandHandler(context, currentUserMock.Object);
         var command = new UpdateProductCommand(
-            product.Id, category.Id, "Intel Core i3", "SKU-I3", "Intel", 90, null, 0, false, "img.jpg", null, ComponentType.Cpu, CreateCpuSpec());
+            product.Id, category.Id, "Intel Core i3", "SKU-I3", "Intel", 90, null, false, "img.jpg", null, ComponentType.Cpu, CreateCpuSpec());
 
         var result = await handler.Handle(command, CancellationToken.None);
 
@@ -608,7 +608,7 @@ public class ProductCommandHandlerTests
 
         var handler = new UpdateProductCommandHandler(context, currentUserMock.Object);
         var command = new UpdateProductCommand(
-            product.Id, category.Id, "Intel Core i3", "SKU-I3", "Intel", 105, null, 15, true, "img.jpg", null, ComponentType.Cpu, CreateCpuSpec());
+            product.Id, category.Id, "Intel Core i3", "SKU-I3", "Intel", 105, null, true, "img.jpg", null, ComponentType.Cpu, CreateCpuSpec());
 
         var result = await handler.Handle(command, CancellationToken.None);
 
@@ -617,7 +617,7 @@ public class ProductCommandHandlerTests
 
         var inDb = await context.Products.FindAsync(product.Id);
         inDb!.IsActive.Should().BeTrue();
-        inDb.StockQuantity.Should().Be(15);
+        inDb.StockQuantity.Should().Be(0);
     }
 
     [Fact]
@@ -642,7 +642,7 @@ public class ProductCommandHandlerTests
 
         var handler = new UpdateProductCommandHandler(context, currentUserMock.Object);
         var command = new UpdateProductCommand(
-            product.Id, category.Id, "Intel Core i7 Gen 14", "SKU-I7", "Intel", 350, null, 8, true, "img-gen14.jpg", null, ComponentType.Cpu, CreateCpuSpec());
+            product.Id, category.Id, "Intel Core i7 Gen 14", "SKU-I7", "Intel", 350, null, true, "img-gen14.jpg", null, ComponentType.Cpu, CreateCpuSpec());
 
         var result = await handler.Handle(command, CancellationToken.None);
 
@@ -701,7 +701,6 @@ public class ProductCommandHandlerTests
             Brand: "  Intel Extreme  ",
             Price: 650,
             OriginalPrice: 700,
-            StockQuantity: 12,
             IsActive: false,
             ImageUrl: "  https://example.com/14900ks.png  ",
             AdditionalImages: ["  https://example.com/box.png  ", "https://example.com/BOX.png", "https://example.com/back.png"],
@@ -720,7 +719,7 @@ public class ProductCommandHandlerTests
         result.Value.Brand.Should().Be("Intel Extreme");
         result.Value.Price.Should().Be(650);
         result.Value.OriginalPrice.Should().Be(700);
-        result.Value.StockQuantity.Should().Be(12);
+        result.Value.StockQuantity.Should().Be(5);
         result.Value.IsActive.Should().BeFalse();
         result.Value.ImageUrl.Should().Be("https://example.com/14900ks.png");
         result.Value.AdditionalImages.Should().BeEquivalentTo(new[] { "https://example.com/box.png", "https://example.com/back.png" }, options => options.WithStrictOrdering());
@@ -735,7 +734,7 @@ public class ProductCommandHandlerTests
         inDb.Brand.Should().Be("Intel Extreme");
         inDb.Price.Should().Be(650);
         inDb.OriginalPrice.Should().Be(700);
-        inDb.StockQuantity.Should().Be(12);
+        inDb.StockQuantity.Should().Be(5);
         inDb.IsActive.Should().BeFalse();
         inDb.ImageUrl.Should().Be("https://example.com/14900ks.png");
         inDb.AdditionalImages.Should().BeEquivalentTo(new[] { "https://example.com/box.png", "https://example.com/back.png" }, options => options.WithStrictOrdering());

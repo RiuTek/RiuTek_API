@@ -235,7 +235,6 @@ public class CatalogJsonContractTests
             "brand": "Intel",
             "price": 300,
             "originalPrice": null,
-            "stockQuantity": 10,
             "isActive": {{isActive.ToString().ToLowerInvariant()}},
             "imageUrl": "img.jpg",
             "additionalImages": null,
@@ -271,7 +270,6 @@ public class CatalogJsonContractTests
             "sku": "CPU-UPD",
             "brand": "Intel",
             "price": 300,
-            "stockQuantity": 10,
             "imageUrl": "img.jpg",
             "componentType": 1,
             "specifications": {
@@ -304,7 +302,6 @@ public class CatalogJsonContractTests
             "sku": "CPU-UPD",
             "brand": "Intel",
             "price": 300,
-            "stockQuantity": 10,
             "isActive": null,
             "imageUrl": "img.jpg",
             "componentType": 1,

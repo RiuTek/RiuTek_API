@@ -7,6 +7,7 @@ using RiuTek.Application.DTOs;
 using RiuTek.Application.Features.Products.Commands;
 using RiuTek.Application.Features.Products.Queries;
 using RiuTek.Core.Constants;
+using RiuTek.Core.Enums;
 
 namespace RiuTek.API.Controllers;
 
@@ -105,7 +106,6 @@ public class ProductsController : ApiControllerBase
             Brand: request.Brand,
             Price: request.Price,
             OriginalPrice: request.OriginalPrice,
-            StockQuantity: request.StockQuantity,
             IsActive: request.IsActive,
             ImageUrl: request.ImageUrl,
             AdditionalImages: request.AdditionalImages,
@@ -114,6 +114,55 @@ public class ProductsController : ApiControllerBase
         );
 
         var result = await Mediator.Send(command, cancellationToken);
+        return HandleResult(result);
+    }
+
+    [HttpPost("{id:guid}/stock-adjustments")]
+    [Authorize(Policy = Policies.ContentManager)]
+    [ProducesResponseType(typeof(StockAdjustmentResultDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public async Task<IActionResult> AdjustStock(
+        Guid id,
+        [FromBody] AdjustStockRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        var command = new AdjustStockCommand(
+            ProductId: id,
+            ExpectedStockQuantity: request.ExpectedStockQuantity,
+            QuantityDelta: request.QuantityDelta,
+            Note: request.Note
+        );
+
+        var result = await Mediator.Send(command, cancellationToken);
+        return HandleResult(result);
+    }
+
+    [HttpGet("{id:guid}/stock-movements")]
+    [Authorize(Policy = Policies.ContentManager)]
+    [ProducesResponseType(typeof(PagedResult<StockMovementDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetStockMovements(
+        Guid id,
+        [FromQuery] int pageIndex = 1,
+        [FromQuery] int pageSize = 20,
+        [FromQuery] StockMovementReason? reason = null,
+        CancellationToken cancellationToken = default)
+    {
+        var query = new GetStockMovementsQuery(
+            ProductId: id,
+            PageIndex: pageIndex,
+            PageSize: pageSize,
+            Reason: reason
+        );
+
+        var result = await Mediator.Send(query, cancellationToken);
         return HandleResult(result);
     }
 }

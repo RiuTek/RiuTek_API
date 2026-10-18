@@ -1,6 +1,7 @@
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 using RiuTek.Application.Common.Interfaces;
+using RiuTek.Application.Features.Orders.Common;
 using RiuTek.Core.Common;
 using RiuTek.Core.Entities;
 using RiuTek.Core.Enums;
@@ -125,19 +126,17 @@ public class ProcessStripeWebhookCommandHandler : IRequestHandler<ProcessStripeW
                 return expireResult;
             }
 
-            // Restore product stock once
-            var productIds = order.Items.Select(i => i.ProductId).Distinct().ToList();
-            var products = await _context.Products
-                .Where(p => productIds.Contains(p.Id))
-                .ToListAsync(cancellationToken);
+            // Restore product stock and record PaymentExpiration stock movements
+            var restoreResult = await OrderStockHelper.RestoreCancelledOrderStockAsync(
+                order,
+                _context,
+                actorUserId: null,
+                StockMovementReason.PaymentExpiration,
+                cancellationToken);
 
-            var productMap = products.ToDictionary(p => p.Id);
-            foreach (var item in order.Items)
+            if (restoreResult.IsFailure)
             {
-                if (productMap.TryGetValue(item.ProductId, out var product))
-                {
-                    product.StockQuantity += item.Quantity;
-                }
+                return restoreResult;
             }
 
             try

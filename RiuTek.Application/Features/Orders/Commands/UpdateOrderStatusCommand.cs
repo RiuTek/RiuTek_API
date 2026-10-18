@@ -90,6 +90,8 @@ public class UpdateOrderStatusCommandHandler
             var restoreResult = await OrderStockHelper.RestoreCancelledOrderStockAsync(
                 order,
                 _context,
+                _currentUserService.UserId,
+                StockMovementReason.OrderCancellation,
                 cancellationToken);
             if (restoreResult.IsFailure)
             {

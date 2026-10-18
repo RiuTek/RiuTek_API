@@ -23,6 +23,7 @@ Buying PC parts requires more than adding products to a cart: sockets, memory ge
 - Redis-backed caching with a database fallback when Redis is unavailable.
 - Cloudflare R2 product-media uploads through presigned URLs, with validation and ownership rules verified in the deployed environment.
 - Versioned Excel template generation, dry-run validation, and transactional create-only bulk import for all nine component types.
+- Inventory audit logging (`StockMovement`), optimistic concurrency manual adjustments (`POST /api/v1/products/{id}/stock-adjustments`), and paginated stock movement history (`GET /api/v1/products/{id}/stock-movements`).
 - PostgreSQL integration tests with Testcontainers and automated container deployment through GitHub Actions.
 
 ## Architecture
@@ -203,13 +204,14 @@ Completed or operationally verified:
 - Staff/Admin order search and fulfillment workflow with concurrency protection, one-time cancellation restock, customer COD cancellation, and COD payment completion;
 - Cloudflare R2 product-media upload and deletion lifecycle;
 - versioned Excel template, dry-run validation, and all-or-nothing product import for all nine component types;
+- inventory audit tracking (`StockMovement`) across creation, bulk import, checkout, cancellation, payment expiration, and optimistic concurrency manual stock adjustments;
 - Docker image, PostgreSQL integration testing, CI/CD, Azure/Supabase/Redis deployment.
 
 In progress or planned:
 
 - product import history and richer administrative audit reporting;
 - advanced refund, return, and failed-delivery workflows;
-- product reviews and inventory-management workflows;
+- product reviews and rating aggregate workflows;
 - AI-assisted PC recommendations using embeddings and pgvector;
 - React + Vite customer and administration frontend;
 - optional VNPay integration.

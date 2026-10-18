@@ -206,6 +206,21 @@ public class CreateProductCommandHandler : IRequestHandler<CreateProductCommand,
         };
 
         _context.Products.Add(product);
+
+        if (request.StockQuantity > 0)
+        {
+            var initialMovement = new StockMovement(
+                productId: product.Id,
+                quantityDelta: request.StockQuantity,
+                stockBefore: 0,
+                stockAfter: request.StockQuantity,
+                reason: StockMovementReason.ProductCreated,
+                note: null,
+                actorUserId: _currentUserService.UserId,
+                orderId: null);
+            _context.StockMovements.Add(initialMovement);
+        }
+
         await _context.SaveChangesAsync(cancellationToken);
 
         return Result.Success(product.ToDto());

@@ -225,6 +225,7 @@ namespace RiuTek.Infrastructure.Migrations
                         .HasColumnType("integer");
 
                     b.Property<int>("PaymentStatus")
+                        .IsConcurrencyToken()
                         .HasColumnType("integer");
 
                     b.Property<string>("ShippingAddress")
@@ -233,6 +234,7 @@ namespace RiuTek.Infrastructure.Migrations
                         .HasColumnType("character varying(500)");
 
                     b.Property<int>("Status")
+                        .IsConcurrencyToken()
                         .HasColumnType("integer");
 
                     b.Property<decimal>("TotalAmount")
@@ -708,6 +710,61 @@ namespace RiuTek.Infrastructure.Migrations
                     b.ToTable("Reviews", (string)null);
                 });
 
+            modelBuilder.Entity("RiuTek.Core.Entities.StockMovement", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("ActorUserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Note")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<Guid?>("OrderId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("ProductId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("QuantityDelta")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Reason")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("StockAfter")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("StockBefore")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ActorUserId");
+
+                    b.HasIndex("OrderId");
+
+                    b.HasIndex("ProductId", "CreatedAt", "Id");
+
+                    b.ToTable("StockMovements", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_StockMovements_QuantityDelta_NonZero", "\"QuantityDelta\" <> 0");
+
+                            t.HasCheckConstraint("CK_StockMovements_StockAfter_NonNegative", "\"StockAfter\" >= 0");
+
+                            t.HasCheckConstraint("CK_StockMovements_StockBefore_NonNegative", "\"StockBefore\" >= 0");
+                        });
+                });
+
             modelBuilder.Entity("RiuTek.Core.Entities.User", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1061,6 +1118,31 @@ namespace RiuTek.Infrastructure.Migrations
                     b.Navigation("User");
                 });
 
+            modelBuilder.Entity("RiuTek.Core.Entities.StockMovement", b =>
+                {
+                    b.HasOne("RiuTek.Core.Entities.User", "ActorUser")
+                        .WithMany()
+                        .HasForeignKey("ActorUserId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("RiuTek.Core.Entities.Order", "Order")
+                        .WithMany()
+                        .HasForeignKey("OrderId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("RiuTek.Core.Entities.Product", "Product")
+                        .WithMany("StockMovements")
+                        .HasForeignKey("ProductId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("ActorUser");
+
+                    b.Navigation("Order");
+
+                    b.Navigation("Product");
+                });
+
             modelBuilder.Entity("RiuTek.Core.Entities.UserAddress", b =>
                 {
                     b.HasOne("RiuTek.Core.Entities.User", "User")
@@ -1141,6 +1223,8 @@ namespace RiuTek.Infrastructure.Migrations
                     b.Navigation("PCBuildItems");
 
                     b.Navigation("Reviews");
+
+                    b.Navigation("StockMovements");
 
                     b.Navigation("Wishlists");
                 });

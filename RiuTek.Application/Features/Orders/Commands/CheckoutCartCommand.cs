@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using RiuTek.Application.Common.Interfaces;
 using RiuTek.Application.DTOs;
 using RiuTek.Application.Features.Orders.Common;
+using RiuTek.Application.Features.Products.Common;
 using RiuTek.Core.Common;
 using RiuTek.Core.Entities;
 using RiuTek.Core.Enums;
@@ -164,11 +165,23 @@ public class CheckoutCartCommandHandler : IRequestHandler<CheckoutCartCommand, R
         }
         var order = orderResult.Value;
 
-        // 10. Decrement Product.StockQuantity for each item
+        // 10. Decrement Product.StockQuantity for each item and record StockMovement
         foreach (var cartItem in cart.Items)
         {
             var product = productMap[cartItem.ProductId];
-            product.StockQuantity -= cartItem.Quantity;
+            var movementResult = StockMovementHelper.ApplyStockMovement(
+                product,
+                -cartItem.Quantity,
+                StockMovementReason.Checkout,
+                note: null,
+                actorUserId: user.Id,
+                orderId: order.Id,
+                context: _context);
+
+            if (movementResult.IsFailure)
+            {
+                return Result.Failure<CheckoutOrderDto>(movementResult.Error);
+            }
         }
 
         // 11. Clear cart

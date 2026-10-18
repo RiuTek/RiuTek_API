@@ -484,7 +484,6 @@ public class CatalogBusinessRulesIntegrationTests : CatalogIntegrationTestBase
             Brand: productA.Brand,
             Price: productA.Price,
             OriginalPrice: productA.OriginalPrice,
-            StockQuantity: productA.StockQuantity,
             IsActive: productA.IsActive,
             ImageUrl: productA.ImageUrl,
             AdditionalImages: productA.AdditionalImages,

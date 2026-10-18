@@ -21,6 +21,7 @@ public interface IApplicationDbContext
     DbSet<PostComment> PostComments { get; }
     DbSet<Cart> Carts { get; }
     DbSet<CartItem> CartItems { get; }
+    DbSet<StockMovement> StockMovements { get; }
 
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
 

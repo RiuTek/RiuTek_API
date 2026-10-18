@@ -12,13 +12,38 @@ public static class IntegrationTestAuth
     {
         using var scope = factory.Services.CreateScope();
         var jwtGenerator = scope.ServiceProvider.GetRequiredService<IJwtTokenGenerator>();
+        var db = scope.ServiceProvider.GetService<RiuTek.Infrastructure.Data.ApplicationDbContext>();
 
-        var user = new User(
-            email: $"test_{role.ToString().ToLowerInvariant()}@riutek.test",
-            passwordHash: "dummy_hashed_password",
-            fullName: $"{role} Test User",
-            role: role
-        );
+        var email = $"test_{role.ToString().ToLowerInvariant()}@riutek.test";
+        User user;
+        if (db != null)
+        {
+            var existing = db.Users.FirstOrDefault(u => u.Email == email);
+            if (existing != null)
+            {
+                user = existing;
+            }
+            else
+            {
+                user = new User(
+                    email: email,
+                    passwordHash: "dummy_hashed_password",
+                    fullName: $"{role} Test User",
+                    role: role
+                );
+                db.Users.Add(user);
+                db.SaveChanges();
+            }
+        }
+        else
+        {
+            user = new User(
+                email: email,
+                passwordHash: "dummy_hashed_password",
+                fullName: $"{role} Test User",
+                role: role
+            );
+        }
 
         return jwtGenerator.GenerateAccessToken(user);
     }

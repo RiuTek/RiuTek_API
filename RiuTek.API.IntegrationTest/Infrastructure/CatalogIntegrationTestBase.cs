@@ -1,4 +1,4 @@
-﻿using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using RiuTek.Core.Enums;
 using RiuTek.Infrastructure.Data;
@@ -42,7 +42,8 @@ public abstract class CatalogIntegrationTestBase : IAsyncLifetime
         await using var tx = await dbContext.Database.BeginTransactionAsync();
         try
         {
-            // Delete dependent Products first, then Categories to respect foreign keys
+            // Delete dependent records first, then Products, then Categories to respect foreign keys
+            await dbContext.StockMovements.ExecuteDeleteAsync();
             await dbContext.Products.ExecuteDeleteAsync();
             await dbContext.Categories.ExecuteDeleteAsync();
 

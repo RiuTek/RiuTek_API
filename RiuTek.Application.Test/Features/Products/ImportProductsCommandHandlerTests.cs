@@ -38,7 +38,8 @@ public class ImportProductsCommandHandlerTests
                 It.IsAny<CancellationToken>()))
             .ReturnsAsync(Result.Success(validation));
 
-        var handler = new ImportProductsCommandHandler(db, workbookService.Object, sender.Object);
+        var currentUserService = new Mock<ICurrentUserService>();
+        var handler = new ImportProductsCommandHandler(db, workbookService.Object, sender.Object, currentUserService.Object);
         using var stream = new MemoryStream([1, 2, 3]);
 
         var result = await handler.Handle(
@@ -134,7 +135,11 @@ public class ImportProductsCommandHandlerTests
                 It.IsAny<CancellationToken>()))
             .ReturnsAsync(Result.Success(parsed));
 
-        var handler = new ImportProductsCommandHandler(db, workbookService.Object, sender.Object);
+        var actorId = Guid.NewGuid();
+        var currentUserService = new Mock<ICurrentUserService>();
+        currentUserService.Setup(x => x.UserId).Returns(actorId);
+
+        var handler = new ImportProductsCommandHandler(db, workbookService.Object, sender.Object, currentUserService.Object);
         using var stream = new MemoryStream([1, 2, 3]);
 
         var result = await handler.Handle(
@@ -155,5 +160,9 @@ public class ImportProductsCommandHandlerTests
         products[0].IsActive.Should().BeTrue();
         products[0].AdditionalImages.Should().BeEmpty();
         products[1].Sku.Should().Be("GPU-4070");
+
+        var movements = await db.StockMovements.ToListAsync();
+        movements.Should().HaveCount(2);
+        movements.All(m => m.Reason == StockMovementReason.BulkImport && m.ActorUserId == actorId).Should().BeTrue();
     }
 }

@@ -49,6 +49,7 @@ public class CartDeterministicConcurrencyTests : IAsyncLifetime
         {
             await db.CartItems.ExecuteDeleteAsync();
             await db.Carts.ExecuteDeleteAsync();
+            await db.StockMovements.ExecuteDeleteAsync();
             await db.Products.ExecuteDeleteAsync();
             await db.Categories.ExecuteDeleteAsync();
             await db.Users.ExecuteDeleteAsync();
@@ -413,6 +414,7 @@ internal sealed class TestHookApplicationDbContext : IApplicationDbContext
     public DbSet<PostComment> PostComments => _inner.PostComments;
     public DbSet<Cart> Carts => _inner.Carts;
     public DbSet<CartItem> CartItems => _inner.CartItems;
+    public DbSet<StockMovement> StockMovements => _inner.StockMovements;
 
     public async Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
     {

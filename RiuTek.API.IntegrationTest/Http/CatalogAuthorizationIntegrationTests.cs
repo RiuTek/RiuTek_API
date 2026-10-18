@@ -167,7 +167,6 @@ public class CatalogAuthorizationIntegrationTests
                     Brand: "Test Brand",
                     Price: 1000000m,
                     OriginalPrice: 1200000m,
-                    StockQuantity: 10,
                     IsActive: true,
                     ImageUrl: "https://example.com/product.jpg",
                     AdditionalImages: null,

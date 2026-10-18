@@ -39,6 +39,7 @@ public class ProductImportIntegrationTests : IAsyncLifetime
         await using var tx = await db.Database.BeginTransactionAsync();
         try
         {
+            await db.StockMovements.ExecuteDeleteAsync();
             await db.Products.ExecuteDeleteAsync();
             await db.Categories.ExecuteDeleteAsync();
             await db.Users.ExecuteDeleteAsync();

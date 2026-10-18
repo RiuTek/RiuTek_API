@@ -1,4 +1,4 @@
-﻿using System.Data;
+using System.Data;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -311,7 +311,6 @@ public class CatalogLifecycleIntegrationTests : CatalogIntegrationTestBase
             Brand: "  Intel Core  ",
             Price: 11200000m,
             OriginalPrice: 12500000m,
-            StockQuantity: 15,
             IsActive: false,
             ImageUrl: "  https://example.com/images/14700kf-special.jpg  ",
             AdditionalImages: new List<string> { "https://example.com/images/special-1.jpg" },
@@ -329,7 +328,7 @@ public class CatalogLifecycleIntegrationTests : CatalogIntegrationTestBase
         updatedProduct.Slug.Should().Be("intel-core-i7-14700kf-special-edition");
         updatedProduct.Price.Should().Be(11200000m);
         updatedProduct.OriginalPrice.Should().Be(12500000m);
-        updatedProduct.StockQuantity.Should().Be(15);
+        updatedProduct.StockQuantity.Should().Be(25);
         updatedProduct.IsActive.Should().BeFalse();
         updatedProduct.AdditionalImages.Should().ContainSingle("https://example.com/images/special-1.jpg");
 

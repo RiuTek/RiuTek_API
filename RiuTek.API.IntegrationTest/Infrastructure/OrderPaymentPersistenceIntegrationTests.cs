@@ -98,6 +98,7 @@ public class OrderPaymentPersistenceIntegrationTests : IAsyncLifetime
         using var scope = _fixture.Factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
 
+        await db.StockMovements.ExecuteDeleteAsync();
         await db.PaymentAttempts.ExecuteDeleteAsync();
         await db.OrderItems.ExecuteDeleteAsync();
         await db.Orders.ExecuteDeleteAsync();

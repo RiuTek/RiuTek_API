@@ -48,3 +48,13 @@ public enum UserRole
     Staff = 2,
     Admin = 3
 }
+
+public enum StockMovementReason
+{
+    ProductCreated = 1,
+    BulkImport = 2,
+    ManualAdjustment = 3,
+    Checkout = 4,
+    OrderCancellation = 5,
+    PaymentExpiration = 6
+}
