@@ -35,9 +35,9 @@ public class ActualEndpointMetadataTests
 
             endpoints.Should().NotBeEmpty();
 
-            // Total controller actions: 6 Posts + 6 Comments + 7 Products + 5 Categories + 5 Carts + 4 Auth + 8 Orders + 1 Payments + 6 Users + 3 ProductMedia + 3 ProductImports = 54
+            // Total controller actions: 6 Posts + 6 Comments + 7 Products + 5 Categories + 5 Carts + 4 Auth + 8 Orders + 1 Payments + 6 Users + 3 ProductMedia + 3 ProductImports + 9 Reviews = 63
             var controllerEndpoints = endpoints.Where(e => e.Metadata.GetMetadata<ControllerActionDescriptor>() != null).ToList();
-            controllerEndpoints.Should().HaveCount(54);
+            controllerEndpoints.Should().HaveCount(63);
 
             // Helper to get action descriptor
             ControllerActionDescriptor GetDescriptor(RouteEndpoint e) => e.Metadata.GetMetadata<ControllerActionDescriptor>()!;
@@ -469,6 +469,70 @@ public class ActualEndpointMetadataTests
             commitImport.Should().NotBeNull();
             GetFullRoutePattern(commitImport!).Should().BeEquivalentTo("api/v1/product-imports/import");
             AssertAuthorizePolicy(commitImport!, Policies.ContentManager);
+
+            #endregion
+
+            #region Reviews Endpoints (9)
+
+            var reviewEndpoints = endpoints.Where(e =>
+                e.Metadata.GetMetadata<ControllerActionDescriptor>()?.ControllerTypeInfo.AsType() == typeof(ReviewsController))
+                .ToList();
+
+            reviewEndpoints.Should().HaveCount(9);
+
+            // 1. GET /api/v1/products/{productId:guid}/reviews (AllowAnonymous) - Action: GetProductReviews
+            var getProductReviews = reviewEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(ReviewsController.GetProductReviews) && GetHttpMethods(e).Contains("GET"));
+            getProductReviews.Should().NotBeNull();
+            GetFullRoutePattern(getProductReviews!).Should().BeEquivalentTo("api/v1/products/{productId:guid}/reviews");
+            AssertPublicEndpoint(getProductReviews!);
+
+            // 2. GET api/v1/reviews/mine (Authorized) - Action: GetMyReviews
+            var getMyReviews = reviewEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(ReviewsController.GetMyReviews) && GetHttpMethods(e).Contains("GET"));
+            getMyReviews.Should().NotBeNull();
+            GetFullRoutePattern(getMyReviews!).Should().BeEquivalentTo("api/v1/reviews/mine");
+            AssertAuthorized(getMyReviews!);
+
+            // 3. POST api/v1/reviews (Authorized) - Action: CreateReview
+            var createReview = reviewEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(ReviewsController.CreateReview) && GetHttpMethods(e).Contains("POST"));
+            createReview.Should().NotBeNull();
+            GetFullRoutePattern(createReview!).Should().BeEquivalentTo("api/v1/reviews");
+            AssertAuthorized(createReview!);
+
+            // 4. PUT api/v1/reviews/{id:guid} (Authorized) - Action: UpdateReview
+            var updateReview = reviewEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(ReviewsController.UpdateReview) && GetHttpMethods(e).Contains("PUT"));
+            updateReview.Should().NotBeNull();
+            GetFullRoutePattern(updateReview!).Should().BeEquivalentTo("api/v1/reviews/{id:guid}");
+            AssertAuthorized(updateReview!);
+
+            // 5. DELETE api/v1/reviews/{id:guid} (Authorized) - Action: DeleteReview
+            var deleteReview = reviewEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(ReviewsController.DeleteReview) && GetHttpMethods(e).Contains("DELETE"));
+            deleteReview.Should().NotBeNull();
+            GetFullRoutePattern(deleteReview!).Should().BeEquivalentTo("api/v1/reviews/{id:guid}");
+            AssertAuthorized(deleteReview!);
+
+            // 6. GET api/v1/reviews/admin (Policies.ContentManager) - Action: GetManagedReviews
+            var getManagedReviews = reviewEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(ReviewsController.GetManagedReviews) && GetHttpMethods(e).Contains("GET"));
+            getManagedReviews.Should().NotBeNull();
+            GetFullRoutePattern(getManagedReviews!).Should().BeEquivalentTo("api/v1/reviews/admin");
+            AssertAuthorizePolicy(getManagedReviews!, Policies.ContentManager);
+
+            // 7. PUT api/v1/reviews/{id:guid}/reply (Policies.ContentManager) - Action: SetReviewReply
+            var setReviewReply = reviewEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(ReviewsController.SetReviewReply) && GetHttpMethods(e).Contains("PUT"));
+            setReviewReply.Should().NotBeNull();
+            GetFullRoutePattern(setReviewReply!).Should().BeEquivalentTo("api/v1/reviews/{id:guid}/reply");
+            AssertAuthorizePolicy(setReviewReply!, Policies.ContentManager);
+
+            // 8. DELETE api/v1/reviews/{id:guid}/reply (Policies.ContentManager) - Action: DeleteReviewReply
+            var deleteReviewReply = reviewEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(ReviewsController.DeleteReviewReply) && GetHttpMethods(e).Contains("DELETE"));
+            deleteReviewReply.Should().NotBeNull();
+            GetFullRoutePattern(deleteReviewReply!).Should().BeEquivalentTo("api/v1/reviews/{id:guid}/reply");
+            AssertAuthorizePolicy(deleteReviewReply!, Policies.ContentManager);
+
+            // 9. DELETE api/v1/reviews/admin/{id:guid} (Policies.ContentManager) - Action: DeleteManagedReview
+            var deleteManagedReview = reviewEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(ReviewsController.DeleteManagedReview) && GetHttpMethods(e).Contains("DELETE"));
+            deleteManagedReview.Should().NotBeNull();
+            GetFullRoutePattern(deleteManagedReview!).Should().BeEquivalentTo("api/v1/reviews/admin/{id:guid}");
+            AssertAuthorizePolicy(deleteManagedReview!, Policies.ContentManager);
 
             #endregion
         }

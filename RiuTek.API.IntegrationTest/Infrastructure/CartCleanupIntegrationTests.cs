@@ -48,6 +48,7 @@ public class CartCleanupIntegrationTests : IAsyncLifetime
             await db.PCBuildItems.ExecuteDeleteAsync();
             await db.PCBuilds.ExecuteDeleteAsync();
             await db.StockMovements.ExecuteDeleteAsync();
+            await db.Reviews.ExecuteDeleteAsync();
             await db.OrderItems.ExecuteDeleteAsync();
             await db.Orders.ExecuteDeleteAsync();
             await db.Products.ExecuteDeleteAsync();

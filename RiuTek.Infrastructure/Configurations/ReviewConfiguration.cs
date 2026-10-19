@@ -8,7 +8,10 @@ public class ReviewConfiguration : IEntityTypeConfiguration<Review>
 {
     public void Configure(EntityTypeBuilder<Review> builder)
     {
-        builder.ToTable("Reviews");
+        builder.ToTable("Reviews", t =>
+        {
+            t.HasCheckConstraint("CK_Reviews_Rating_Range", "\"Rating\" >= 1 AND \"Rating\" <= 5");
+        });
 
         builder.HasKey(r => r.Id);
 
@@ -26,6 +29,9 @@ public class ReviewConfiguration : IEntityTypeConfiguration<Review>
 
         builder.Property(r => r.StaffReply)
             .HasMaxLength(2000);
+
+        builder.Property(r => r.UpdatedAt)
+            .IsConcurrencyToken();
 
         builder.HasOne(r => r.Product)
             .WithMany(p => p.Reviews)
@@ -45,5 +51,8 @@ public class ReviewConfiguration : IEntityTypeConfiguration<Review>
         // A user can review a product only once per order
         builder.HasIndex(r => new { r.UserId, r.ProductId, r.OrderId })
             .IsUnique();
+
+        // Stable public listing index
+        builder.HasIndex(r => new { r.ProductId, r.CreatedAt, r.Id });
     }
 }

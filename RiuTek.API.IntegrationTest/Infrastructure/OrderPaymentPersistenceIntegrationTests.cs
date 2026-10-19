@@ -100,6 +100,7 @@ public class OrderPaymentPersistenceIntegrationTests : IAsyncLifetime
 
         await db.StockMovements.ExecuteDeleteAsync();
         await db.PaymentAttempts.ExecuteDeleteAsync();
+        await db.Reviews.ExecuteDeleteAsync();
         await db.OrderItems.ExecuteDeleteAsync();
         await db.Orders.ExecuteDeleteAsync();
         await db.CartItems.ExecuteDeleteAsync();

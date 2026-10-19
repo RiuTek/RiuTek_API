@@ -43,6 +43,7 @@ public class OrderCheckoutIntegrationTests : IAsyncLifetime
         try
         {
             await db.StockMovements.ExecuteDeleteAsync();
+            await db.Reviews.ExecuteDeleteAsync();
             await db.OrderItems.ExecuteDeleteAsync();
             await db.Orders.ExecuteDeleteAsync();
             await db.CartItems.ExecuteDeleteAsync();

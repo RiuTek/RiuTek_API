@@ -24,6 +24,7 @@ Buying PC parts requires more than adding products to a cart: sockets, memory ge
 - Cloudflare R2 product-media uploads through presigned URLs, with validation and ownership rules verified in the deployed environment.
 - Versioned Excel template generation, dry-run validation, and transactional create-only bulk import for all nine component types.
 - Inventory audit logging (`StockMovement`), optimistic concurrency manual adjustments (`POST /api/v1/products/{id}/stock-adjustments`), and paginated stock movement history (`GET /api/v1/products/{id}/stock-movements`).
+- Verified product reviews: restricted to Customers with completed orders (1 review per Order-Product pair), public rating summary and distribution (1..5 stars), Customer self-management (create/update/delete), Staff/Admin replies and moderation deletion, concurrency protection via UpdatedAt tokens (review images/R2 deferred to future media phase).
 - PostgreSQL integration tests with Testcontainers and automated container deployment through GitHub Actions.
 
 ## Architecture
