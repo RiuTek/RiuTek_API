@@ -327,12 +327,264 @@ public class PCBuildCommandAndQueryTests
         await context.SaveChangesAsync();
 
         var userMock = MockUser(owner.Id);
-        var handler = new GetMyPCBuildsQueryHandler(context, userMock.Object);
+        var handler = new GetMyPCBuildsQueryHandler(context, userMock.Object, _compatibilityService);
 
         var result = await handler.Handle(new GetMyPCBuildsQuery(PageIndex: 999, PageSize: 20), CancellationToken.None);
 
         result.IsSuccess.Should().BeTrue();
         result.Value.TotalCount.Should().Be(1);
         result.Value.Items.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task GetMyPCBuildsQuery_WhenPageIndexImmediatelyAfterLastPage_ShouldReturnEmptyListSafely()
+    {
+        using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var (owner, cpu, _, _) = SeedStandardScenario(context);
+
+        var build = new PCBuild("Single Build", owner.Id);
+        build.AddItem(new PCBuildItem(build.Id, cpu.Id, ComponentType.Cpu, cpu.Price, 1));
+        context.PCBuilds.Add(build);
+        await context.SaveChangesAsync();
+
+        var userMock = MockUser(owner.Id);
+        var handler = new GetMyPCBuildsQueryHandler(context, userMock.Object, _compatibilityService);
+
+        // PageIndex 2 with PageSize 20 is immediately after last page (TotalCount = 1)
+        var result = await handler.Handle(new GetMyPCBuildsQuery(PageIndex: 2, PageSize: 20), CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Value.TotalCount.Should().Be(1);
+        result.Value.Items.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task GetMyPCBuildsQuery_WhenPageIndexIsIntMax_ShouldReturnEmptyListSafely()
+    {
+        using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var (owner, cpu, _, _) = SeedStandardScenario(context);
+
+        var build = new PCBuild("My Build", owner.Id);
+        build.AddItem(new PCBuildItem(build.Id, cpu.Id, ComponentType.Cpu, cpu.Price, 1));
+        context.PCBuilds.Add(build);
+        await context.SaveChangesAsync();
+
+        var userMock = MockUser(owner.Id);
+        var handler = new GetMyPCBuildsQueryHandler(context, userMock.Object, _compatibilityService);
+
+        var result = await handler.Handle(new GetMyPCBuildsQuery(PageIndex: int.MaxValue, PageSize: 20), CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Value.TotalCount.Should().Be(1);
+        result.Value.Items.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task GetMyPCBuildsQuery_WhenPageIndexCauses32BitOverflow_ShouldReturnEmptyListSafely()
+    {
+        using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var (owner, cpu, _, _) = SeedStandardScenario(context);
+
+        var build = new PCBuild("My Build", owner.Id);
+        build.AddItem(new PCBuildItem(build.Id, cpu.Id, ComponentType.Cpu, cpu.Price, 1));
+        context.PCBuilds.Add(build);
+        await context.SaveChangesAsync();
+
+        var userMock = MockUser(owner.Id);
+        var handler = new GetMyPCBuildsQueryHandler(context, userMock.Object, _compatibilityService);
+
+        // In 32-bit int arithmetic: (1073741825 - 1) * 20 = 21,474,836,480 = 0 in 32-bit int!
+        // Without long offset guard, this would incorrectly evaluate to offset 0 and return the first page.
+        var result = await handler.Handle(new GetMyPCBuildsQuery(PageIndex: 1073741825, PageSize: 20), CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Value.TotalCount.Should().Be(1);
+        result.Value.Items.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task DeleteMyPCBuildCommand_WhenReferencedByOrderItem_ShouldReturn409AndPreserveBuild()
+    {
+        using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var (owner, cpu, _, _) = SeedStandardScenario(context);
+
+        var build = new PCBuild("Referenced Build", owner.Id);
+        build.AddItem(new PCBuildItem(build.Id, cpu.Id, ComponentType.Cpu, cpu.Price, 1));
+        context.PCBuilds.Add(build);
+
+        var order = new Order("ORD-TEST-001", owner.Id, "idem-key-1", "Customer", "c@test.com", "0900000000", "Address", PaymentMethod.COD);
+        context.Orders.Add(order);
+
+        var orderItem = new OrderItem(order.Id, cpu.Id, cpu.Name, cpu.Sku, cpu.Price, 1, pcBuildId: build.Id);
+        context.OrderItems.Add(orderItem);
+        await context.SaveChangesAsync();
+
+        var userMock = MockUser(owner.Id);
+        var handler = new DeleteMyPCBuildCommandHandler(context, userMock.Object);
+
+        var result = await handler.Handle(new DeleteMyPCBuildCommand(build.Id), CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be("PCBuild.CannotDeleteOrderedBuild");
+
+        // Verify build still exists in database
+        (await context.PCBuilds.AnyAsync(b => b.Id == build.Id)).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task DeleteMyPCBuildCommand_WhenBelongsToOtherUserEvenIfReferenced_ShouldReturn404First()
+    {
+        using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var (owner, cpu, _, _) = SeedStandardScenario(context);
+        var otherUser = new User("other@test.com", "hash", "Other Customer", UserRole.Customer);
+        context.Users.Add(otherUser);
+
+        var build = new PCBuild("Owner Build", owner.Id);
+        build.AddItem(new PCBuildItem(build.Id, cpu.Id, ComponentType.Cpu, cpu.Price, 1));
+        context.PCBuilds.Add(build);
+
+        var order = new Order("ORD-TEST-002", owner.Id, "idem-key-2", "Customer", "c@test.com", "0900000000", "Address", PaymentMethod.COD);
+        context.Orders.Add(order);
+
+        var orderItem = new OrderItem(order.Id, cpu.Id, cpu.Name, cpu.Sku, cpu.Price, 1, pcBuildId: build.Id);
+        context.OrderItems.Add(orderItem);
+        await context.SaveChangesAsync();
+
+        // Other user attempts to delete owner's referenced build
+        var otherUserMock = MockUser(otherUser.Id);
+        var handler = new DeleteMyPCBuildCommandHandler(context, otherUserMock.Object);
+
+        var result = await handler.Handle(new DeleteMyPCBuildCommand(build.Id), CancellationToken.None);
+
+        // Must fail with 404 NotFound before leaking reference state
+        result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be("PCBuild.NotFound");
+    }
+
+    [Fact]
+    public async Task PreviewPCBuildCommand_ShouldAssignCorrectAvailabilityIssueCodes()
+    {
+        using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var (owner, cpu, mobo, ram) = SeedStandardScenario(context);
+
+        // cpu: active with stock 5
+        cpu.StockQuantity = 5;
+
+        // mobo: inactive
+        mobo.IsActive = false;
+
+        // ram: active with stock 1, requested 2 -> insufficient stock
+        ram.StockQuantity = 1;
+
+        await context.SaveChangesAsync();
+
+        var handler = new PreviewPCBuildCommandHandler(context, _compatibilityService);
+
+        var command = new PreviewPCBuildCommand([
+            new(cpu.Id, 1),
+            new(mobo.Id, 1),
+            new(ram.Id, 2)
+        ]);
+
+        var result = await handler.Handle(command, CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Value.CanPurchaseAll.Should().BeFalse();
+
+        var cpuItem = result.Value.Items.Single(i => i.ProductId == cpu.Id);
+        cpuItem.IssueCode.Should().BeNull();
+        cpuItem.CanPurchase.Should().BeTrue();
+
+        var moboItem = result.Value.Items.Single(i => i.ProductId == mobo.Id);
+        moboItem.IssueCode.Should().Be(PCBuildResponseBuilder.IssueProductInactive);
+        moboItem.CanPurchase.Should().BeFalse();
+
+        var ramItem = result.Value.Items.Single(i => i.ProductId == ram.Id);
+        ramItem.IssueCode.Should().Be(PCBuildResponseBuilder.IssueInsufficientStock);
+        ramItem.CanPurchase.Should().BeFalse();
+
+        // Ordering check: ComponentType ASC, ProductId ASC
+        result.Value.Items.Should().BeInAscendingOrder(i => i.ComponentType);
+    }
+
+    [Fact]
+    public async Task GetMyPCBuildByIdQuery_WhenProductSpecChanged_ShouldComputeLiveCompatibilityWithoutMutatingDb()
+    {
+        using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var (owner, cpu, mobo, _) = SeedStandardScenario(context);
+        await context.SaveChangesAsync();
+
+        // Initially create build with compatible CPU and Mobo (both LGA1700)
+        var createHandler = new CreatePCBuildCommandHandler(context, MockUser(owner.Id).Object, _compatibilityService);
+        var createResult = await createHandler.Handle(new CreatePCBuildCommand(
+            "Rig LGA1700",
+            "desc",
+            [new(cpu.Id, 1), new(mobo.Id, 1)]), CancellationToken.None);
+
+        createResult.IsSuccess.Should().BeTrue();
+        createResult.Value.IsCompatible.Should().BeTrue();
+
+        // Verify initial DB snapshot is true
+        var buildInDb = await context.PCBuilds.AsNoTracking().FirstAsync(b => b.Id == createResult.Value.Id);
+        buildInDb.IsCompatible.Should().BeTrue();
+
+        // Mutate CPU specification in database: change socket to AM5 (incompatible with LGA1700 mobo)
+        var cpuInDb = await context.Products.FirstAsync(p => p.Id == cpu.Id);
+        cpuInDb.Specifications = new CpuSpecification
+        {
+            Socket = CpuSocket.AM5,
+            CoreCount = 16,
+            ThreadCount = 32,
+            TdpWattage = 170,
+            SupportedMemoryType = RamType.DDR5
+        };
+        await context.SaveChangesAsync();
+
+        // Now query via GetMyPCBuildByIdQuery
+        var getHandler = new GetMyPCBuildByIdQueryHandler(context, MockUser(owner.Id).Object, _compatibilityService);
+        var getResult = await getHandler.Handle(new GetMyPCBuildByIdQuery(createResult.Value.Id), CancellationToken.None);
+
+        getResult.IsSuccess.Should().BeTrue();
+        // Live compatibility must reflect the mismatch!
+        getResult.Value.IsCompatible.Should().BeFalse();
+        getResult.Value.Issues.Should().Contain(i => i.RuleId == "COMP-01");
+
+        // DB snapshot must NOT be mutated by GET query!
+        var buildAfterGet = await context.PCBuilds.AsNoTracking().FirstAsync(b => b.Id == createResult.Value.Id);
+        buildAfterGet.IsCompatible.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task GetMyPCBuildByIdQuery_PriceSnapshot_VersusLiveCurrentPrice()
+    {
+        using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var (owner, _, _, ram) = SeedStandardScenario(context);
+        await context.SaveChangesAsync();
+        var originalPrice = ram.Price;
+
+        var createHandler = new CreatePCBuildCommandHandler(context, MockUser(owner.Id).Object, _compatibilityService);
+        var createResult = await createHandler.Handle(new CreatePCBuildCommand(
+            "Price Test Rig",
+            "desc",
+            [new(ram.Id, 2)]), CancellationToken.None);
+
+        createResult.IsSuccess.Should().BeTrue();
+
+        // Update product price & stock in DB
+        var ramInDb = await context.Products.FirstAsync(p => p.Id == ram.Id);
+        var newPrice = originalPrice + 500000m;
+        ramInDb.Price = newPrice;
+        await context.SaveChangesAsync();
+
+        // Query via GetMyPCBuildByIdQuery
+        var getHandler = new GetMyPCBuildByIdQueryHandler(context, MockUser(owner.Id).Object, _compatibilityService);
+        var getResult = await getHandler.Handle(new GetMyPCBuildByIdQuery(createResult.Value.Id), CancellationToken.None);
+
+        getResult.IsSuccess.Should().BeTrue();
+        var item = getResult.Value.Items.Single();
+        item.UnitPrice.Should().Be(originalPrice);
+        item.LineTotal.Should().Be(originalPrice * 2);
+        item.CurrentPrice.Should().Be(newPrice);
+        getResult.Value.TotalPrice.Should().Be(originalPrice * 2);
     }
 }

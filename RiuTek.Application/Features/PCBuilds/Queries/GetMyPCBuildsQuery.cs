@@ -30,13 +30,16 @@ public class GetMyPCBuildsQueryHandler : IRequestHandler<GetMyPCBuildsQuery, Res
 {
     private readonly IApplicationDbContext _context;
     private readonly ICurrentUserService _currentUserService;
+    private readonly IHardwareCompatibilityService _compatibilityService;
 
     public GetMyPCBuildsQueryHandler(
         IApplicationDbContext context,
-        ICurrentUserService currentUserService)
+        ICurrentUserService currentUserService,
+        IHardwareCompatibilityService compatibilityService)
     {
         _context = context;
         _currentUserService = currentUserService;
+        _compatibilityService = compatibilityService;
     }
 
     public async Task<Result<PagedResult<MyPCBuildSummaryDto>>> Handle(
@@ -61,10 +64,23 @@ public class GetMyPCBuildsQueryHandler : IRequestHandler<GetMyPCBuildsQuery, Res
 
         var totalCount = await query.CountAsync(cancellationToken);
 
+        long offset = ((long)request.PageIndex - 1) * request.PageSize;
+
+        if (totalCount == 0 || offset >= totalCount || offset > int.MaxValue)
+        {
+            var emptyResult = PagedResult<MyPCBuildSummaryDto>.Create(
+                [],
+                totalCount,
+                request.PageIndex,
+                request.PageSize);
+
+            return Result.Success(emptyResult);
+        }
+
         var builds = await query
             .OrderByDescending(b => b.CreatedAt)
             .ThenByDescending(b => b.Id)
-            .Skip((request.PageIndex - 1) * request.PageSize)
+            .Skip((int)offset)
             .Take(request.PageSize)
             .Include(b => b.Items)
                 .ThenInclude(i => i.Product)
@@ -72,22 +88,13 @@ public class GetMyPCBuildsQueryHandler : IRequestHandler<GetMyPCBuildsQuery, Res
 
         var dtos = builds.Select(b =>
         {
-            var canPurchaseAll = b.Items.Count > 0 && b.Items.All(i =>
-                i.Product != null && i.Product.IsActive && i.Product.StockQuantity >= i.Quantity);
+            var selections = b.Items
+                .Where(i => i.Product != null)
+                .Select(i => new ComponentSelection(i.Product!, i.Quantity))
+                .ToList();
 
-            return new MyPCBuildSummaryDto(
-                Id: b.Id,
-                Name: b.Name,
-                Description: b.Description,
-                TotalPrice: b.TotalPrice,
-                EstimatedWattage: b.EstimatedWattage,
-                IsCompatible: b.IsCompatible,
-                CanPurchaseAll: canPurchaseAll,
-                ItemCount: b.Items.Count,
-                Status: b.Status,
-                CreatedAt: b.CreatedAt,
-                UpdatedAt: b.UpdatedAt
-            );
+            var compatibility = _compatibilityService.ValidateComponentSelections(selections);
+            return PCBuildResponseBuilder.BuildMyBuildSummaryDto(b, compatibility);
         }).ToList();
 
         var pagedResult = PagedResult<MyPCBuildSummaryDto>.Create(

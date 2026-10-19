@@ -10,6 +10,7 @@ using RiuTek.API.IntegrationTest.Infrastructure;
 using RiuTek.Application.Common.Interfaces;
 using RiuTek.Application.Common.Models;
 using RiuTek.Application.DTOs;
+using RiuTek.Application.Features.PCBuilds.Common;
 using RiuTek.Core.Entities;
 using RiuTek.Core.Entities.Specifications;
 using RiuTek.Core.Enums;
@@ -228,12 +229,15 @@ public class PCBuildIntegrationTests : IAsyncLifetime
 
         var cpuItem = preview.Items.First(i => i.ProductId == activeCpu.Id);
         cpuItem.CanPurchase.Should().BeTrue();
+        cpuItem.IssueCode.Should().BeNull();
 
         var moboItem = preview.Items.First(i => i.ProductId == inactiveMobo.Id);
         moboItem.CanPurchase.Should().BeFalse();
+        moboItem.IssueCode.Should().Be(PCBuildResponseBuilder.IssueProductInactive);
 
         var ramItem = preview.Items.First(i => i.ProductId == outOfStockRam.Id);
         ramItem.CanPurchase.Should().BeFalse();
+        ramItem.IssueCode.Should().Be(PCBuildResponseBuilder.IssueInsufficientStock);
     }
 
     [Fact]
@@ -513,5 +517,60 @@ public class PCBuildIntegrationTests : IAsyncLifetime
 
         // Product is STILL in database
         (await db.Products.AnyAsync(p => p.Id == cpu.Id)).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Delete_WhenBuildReferencedByOrderItem_ShouldReturn409AndPreserveBuild()
+    {
+        var (client, customer) = await CreateUserClientAsync(UserRole.Customer);
+        var (_, cpu) = await SeedProductAsync(ComponentType.Cpu);
+
+        var createResponse = await client.PostAsJsonAsync("/api/v1/pc-builds", new CreatePCBuildRequest("Ordered Build", null, [new(cpu.Id, 1)]));
+        createResponse.StatusCode.Should().Be(HttpStatusCode.Created);
+        var created = await createResponse.Content.ReadFromJsonAsync<MyPCBuildDto>(JsonOptions);
+        var buildId = created!.Id;
+
+        // Create Order and OrderItem referencing buildId in database
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var order = new Order("ORD-INT-001", customer.Id, "idem-int-1", customer.FullName, customer.Email, "0900000000", "Shipping Address", PaymentMethod.COD);
+            db.Orders.Add(order);
+            var orderItem = new OrderItem(order.Id, cpu.Id, cpu.Name, cpu.Sku, cpu.Price, 1, pcBuildId: buildId);
+            db.OrderItems.Add(orderItem);
+            await db.SaveChangesAsync();
+        }
+
+        // Attempt delete
+        var deleteResponse = await client.DeleteAsync($"/api/v1/pc-builds/{buildId}");
+        deleteResponse.StatusCode.Should().Be(HttpStatusCode.Conflict);
+
+        var error = await deleteResponse.Content.ReadFromJsonAsync<BusinessErrorResponse>(JsonOptions);
+        error.Should().NotBeNull();
+        error!.Code.Should().Be("PCBuild.CannotDeleteOrderedBuild");
+
+        // Verify in PostgreSQL that build still exists
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            (await db.PCBuilds.AnyAsync(b => b.Id == buildId)).Should().BeTrue();
+        }
+    }
+
+    [Fact]
+    public async Task GetMine_WhenExtremePageIndex_ShouldReturnEmptyListSafely()
+    {
+        var (client, _) = await CreateUserClientAsync(UserRole.Customer);
+        var (_, cpu) = await SeedProductAsync(ComponentType.Cpu);
+
+        await client.PostAsJsonAsync("/api/v1/pc-builds", new CreatePCBuildRequest("Rig 1", null, [new(cpu.Id, 1)]));
+
+        // Int Max page index must return empty without overflow
+        var response = await client.GetAsync($"/api/v1/pc-builds/mine?pageIndex={int.MaxValue}&pageSize=20");
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        var result = await response.Content.ReadFromJsonAsync<PagedResult<MyPCBuildSummaryDto>>(JsonOptions);
+        result.Should().NotBeNull();
+        result!.TotalCount.Should().Be(1);
+        result.Items.Should().BeEmpty();
     }
 }

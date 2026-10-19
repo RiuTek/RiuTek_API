@@ -65,6 +65,16 @@ public class DeleteMyPCBuildCommandHandler : IRequestHandler<DeleteMyPCBuildComm
                 "Không thể xóa cấu hình PC đã đặt hàng."));
         }
 
+        var isReferencedByOrder = await _context.OrderItems
+            .AnyAsync(oi => oi.PCBuildId == pcBuild.Id, cancellationToken);
+
+        if (isReferencedByOrder)
+        {
+            return Result.Failure(Error.Conflict(
+                "PCBuild.CannotDeleteOrderedBuild",
+                "Không thể xóa cấu hình PC đã đặt hàng."));
+        }
+
         _context.PCBuilds.Remove(pcBuild);
 
         try

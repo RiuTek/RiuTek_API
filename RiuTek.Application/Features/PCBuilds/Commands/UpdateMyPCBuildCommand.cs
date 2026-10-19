@@ -35,11 +35,7 @@ public class UpdateMyPCBuildCommandValidator : AbstractValidator<UpdateMyPCBuild
             .NotEmpty().WithMessage("Cấu hình PC phải có ít nhất 1 linh kiện.")
             .Must(x => x != null && x.Count <= 30).WithMessage("Cấu hình PC chỉ được chứa tối đa 30 linh kiện.");
 
-        RuleForEach(x => x.Items).ChildRules(item =>
-        {
-            item.RuleFor(i => i.ProductId).NotEmpty().WithMessage("Id sản phẩm không hợp lệ.");
-            item.RuleFor(i => i.Quantity).InclusiveBetween(1, 20).WithMessage("Số lượng linh kiện phải từ 1 đến 20.");
-        });
+        RuleForEach(x => x.Items).SetValidator(new PCBuildItemInputValidator());
     }
 }
 
@@ -138,47 +134,7 @@ public class UpdateMyPCBuildCommandHandler : IRequestHandler<UpdateMyPCBuildComm
                 "Cấu hình PC đã bị thay đổi bởi thao tác khác. Vui lòng tải lại và thử lại."));
         }
 
-        var myItems = pcBuild.Items.Select(i =>
-        {
-            var product = productDict[i.ProductId];
-            var canPurchase = product.IsActive && product.StockQuantity >= i.Quantity;
-            return new MyPCBuildItemDto(
-                Id: i.Id,
-                ProductId: i.ProductId,
-                ProductName: product.Name,
-                ProductSlug: product.Slug,
-                ProductSku: product.Sku,
-                ProductImageUrl: product.ImageUrl,
-                ComponentType: i.ComponentType,
-                Quantity: i.Quantity,
-                UnitPrice: i.UnitPrice,
-                LineTotal: i.UnitPrice * i.Quantity,
-                CurrentPrice: product.Price,
-                StockQuantity: product.StockQuantity,
-                IsActive: product.IsActive,
-                CanPurchase: canPurchase,
-                Specifications: product.Specifications
-            );
-        }).ToList();
-
-        var canPurchaseAll = myItems.Count > 0 && myItems.All(i => i.CanPurchase);
-
-        return Result.Success(new MyPCBuildDto(
-            Id: pcBuild.Id,
-            Name: pcBuild.Name,
-            Description: pcBuild.Description,
-            TotalPrice: pcBuild.TotalPrice,
-            EstimatedWattage: pcBuild.EstimatedWattage,
-            RecommendedPsuWattage: compatibility.RecommendedPsuWattage,
-            IsCompatible: pcBuild.IsCompatible,
-            IsCompleteSystem: compatibility.IsCompleteSystem,
-            MissingComponents: compatibility.MissingComponents,
-            Issues: compatibility.Issues,
-            CanPurchaseAll: canPurchaseAll,
-            Status: pcBuild.Status,
-            Items: myItems,
-            CreatedAt: pcBuild.CreatedAt,
-            UpdatedAt: pcBuild.UpdatedAt
-        ));
+        var resultDto = PCBuildResponseBuilder.BuildMyBuildDto(pcBuild, compatibility, productDict);
+        return Result.Success(resultDto);
     }
 }

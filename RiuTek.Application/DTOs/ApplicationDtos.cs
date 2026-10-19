@@ -49,34 +49,6 @@ public record CategoryDto(
     List<CategoryDto> SubCategories
 );
 
-public record PCBuildDto(
-    Guid Id,
-    Guid? UserId,
-    string Name,
-    string? Description,
-    decimal TotalPrice,
-    int EstimatedWattage,
-    bool IsCompatible,
-    List<string> CompatibilityNotes,
-    bool IsAiGenerated,
-    string? AiRationale,
-    PCBuildStatus Status,
-    List<PCBuildItemDto> Items,
-    DateTime CreatedAt
-);
-
-public record PCBuildItemDto(
-    Guid Id,
-    Guid ProductId,
-    string ProductName,
-    string ProductImageUrl,
-    ComponentType ComponentType,
-    int Quantity,
-    decimal UnitPrice,
-    decimal TotalPrice,
-    ComponentSpecification? Specifications
-);
-
 public record UserAddressDto(
     Guid Id,
     Guid UserId,
