@@ -52,11 +52,27 @@ public class TestApplicationDbContext : DbContext, IApplicationDbContext
 
     public bool IsUniqueViolation(DbUpdateException ex, string? constraintName = null)
     {
-        return ex.InnerException?.Message.Contains("Unique", StringComparison.OrdinalIgnoreCase) == true;
+        var msg = ex.InnerException?.Message;
+        if (msg is null) return false;
+        if (!msg.Contains("Unique", StringComparison.OrdinalIgnoreCase)) return false;
+        return constraintName == null || msg.Contains(constraintName, StringComparison.OrdinalIgnoreCase);
+    }
+
+    public Func<Task<int>>? SaveChangesInterceptor { get; set; }
+    public bool ClearTrackedChangesCalled { get; set; }
+
+    public override Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
+    {
+        if (SaveChangesInterceptor != null)
+        {
+            return SaveChangesInterceptor();
+        }
+        return base.SaveChangesAsync(cancellationToken);
     }
 
     public void ClearTrackedChanges()
     {
+        ClearTrackedChangesCalled = true;
         ChangeTracker.Clear();
     }
 }

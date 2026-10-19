@@ -59,9 +59,32 @@ public class Review : BaseEntity, IAggregateRoot
         Rating = rating;
         Title = normalizedTitle;
         Content = normalizedContent;
-        Images = images ?? [];
+        Images = NormalizeImages(images);
         CreatedAt = DateTime.UtcNow;
         UpdatedAt = null;
+    }
+
+    private static List<string> NormalizeImages(IEnumerable<string>? images)
+    {
+        if (images is null) return [];
+
+        var result = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var img in images)
+        {
+            if (string.IsNullOrWhiteSpace(img)) continue;
+
+            var trimmed = img.Trim();
+            if (trimmed.Length == 0) continue;
+
+            if (seen.Add(trimmed))
+            {
+                result.Add(trimmed);
+            }
+        }
+
+        return result;
     }
 
     public Result UpdateReview(int rating, string? title, string? content)

@@ -312,6 +312,53 @@ public class ReviewCommandHandlerTests
         result.Error.Code.Should().Be("Review.AlreadyExists");
     }
 
+    [Fact]
+    public async Task CreateReview_WhenUniqueIndexViolationRace_CatchesExactConstraintAndReturnsAlreadyExists()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var (user, _, product, order) = SeedStandardScenario(context);
+        await context.SaveChangesAsync();
+
+        var dbUpdateEx = new DbUpdateException(
+            "Unique violation",
+            new Exception("duplicate key value violates unique constraint \"IX_Reviews_UserId_ProductId_OrderId\""));
+        context.SaveChangesInterceptor = () => throw dbUpdateEx;
+
+        var currentUserService = MockUser(user);
+        var handler = new CreateReviewCommandHandler(context, currentUserService.Object);
+
+        var result = await handler.Handle(
+            new CreateReviewCommand(order.Id, product.Id, 5, "Title", "Content"),
+            CancellationToken.None);
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Code.Should().Be("Review.AlreadyExists");
+        context.ClearTrackedChangesCalled.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task CreateReview_WhenDifferentDbUpdateExceptionOrDifferentConstraintOccurs_RethrowsException()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var (user, _, product, order) = SeedStandardScenario(context);
+        await context.SaveChangesAsync();
+
+        var unrelatedEx = new DbUpdateException(
+            "Other constraint violation",
+            new Exception("duplicate key value violates unique constraint \"IX_Users_Email\""));
+        context.SaveChangesInterceptor = () => throw unrelatedEx;
+
+        var currentUserService = MockUser(user);
+        var handler = new CreateReviewCommandHandler(context, currentUserService.Object);
+
+        var act = () => handler.Handle(
+            new CreateReviewCommand(order.Id, product.Id, 5, "Title", "Content"),
+            CancellationToken.None);
+
+        await act.Should().ThrowAsync<DbUpdateException>()
+            .WithMessage("*Other constraint violation*");
+    }
+
     // --- UpdateMyReviewCommand Tests ---
 
     [Fact]
@@ -365,6 +412,29 @@ public class ReviewCommandHandlerTests
 
         result.IsSuccess.Should().BeFalse();
         result.Error.Code.Should().Be("Review.NotFound");
+    }
+
+    [Fact]
+    public async Task UpdateMyReview_WhenDbUpdateConcurrencyExceptionOccurs_ClearsTrackedChangesAndReturnsConcurrencyConflict()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var (user, _, product, order) = SeedStandardScenario(context);
+        var review = new Review(product.Id, user.Id, order.Id, 3, "Title", "Content");
+        context.Reviews.Add(review);
+        await context.SaveChangesAsync();
+
+        context.SaveChangesInterceptor = () => throw new DbUpdateConcurrencyException();
+
+        var currentUserService = MockUser(user);
+        var handler = new UpdateMyReviewCommandHandler(context, currentUserService.Object);
+
+        var result = await handler.Handle(
+            new UpdateMyReviewCommand(review.Id, 5, "Updated", "Updated"),
+            CancellationToken.None);
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Code.Should().Be("Review.ConcurrencyConflict");
+        context.ClearTrackedChangesCalled.Should().BeTrue();
     }
 
     // --- DeleteMyReviewCommand Tests ---
@@ -454,6 +524,31 @@ public class ReviewCommandHandlerTests
 
         var dbReview = await context.Reviews.FindAsync(review.Id);
         dbReview!.StaffReply.Should().Be("Thank you from staff!");
+    }
+
+    [Fact]
+    public async Task SetReviewReply_WhenDbUpdateConcurrencyExceptionOccurs_ClearsTrackedChangesAndReturnsConcurrencyConflict()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var (customer, _, product, order) = SeedStandardScenario(context, userRole: UserRole.Customer);
+        var staff = new User("staff@example.com", "hash", "Staff Member", UserRole.Staff);
+        context.Users.Add(staff);
+        var review = new Review(product.Id, customer.Id, order.Id, 5, "Title", "Content");
+        context.Reviews.Add(review);
+        await context.SaveChangesAsync();
+
+        context.SaveChangesInterceptor = () => throw new DbUpdateConcurrencyException();
+
+        var currentUserService = MockUser(staff);
+        var handler = new SetReviewReplyCommandHandler(context, currentUserService.Object);
+
+        var result = await handler.Handle(
+            new SetReviewReplyCommand(review.Id, "Staff reply"),
+            CancellationToken.None);
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Code.Should().Be("Review.ConcurrencyConflict");
+        context.ClearTrackedChangesCalled.Should().BeTrue();
     }
 
     [Fact]

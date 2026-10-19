@@ -180,4 +180,59 @@ public class ReviewDomainTests
         review.UpdatedAt.Should().NotBeNull();
         review.UpdatedAt!.Value.Should().BeOnOrAfter(beforeClear);
     }
+
+    [Fact]
+    public void Constructor_WithNullImages_InitializesEmptyList()
+    {
+        var review = new Review(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), 5, "Title", "Content", null);
+        review.Images.Should().NotBeNull();
+        review.Images.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Constructor_WithImagesContainingWhitespaceAndNulls_TrimsAndFiltersEmpty()
+    {
+        var rawImages = new List<string?> { "  https://img.test/1.jpg  ", null, "", "   ", "https://img.test/2.jpg" }!;
+        var review = new Review(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), 5, "Title", "Content", rawImages!);
+
+        review.Images.Should().HaveCount(2);
+        review.Images[0].Should().Be("https://img.test/1.jpg");
+        review.Images[1].Should().Be("https://img.test/2.jpg");
+    }
+
+    [Fact]
+    public void Constructor_WithDuplicateImages_RemovesDuplicatesUsingOrdinalComparisonAndPreservesOrder()
+    {
+        var images = new List<string>
+        {
+            "https://img.test/first.jpg",
+            "https://img.test/second.jpg",
+            "  https://img.test/first.jpg  ",
+            "https://img.test/third.jpg",
+            "https://img.test/second.jpg"
+        };
+
+        var review = new Review(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), 5, "Title", "Content", images);
+
+        review.Images.Should().HaveCount(3);
+        review.Images.Should().ContainInOrder(
+            "https://img.test/first.jpg",
+            "https://img.test/second.jpg",
+            "https://img.test/third.jpg");
+    }
+
+    [Fact]
+    public void Constructor_WithImages_PerformsDefensiveCopy()
+    {
+        var originalList = new List<string> { "https://img.test/1.jpg", "https://img.test/2.jpg" };
+        var review = new Review(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), 5, "Title", "Content", originalList);
+
+        // Mutate original list
+        originalList.Add("https://img.test/3.jpg");
+        originalList[0] = "https://img.test/mutated.jpg";
+
+        review.Images.Should().HaveCount(2);
+        review.Images[0].Should().Be("https://img.test/1.jpg");
+        review.Images[1].Should().Be("https://img.test/2.jpg");
+    }
 }

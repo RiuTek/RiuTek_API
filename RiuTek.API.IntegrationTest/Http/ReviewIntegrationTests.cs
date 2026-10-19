@@ -485,7 +485,59 @@ public class ReviewIntegrationTests : IAsyncLifetime
         publicAfterAdminDelete.Reviews.Items.Should().BeEmpty();
     }
 
-    // 10. Concurrency conflict: concurrent customer update vs staff reply
+    // 10. Concurrency conflict: PostgreSQL concurrency token detects concurrent updates
+    [Fact]
+    public async Task Concurrency_WhenConcurrentModificationsInPostgreSql_ThrowsDbUpdateConcurrencyException()
+    {
+        var (_, user) = await CreateUserClientAsync();
+        var (_, product) = await SeedProductAsync();
+        var order = await SeedOrderAsync(user, product);
+
+        Guid reviewId;
+        using (var setupScope = _fixture.Factory.Services.CreateScope())
+        {
+            var setupDb = setupScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var initialReview = new Review(product.Id, user.Id, order.Id, 4, "Initial Title", "Initial Content");
+            setupDb.Reviews.Add(initialReview);
+            await setupDb.SaveChangesAsync();
+            reviewId = initialReview.Id;
+        }
+
+        // Two independent scopes loading the exact same review at the same version
+        using var scope1 = _fixture.Factory.Services.CreateScope();
+        var db1 = scope1.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        using var scope2 = _fixture.Factory.Services.CreateScope();
+        var db2 = scope2.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        var review1 = await db1.Reviews.FindAsync(reviewId);
+        var review2 = await db2.Reviews.FindAsync(reviewId);
+
+        review1.Should().NotBeNull();
+        review2.Should().NotBeNull();
+        review1!.UpdatedAt.Should().Be(review2!.UpdatedAt);
+
+        // Mutate both in memory
+        review1.UpdateReview(5, "Updated by customer", "New content");
+        review2.SetStaffReply("Updated by staff");
+
+        // Save first context - succeeds and updates UpdatedAt concurrency token in PostgreSQL
+        await db1.SaveChangesAsync();
+
+        // Save second context - must throw DbUpdateConcurrencyException because UpdatedAt in DB changed
+        var save2Act = async () => await db2.SaveChangesAsync();
+        await save2Act.Should().ThrowAsync<DbUpdateConcurrencyException>();
+
+        // Entity in database remains valid from the first commit and not partially mixed
+        using var verifyScope = _fixture.Factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var finalDbReview = await verifyDb.Reviews.FindAsync(reviewId);
+        finalDbReview.Should().NotBeNull();
+        finalDbReview!.Rating.Should().Be(5);
+        finalDbReview.Title.Should().Be("Updated by customer");
+        finalDbReview.StaffReply.Should().BeNull(); // Staff reply was not committed
+    }
+
     [Fact]
     public async Task ConcurrencyConflict_WhenConcurrentCustomerUpdateAndStaffReply_ThrowsConflict()
     {
@@ -498,22 +550,52 @@ public class ReviewIntegrationTests : IAsyncLifetime
         var review = await createRes.Content.ReadFromJsonAsync<MyReviewDto>(JsonOptions);
         var reviewId = review!.Id;
 
-        // Fire 10 rapid concurrent updates from customer and staff
+        // Use TaskCompletionSource to release all concurrent requests simultaneously
+        var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var tasks = new List<Task<HttpResponseMessage>>();
-        for (var i = 0; i < 5; i++)
+
+        for (var i = 0; i < 10; i++)
         {
+            var idx = i;
             var rating = (i % 5) + 1;
-            tasks.Add(custClient.PutAsJsonAsync($"/api/v1/reviews/{reviewId}", new UpdateReviewRequest(rating, $"Update {i}", $"Content {i}")));
-            tasks.Add(staffClient.PutAsJsonAsync($"/api/v1/reviews/{reviewId}/reply", new SetReviewReplyRequest($"Staff reply {i}")));
+            tasks.Add(Task.Run(async () =>
+            {
+                await tcs.Task;
+                return await custClient.PutAsJsonAsync($"/api/v1/reviews/{reviewId}", new UpdateReviewRequest(rating, $"Update {idx}", $"Content {idx}"));
+            }));
+            tasks.Add(Task.Run(async () =>
+            {
+                await tcs.Task;
+                return await staffClient.PutAsJsonAsync($"/api/v1/reviews/{reviewId}/reply", new SetReviewReplyRequest($"Staff reply {idx}"));
+            }));
         }
 
+        // Fire all requests at once
+        tcs.SetResult();
         var responses = await Task.WhenAll(tasks);
 
-        // At least some responses should succeed (200), and any race condition should yield 409 Conflict rather than 500 error
-        var validStatuses = new[] { HttpStatusCode.OK, HttpStatusCode.Conflict };
-        responses.All(r => validStatuses.Contains(r.StatusCode)).Should().BeTrue();
+        var okResponses = responses.Where(r => r.StatusCode == HttpStatusCode.OK).ToList();
+        var conflictResponses = responses.Where(r => r.StatusCode == HttpStatusCode.Conflict).ToList();
 
-        // The entity in the database remains consistent and valid
+        // Must have at least one OK (200)
+        okResponses.Should().NotBeEmpty("at least one concurrent request must succeed");
+
+        // Must have at least one Conflict (409)
+        conflictResponses.Should().NotBeEmpty("at least one concurrent request must conflict");
+
+        // All responses must be either 200 or 409 (no 500 internal server errors)
+        var validStatuses = new[] { HttpStatusCode.OK, HttpStatusCode.Conflict };
+        responses.All(r => validStatuses.Contains(r.StatusCode)).Should().BeTrue("no 500 internal server errors allowed");
+
+        // All 409 Conflict responses must return Review.ConcurrencyConflict error code
+        foreach (var conflictRes in conflictResponses)
+        {
+            var err = await conflictRes.Content.ReadFromJsonAsync<BusinessErrorResponse>(JsonOptions);
+            err.Should().NotBeNull();
+            err!.Code.Should().Be("Review.ConcurrencyConflict");
+        }
+
+        // The entity in the database remains consistent, valid and non-corrupted
         using var scope = _fixture.Factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
         var finalReview = await db.Reviews.FindAsync(reviewId);

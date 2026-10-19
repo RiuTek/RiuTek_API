@@ -135,7 +135,10 @@ public class CreateReviewCommandHandler : IRequestHandler<CreateReviewCommand, R
         {
             await _context.SaveChangesAsync(cancellationToken);
         }
-        catch (DbUpdateException ex) when (_context.IsUniqueViolation(ex))
+        catch (DbUpdateException ex)
+            when (_context.IsUniqueViolation(
+                ex,
+                "IX_Reviews_UserId_ProductId_OrderId"))
         {
             _context.ClearTrackedChanges();
             return Result.Failure<MyReviewDto>(Error.Conflict(
