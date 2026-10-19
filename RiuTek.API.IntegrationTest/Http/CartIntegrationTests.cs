@@ -425,6 +425,9 @@ public class CartIntegrationTests : IAsyncLifetime
         var addMethod = controllerType.GetMethod("AddItem");
         addMethod.Should().NotBeNull();
 
+        var addFromPCBuildMethod = controllerType.GetMethod("AddFromPCBuild");
+        addFromPCBuildMethod.Should().NotBeNull();
+
         var putMethod = controllerType.GetMethod("SetItemQuantity");
         putMethod.Should().NotBeNull();
 

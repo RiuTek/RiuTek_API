@@ -37,6 +37,21 @@ public class CartsController : ApiControllerBase
         return HandleResult(result);
     }
 
+    [HttpPost("from-pc-build/{pcBuildId:guid}")]
+    [ProducesResponseType(typeof(CartDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public async Task<IActionResult> AddFromPCBuild(
+        [FromRoute] Guid pcBuildId,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await Mediator.Send(new AddPCBuildToCartCommand(pcBuildId), cancellationToken);
+        return HandleResult(result);
+    }
+
     [HttpPut("items/{productId:guid}")]
     [ProducesResponseType(typeof(CartDto), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]

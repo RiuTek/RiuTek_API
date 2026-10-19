@@ -35,9 +35,9 @@ public class ActualEndpointMetadataTests
 
             endpoints.Should().NotBeEmpty();
 
-            // Total controller actions: 6 Posts + 6 Comments + 7 Products + 5 Categories + 5 Carts + 4 Auth + 8 Orders + 1 Payments + 6 Users + 3 ProductMedia + 3 ProductImports + 9 Reviews + 6 PCBuilds = 69
+            // Total controller actions: 6 Posts + 6 Comments + 7 Products + 5 Categories + 6 Carts + 4 Auth + 8 Orders + 1 Payments + 6 Users + 3 ProductMedia + 3 ProductImports + 9 Reviews + 6 PCBuilds = 70
             var controllerEndpoints = endpoints.Where(e => e.Metadata.GetMetadata<ControllerActionDescriptor>() != null).ToList();
-            controllerEndpoints.Should().HaveCount(69);
+            controllerEndpoints.Should().HaveCount(70);
 
             // Helper to get action descriptor
             ControllerActionDescriptor GetDescriptor(RouteEndpoint e) => e.Metadata.GetMetadata<ControllerActionDescriptor>()!;
@@ -232,7 +232,7 @@ public class ActualEndpointMetadataTests
                 e.Metadata.GetMetadata<ControllerActionDescriptor>()?.ControllerTypeInfo.AsType() == typeof(CartsController))
                 .ToList();
 
-            cartEndpoints.Should().HaveCount(5);
+            cartEndpoints.Should().HaveCount(6);
 
             // 23. GET api/v1/carts (Authorize) - Action: GetCart
             var getCart = cartEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(CartsController.GetCart) && GetHttpMethods(e).Contains("GET"));
@@ -246,19 +246,25 @@ public class ActualEndpointMetadataTests
             GetFullRoutePattern(addItem!).Should().BeEquivalentTo("api/v1/carts/items");
             AssertAuthorized(addItem!);
 
-            // 25. PUT api/v1/carts/items/{productId:guid} (Authorize) - Action: SetItemQuantity
+            // 25. POST api/v1/carts/from-pc-build/{pcBuildId:guid} (Authorize) - Action: AddFromPCBuild
+            var addFromPCBuild = cartEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(CartsController.AddFromPCBuild) && GetHttpMethods(e).Contains("POST"));
+            addFromPCBuild.Should().NotBeNull();
+            GetFullRoutePattern(addFromPCBuild!).Should().BeEquivalentTo("api/v1/carts/from-pc-build/{pcBuildId:guid}");
+            AssertAuthorized(addFromPCBuild!);
+
+            // 26. PUT api/v1/carts/items/{productId:guid} (Authorize) - Action: SetItemQuantity
             var setItemQuantity = cartEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(CartsController.SetItemQuantity) && GetHttpMethods(e).Contains("PUT"));
             setItemQuantity.Should().NotBeNull();
             GetFullRoutePattern(setItemQuantity!).Should().BeEquivalentTo("api/v1/carts/items/{productId:guid}");
             AssertAuthorized(setItemQuantity!);
 
-            // 26. DELETE api/v1/carts/items/{productId:guid} (Authorize) - Action: RemoveItem
+            // 27. DELETE api/v1/carts/items/{productId:guid} (Authorize) - Action: RemoveItem
             var removeItem = cartEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(CartsController.RemoveItem) && GetHttpMethods(e).Contains("DELETE"));
             removeItem.Should().NotBeNull();
             GetFullRoutePattern(removeItem!).Should().BeEquivalentTo("api/v1/carts/items/{productId:guid}");
             AssertAuthorized(removeItem!);
 
-            // 27. DELETE api/v1/carts/items (Authorize) - Action: ClearCart
+            // 28. DELETE api/v1/carts/items (Authorize) - Action: ClearCart
             var clearCart = cartEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(CartsController.ClearCart) && GetHttpMethods(e).Contains("DELETE"));
             clearCart.Should().NotBeNull();
             GetFullRoutePattern(clearCart!).Should().BeEquivalentTo("api/v1/carts/items");
