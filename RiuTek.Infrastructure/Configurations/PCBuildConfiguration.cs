@@ -25,6 +25,9 @@ public class PCBuildConfiguration : IEntityTypeConfiguration<PCBuild>
         builder.Property(b => b.AiRationale)
             .HasMaxLength(2000);
 
+        builder.Property(b => b.UpdatedAt)
+            .IsConcurrencyToken();
+
         builder.HasOne(b => b.User)
             .WithMany(u => u.PCBuilds)
             .HasForeignKey(b => b.UserId)
@@ -34,6 +37,12 @@ public class PCBuildConfiguration : IEntityTypeConfiguration<PCBuild>
             .WithOne(i => i.PCBuild)
             .HasForeignKey(i => i.PCBuildId)
             .OnDelete(DeleteBehavior.Cascade);
+
+        builder.Navigation(b => b.Items)
+            .UsePropertyAccessMode(PropertyAccessMode.Field);
+
+        // Stable listing index for Customer mine queries
+        builder.HasIndex(b => new { b.UserId, b.CreatedAt, b.Id });
     }
 }
 
@@ -41,7 +50,11 @@ public class PCBuildItemConfiguration : IEntityTypeConfiguration<PCBuildItem>
 {
     public void Configure(EntityTypeBuilder<PCBuildItem> builder)
     {
-        builder.ToTable("PCBuildItems");
+        builder.ToTable("PCBuildItems", t =>
+        {
+            t.HasCheckConstraint("CK_PCBuildItems_Quantity_Positive", "\"Quantity\" > 0");
+            t.HasCheckConstraint("CK_PCBuildItems_UnitPrice_NonNegative", "\"UnitPrice\" >= 0");
+        });
 
         builder.HasKey(i => i.Id);
 
@@ -52,5 +65,9 @@ public class PCBuildItemConfiguration : IEntityTypeConfiguration<PCBuildItem>
             .WithMany(p => p.PCBuildItems)
             .HasForeignKey(i => i.ProductId)
             .OnDelete(DeleteBehavior.Restrict);
+
+        // Unique product per build
+        builder.HasIndex(i => new { i.PCBuildId, i.ProductId })
+            .IsUnique();
     }
 }

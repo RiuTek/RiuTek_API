@@ -43,6 +43,8 @@ public abstract class CatalogIntegrationTestBase : IAsyncLifetime
         try
         {
             // Delete dependent records first, then Products, then Categories to respect foreign keys
+            await dbContext.PCBuildItems.ExecuteDeleteAsync();
+            await dbContext.PCBuilds.ExecuteDeleteAsync();
             await dbContext.StockMovements.ExecuteDeleteAsync();
             await dbContext.Products.ExecuteDeleteAsync();
             await dbContext.Categories.ExecuteDeleteAsync();

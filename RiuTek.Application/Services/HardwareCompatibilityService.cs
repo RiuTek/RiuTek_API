@@ -10,27 +10,43 @@ public class HardwareCompatibilityService : IHardwareCompatibilityService
 {
     public CompatibilityCheckResultDto ValidateComponents(IReadOnlyList<Product> components)
     {
-        var specs = components
-            .Where(c => c.Specifications != null)
-            .Select(c => c.Specifications)
+        return ValidateComponentSelections(components.Select(c => new ComponentSelection(c, 1)).ToList());
+    }
+
+    public CompatibilityCheckResultDto ValidateSpecifications(IReadOnlyList<ComponentSpecification> specifications)
+    {
+        return ValidateSpecificationSelections(specifications.Select(s => new SpecificationSelection(s, 1)).ToList());
+    }
+
+    public CompatibilityCheckResultDto ValidateComponentSelections(IReadOnlyList<ComponentSelection> selections)
+    {
+        var specSelections = selections
+            .Where(s => s.Product.Specifications != null)
+            .Select(s => new SpecificationSelection(s.Product.Specifications!, s.Quantity))
             .ToList();
 
-        return ValidateSpecifications(specs);
+        return ValidateSpecificationSelections(specSelections);
     }
-//test
-    public CompatibilityCheckResultDto ValidateSpecifications(IReadOnlyList<ComponentSpecification> specifications)
+
+    public CompatibilityCheckResultDto ValidateSpecificationSelections(IReadOnlyList<SpecificationSelection> selections)
     {
         var issues = new List<CompatibilityIssueDto>();
 
         // Extract individual component specifications (if present)
-        var cpu = specifications.OfType<CpuSpecification>().FirstOrDefault();
-        var mobo = specifications.OfType<MotherboardSpecification>().FirstOrDefault();
-        var ramList = specifications.OfType<RamSpecification>().ToList();
-        var gpu = specifications.OfType<GpuSpecification>().FirstOrDefault();
-        var psu = specifications.OfType<PsuSpecification>().FirstOrDefault();
-        var pcCase = specifications.OfType<CaseSpecification>().FirstOrDefault();
-        var cooler = specifications.OfType<CoolerSpecification>().FirstOrDefault();
-        var storageList = specifications.OfType<StorageSpecification>().ToList();
+        var cpu = selections.Select(s => s.Specification).OfType<CpuSpecification>().FirstOrDefault();
+        var mobo = selections.Select(s => s.Specification).OfType<MotherboardSpecification>().FirstOrDefault();
+        var ramList = selections
+            .Where(s => s.Specification is RamSpecification)
+            .Select(s => (Spec: (RamSpecification)s.Specification, s.Quantity))
+            .ToList();
+        var gpu = selections.Select(s => s.Specification).OfType<GpuSpecification>().FirstOrDefault();
+        var psu = selections.Select(s => s.Specification).OfType<PsuSpecification>().FirstOrDefault();
+        var pcCase = selections.Select(s => s.Specification).OfType<CaseSpecification>().FirstOrDefault();
+        var cooler = selections.Select(s => s.Specification).OfType<CoolerSpecification>().FirstOrDefault();
+        var storageList = selections
+            .Where(s => s.Specification is StorageSpecification)
+            .Select(s => (Spec: (StorageSpecification)s.Specification, s.Quantity))
+            .ToList();
 
         // -------------------------------------------------------------
         // RULE 1: CPU & Motherboard Socket Compatibility
@@ -54,10 +70,10 @@ public class HardwareCompatibilityService : IHardwareCompatibilityService
         // -------------------------------------------------------------
         if (ramList.Count != 0 && mobo != null)
         {
-            var totalRamModules = ramList.Sum(r => r.ModuleCount);
-            var totalRamCapacity = ramList.Sum(r => r.CapacityGb);
+            var totalRamModules = ramList.Sum(r => r.Spec.ModuleCount * r.Quantity);
+            var totalRamCapacity = ramList.Sum(r => r.Spec.CapacityGb * r.Quantity);
 
-            foreach (var ram in ramList)
+            foreach (var (ram, _) in ramList)
             {
                 if (ram.MemoryType != mobo.MemoryType)
                 {
@@ -265,8 +281,8 @@ public class HardwareCompatibilityService : IHardwareCompatibilityService
         CpuSpecification? cpu,
         GpuSpecification? gpu,
         MotherboardSpecification? mobo,
-        List<RamSpecification> ramList,
-        List<StorageSpecification> storageList)
+        List<(RamSpecification Spec, int Quantity)> ramList,
+        List<(StorageSpecification Spec, int Quantity)> storageList)
     {
         var total = 0;
 
@@ -291,14 +307,15 @@ public class HardwareCompatibilityService : IHardwareCompatibilityService
         // RAM modules (~5W per module)
         if (ramList.Count != 0)
         {
-            var totalModules = ramList.Sum(r => r.ModuleCount);
+            var totalModules = ramList.Sum(r => r.Spec.ModuleCount * r.Quantity);
             total += totalModules * 5;
         }
 
         // Storage drives (~5W for M.2 / SATA SSD, ~10W for HDD)
         foreach (var storage in storageList)
         {
-            total += storage.StorageType is StorageType.HDD_3_5 or StorageType.HDD_2_5 ? 10 : 5;
+            var unitWattage = storage.Spec.StorageType is StorageType.HDD_3_5 or StorageType.HDD_2_5 ? 10 : 5;
+            total += unitWattage * storage.Quantity;
         }
 
         // Fans, RGB, Pump allowance

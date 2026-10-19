@@ -16,7 +16,7 @@ Buying PC parts requires more than adding products to a cart: sockets, memory ge
 - Customer profile and address management with ownership protection and deterministic default-address rules.
 - Product and category management for nine component types: CPU, motherboard, GPU, RAM, storage, PSU, case, cooler, and accessory.
 - Polymorphic JSON hardware specifications, filtering, search, sorting, and deterministic pagination.
-- PC Builder aggregate and rule-based hardware compatibility checks.
+- PC Builder: Guest preview without persistence (`POST /api/v1/pc-builds/preview`), Customer saved-build CRUD (`/api/v1/pc-builds`), strict DB ownership verification, clear separation between hardware compatibility (`IsCompatible`, issues) and commercial availability (`CanPurchase`, `CanPurchaseAll`), and quantity-aware RAM/storage calculation. Atomic build-to-cart, Buy Now, and AI Advisor are scheduled for future phases.
 - Authenticated persistent cart with version-based conflict detection and automatic cleanup of inactive carts after 30 days.
 - Checkout quotation, idempotent order creation, stock reservation, customer order history, Staff/Admin order management, COD fulfillment, Stripe Checkout sandbox integration, and signed webhook processing.
 - Posts and reusable comments for products and posts.

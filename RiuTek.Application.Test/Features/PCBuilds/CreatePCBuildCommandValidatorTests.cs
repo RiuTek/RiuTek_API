@@ -1,4 +1,5 @@
 using FluentAssertions;
+using RiuTek.Application.DTOs;
 using RiuTek.Application.Features.PCBuilds.Commands;
 
 namespace RiuTek.Application.Test.Features.PCBuilds;
@@ -14,8 +15,7 @@ public class CreatePCBuildCommandValidatorTests
         var command = new CreatePCBuildCommand(
             Name: "",
             Description: null,
-            UserId: null,
-            Items: [new PCBuildItemRequest(Guid.NewGuid(), 1)]
+            Items: [new PCBuildItemInputDto(Guid.NewGuid(), 1)]
         );
 
         // Act
@@ -33,7 +33,6 @@ public class CreatePCBuildCommandValidatorTests
         var command = new CreatePCBuildCommand(
             Name: "Gaming PC 2026",
             Description: null,
-            UserId: null,
             Items: []
         );
 
@@ -52,8 +51,7 @@ public class CreatePCBuildCommandValidatorTests
         var command = new CreatePCBuildCommand(
             Name: "Gaming PC 2026",
             Description: null,
-            UserId: null,
-            Items: [new PCBuildItemRequest(Guid.NewGuid(), 0)]
+            Items: [new PCBuildItemInputDto(Guid.NewGuid(), 0)]
         );
 
         // Act
@@ -71,11 +69,10 @@ public class CreatePCBuildCommandValidatorTests
         var command = new CreatePCBuildCommand(
             Name: "Ryzen 7 + RTX 4070 PC",
             Description: "Cấu hình đồ họa & chơi game 2K",
-            UserId: Guid.NewGuid(),
             Items:
             [
-                new PCBuildItemRequest(Guid.NewGuid(), 1),
-                new PCBuildItemRequest(Guid.NewGuid(), 2)
+                new PCBuildItemInputDto(Guid.NewGuid(), 1),
+                new PCBuildItemInputDto(Guid.NewGuid(), 2)
             ]
         );
 

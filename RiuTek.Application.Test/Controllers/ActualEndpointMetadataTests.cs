@@ -35,9 +35,9 @@ public class ActualEndpointMetadataTests
 
             endpoints.Should().NotBeEmpty();
 
-            // Total controller actions: 6 Posts + 6 Comments + 7 Products + 5 Categories + 5 Carts + 4 Auth + 8 Orders + 1 Payments + 6 Users + 3 ProductMedia + 3 ProductImports + 9 Reviews = 63
+            // Total controller actions: 6 Posts + 6 Comments + 7 Products + 5 Categories + 5 Carts + 4 Auth + 8 Orders + 1 Payments + 6 Users + 3 ProductMedia + 3 ProductImports + 9 Reviews + 6 PCBuilds = 69
             var controllerEndpoints = endpoints.Where(e => e.Metadata.GetMetadata<ControllerActionDescriptor>() != null).ToList();
-            controllerEndpoints.Should().HaveCount(63);
+            controllerEndpoints.Should().HaveCount(69);
 
             // Helper to get action descriptor
             ControllerActionDescriptor GetDescriptor(RouteEndpoint e) => e.Metadata.GetMetadata<ControllerActionDescriptor>()!;
@@ -533,6 +533,52 @@ public class ActualEndpointMetadataTests
             deleteManagedReview.Should().NotBeNull();
             GetFullRoutePattern(deleteManagedReview!).Should().BeEquivalentTo("api/v1/reviews/admin/{id:guid}");
             AssertAuthorizePolicy(deleteManagedReview!, Policies.ContentManager);
+
+            #endregion
+
+            #region PCBuilds Endpoints (6)
+
+            var pcBuildEndpoints = endpoints.Where(e =>
+                e.Metadata.GetMetadata<ControllerActionDescriptor>()?.ControllerTypeInfo.AsType() == typeof(PCBuildsController))
+                .ToList();
+
+            pcBuildEndpoints.Should().HaveCount(6);
+
+            // 1. POST api/v1/pc-builds/preview (AllowAnonymous) - Action: PreviewBuild
+            var previewBuild = pcBuildEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(PCBuildsController.PreviewBuild) && GetHttpMethods(e).Contains("POST"));
+            previewBuild.Should().NotBeNull();
+            GetFullRoutePattern(previewBuild!).Should().BeEquivalentTo("api/v1/pc-builds/preview");
+            AssertPublicEndpoint(previewBuild!);
+
+            // 2. POST api/v1/pc-builds (Authorize) - Action: CreateBuild
+            var createBuild = pcBuildEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(PCBuildsController.CreateBuild) && GetHttpMethods(e).Contains("POST"));
+            createBuild.Should().NotBeNull();
+            GetFullRoutePattern(createBuild!).Should().BeEquivalentTo("api/v1/pc-builds");
+            AssertAuthorized(createBuild!);
+
+            // 3. GET api/v1/pc-builds/mine (Authorize) - Action: GetMyBuilds
+            var getMyBuilds = pcBuildEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(PCBuildsController.GetMyBuilds) && GetHttpMethods(e).Contains("GET"));
+            getMyBuilds.Should().NotBeNull();
+            GetFullRoutePattern(getMyBuilds!).Should().BeEquivalentTo("api/v1/pc-builds/mine");
+            AssertAuthorized(getMyBuilds!);
+
+            // 4. GET api/v1/pc-builds/{id:guid} (Authorize) - Action: GetMyBuildById
+            var getMyBuildById = pcBuildEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(PCBuildsController.GetMyBuildById) && GetHttpMethods(e).Contains("GET"));
+            getMyBuildById.Should().NotBeNull();
+            GetFullRoutePattern(getMyBuildById!).Should().BeEquivalentTo("api/v1/pc-builds/{id:guid}");
+            AssertAuthorized(getMyBuildById!);
+
+            // 5. PUT api/v1/pc-builds/{id:guid} (Authorize) - Action: UpdateMyBuild
+            var updateMyBuild = pcBuildEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(PCBuildsController.UpdateMyBuild) && GetHttpMethods(e).Contains("PUT"));
+            updateMyBuild.Should().NotBeNull();
+            GetFullRoutePattern(updateMyBuild!).Should().BeEquivalentTo("api/v1/pc-builds/{id:guid}");
+            AssertAuthorized(updateMyBuild!);
+
+            // 6. DELETE api/v1/pc-builds/{id:guid} (Authorize) - Action: DeleteMyBuild
+            var deleteMyBuild = pcBuildEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(PCBuildsController.DeleteMyBuild) && GetHttpMethods(e).Contains("DELETE"));
+            deleteMyBuild.Should().NotBeNull();
+            GetFullRoutePattern(deleteMyBuild!).Should().BeEquivalentTo("api/v1/pc-builds/{id:guid}");
+            AssertAuthorized(deleteMyBuild!);
 
             #endregion
         }

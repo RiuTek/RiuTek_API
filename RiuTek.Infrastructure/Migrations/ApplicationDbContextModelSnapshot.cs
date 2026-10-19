@@ -355,6 +355,7 @@ namespace RiuTek.Infrastructure.Migrations
                         .HasColumnType("numeric(18,2)");
 
                     b.Property<DateTime?>("UpdatedAt")
+                        .IsConcurrencyToken()
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<Guid?>("UserId")
@@ -362,7 +363,7 @@ namespace RiuTek.Infrastructure.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("UserId");
+                    b.HasIndex("UserId", "CreatedAt", "Id");
 
                     b.ToTable("PCBuilds", (string)null);
                 });
@@ -397,11 +398,17 @@ namespace RiuTek.Infrastructure.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("PCBuildId");
-
                     b.HasIndex("ProductId");
 
-                    b.ToTable("PCBuildItems", (string)null);
+                    b.HasIndex("PCBuildId", "ProductId")
+                        .IsUnique();
+
+                    b.ToTable("PCBuildItems", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_PCBuildItems_Quantity_Positive", "\"Quantity\" > 0");
+
+                            t.HasCheckConstraint("CK_PCBuildItems_UnitPrice_NonNegative", "\"UnitPrice\" >= 0");
+                        });
                 });
 
             modelBuilder.Entity("RiuTek.Core.Entities.PaymentAttempt", b =>
