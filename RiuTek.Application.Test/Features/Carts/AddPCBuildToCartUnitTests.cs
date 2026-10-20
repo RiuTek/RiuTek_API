@@ -99,12 +99,14 @@ public class AddPCBuildToCartUnitTests
         result.Error.Code.Should().Be("User.AccountInactive");
     }
 
-    [Fact]
-    public async Task AddPCBuildToCart_WhenAdminOrStaff_ReturnsForbidden()
+    [Theory]
+    [InlineData(UserRole.Admin)]
+    [InlineData(UserRole.Staff)]
+    public async Task AddPCBuildToCart_WhenAdminOrStaff_ReturnsForbidden(UserRole role)
     {
         await using var context = TestDbContextFactory.CreateInMemoryDbContext();
-        var (staff, build, _, _, _) = await SeedStandardBuildScenarioAsync(context, role: UserRole.Staff);
-        var authMock = MockUser(staff.Id);
+        var (user, build, _, _, _) = await SeedStandardBuildScenarioAsync(context, role: role);
+        var authMock = MockUser(user.Id);
 
         var handler = new AddPCBuildToCartCommandHandler(context, authMock.Object);
         var result = await handler.Handle(new AddPCBuildToCartCommand(build.Id), CancellationToken.None);
@@ -112,6 +114,7 @@ public class AddPCBuildToCartUnitTests
         result.IsFailure.Should().BeTrue();
         result.Error.Type.Should().Be(ErrorType.Forbidden);
         result.Error.Code.Should().Be("PCBuild.Forbidden");
+        (await context.Carts.CountAsync()).Should().Be(0);
     }
 
     [Fact]

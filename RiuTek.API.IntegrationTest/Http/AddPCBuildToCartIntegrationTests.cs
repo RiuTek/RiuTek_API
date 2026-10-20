@@ -231,17 +231,26 @@ public class AddPCBuildToCartIntegrationTests : IAsyncLifetime
         cartInDb.Items.First().Quantity.Should().Be(1);
     }
 
-    // 5. Concurrent requests trên existing cart: một mutation thắng, request còn lại 409; không lost update
+    // 5. Concurrent requests trên existing cart: chứng minh no lost update qua optimistic concurrency
     [Fact]
     public async Task Scenario05_ConcurrentRequestsOnExistingCart_OptimisticConcurrencyPreventsLostUpdates()
     {
         var (client, user) = await CreateCustomerClientAsync();
         var cpu = await SeedProductAsync(ComponentType.Cpu, stock: 50);
 
-        // Pre-create cart
+        // Pre-create cart with 1 CPU
         await client.PostAsJsonAsync("/api/v1/carts/items", new AddCartItemRequest(cpu.Id, 1));
 
+        int initialVersion;
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var initialCart = await db.Carts.FirstAsync(c => c.UserId == user.Id);
+            initialVersion = initialCart.Version;
+        }
+
         var createBuildRes = await client.PostAsJsonAsync("/api/v1/pc-builds", new CreatePCBuildRequest("Rig", null, [new(cpu.Id, 1)]));
+        createBuildRes.StatusCode.Should().Be(HttpStatusCode.Created);
         var build = await createBuildRes.Content.ReadFromJsonAsync<MyPCBuildDto>(JsonOptions);
 
         // Fire 2 concurrent requests
@@ -249,13 +258,45 @@ public class AddPCBuildToCartIntegrationTests : IAsyncLifetime
         var task2 = client.PostAsync($"/api/v1/carts/from-pc-build/{build.Id}", null);
 
         var responses = await Task.WhenAll(task1, task2);
-        var statusCodes = responses.Select(r => r.StatusCode).ToList();
 
-        // One must succeed (200), and either the other succeeds or fails with 409 (ConcurrencyConflict)
-        statusCodes.Should().Contain(HttpStatusCode.OK);
+        // Mọi status chỉ thuộc {200, 409}; 400/404/500 đều fail
+        var allowedStatuses = new[] { HttpStatusCode.OK, HttpStatusCode.Conflict };
+        foreach (var res in responses)
+        {
+            allowedStatuses.Should().Contain(res.StatusCode, "mọi status chỉ được thuộc {200, 409}");
+            if (res.StatusCode == HttpStatusCode.Conflict)
+            {
+                var err = await res.Content.ReadFromJsonAsync<BusinessErrorResponse>(JsonOptions);
+                err.Should().NotBeNull();
+                err!.Code.Should().Be("Cart.ConcurrencyConflict");
+            }
+        }
+
+        // Số response 200 là 1 (Outcome A - overlap) hoặc 2 (Outcome B - scheduler tuần tự hóa)
+        var successCount = responses.Count(r => r.StatusCode == HttpStatusCode.OK);
+        successCount.Should().BeInRange(1, 2);
+
+        // Reload Cart bằng scope/DbContext mới
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var userCarts = await db.Carts.Include(c => c.Items).Where(c => c.UserId == user.Id).ToListAsync();
+            userCarts.Should().HaveCount(1, "đúng một Cart của User");
+
+            var cartInDb = userCarts[0];
+            cartInDb.Items.Should().HaveCount(1, "không có duplicate CartItem");
+            cartInDb.Items.First().ProductId.Should().Be(cpu.Id);
+
+            // Final quantity phải bằng initialQuantity (1) + successfulRequestCount * buildQuantity (1)
+            var expectedFinalQuantity = 1 + successCount * 1;
+            cartInDb.Items.First().Quantity.Should().Be(expectedFinalQuantity);
+
+            // Cart version persisted phải phản ánh mutation domain
+            cartInDb.Version.Should().Be(initialVersion + successCount * build.Items.Count);
+        }
     }
 
-    // 6. Concurrent first-cart creation: một success, một 409; chỉ một Cart/User
+    // 6. Concurrent first-cart creation: unique index IX_Carts_UserId đảm bảo chỉ một Cart/User và không lost update
     [Fact]
     public async Task Scenario06_ConcurrentFirstCartCreation_UniqueIndexGuaranteesSingleCart()
     {
@@ -263,6 +304,7 @@ public class AddPCBuildToCartIntegrationTests : IAsyncLifetime
         var cpu = await SeedProductAsync(ComponentType.Cpu, stock: 50);
 
         var createBuildRes = await client.PostAsJsonAsync("/api/v1/pc-builds", new CreatePCBuildRequest("Rig", null, [new(cpu.Id, 1)]));
+        createBuildRes.StatusCode.Should().Be(HttpStatusCode.Created);
         var build = await createBuildRes.Content.ReadFromJsonAsync<MyPCBuildDto>(JsonOptions);
 
         // Fire 2 concurrent first-cart creations
@@ -270,14 +312,43 @@ public class AddPCBuildToCartIntegrationTests : IAsyncLifetime
         var task2 = client.PostAsync($"/api/v1/carts/from-pc-build/{build.Id}", null);
 
         var responses = await Task.WhenAll(task1, task2);
-        var statusCodes = responses.Select(r => r.StatusCode).ToList();
 
-        statusCodes.Should().Contain(HttpStatusCode.OK);
+        // Mọi status chỉ {200, 409}
+        var allowedStatuses = new[] { HttpStatusCode.OK, HttpStatusCode.Conflict };
+        var allowedConflictCodes = new[] { "Cart.DuplicateCartCreation", "Cart.ConcurrencyConflict" };
+
+        foreach (var res in responses)
+        {
+            allowedStatuses.Should().Contain(res.StatusCode, "mọi status chỉ được thuộc {200, 409}");
+            if (res.StatusCode == HttpStatusCode.Conflict)
+            {
+                var err = await res.Content.ReadFromJsonAsync<BusinessErrorResponse>(JsonOptions);
+                err.Should().NotBeNull();
+                allowedConflictCodes.Should().Contain(err!.Code);
+            }
+        }
+
+        // 1 hoặc 2 success
+        var successCount = responses.Count(r => r.StatusCode == HttpStatusCode.OK);
+        successCount.Should().BeInRange(1, 2);
 
         // Verify in PostgreSQL: exactly 1 cart created for user
-        using var scope = _fixture.Factory.Services.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
-        (await db.Carts.CountAsync(c => c.UserId == user.Id)).Should().Be(1);
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var userCarts = await db.Carts.Include(c => c.Items).Where(c => c.UserId == user.Id).ToListAsync();
+            userCarts.Should().HaveCount(1, "đúng một Cart của User");
+
+            var cartInDb = userCarts[0];
+            cartInDb.Items.Should().HaveCount(1, "chính xác một CartItem cho Product");
+            cartInDb.Items.First().ProductId.Should().Be(cpu.Id);
+
+            // Final quantity bằng số request thành công
+            cartInDb.Items.First().Quantity.Should().Be(successCount * 1);
+
+            // Persisted version: ctor (1) + successCount * build.Items.Count
+            cartInDb.Version.Should().Be(1 + successCount * build.Items.Count);
+        }
     }
 
     // 7. Direct add-product endpoint cũ vẫn hoạt động
@@ -410,6 +481,134 @@ public class AddPCBuildToCartIntegrationTests : IAsyncLifetime
             var productInDb = await db.Products.FirstAsync(p => p.Id == cpu.Id);
             productInDb.StockQuantity.Should().Be(initialStock - 1);
             (await db.StockMovements.CountAsync()).Should().Be(1);
+        }
+    }
+
+    // 10. Resulting quantity vượt 99 -> 400 Bad Request (Cart.MaxQuantityExceeded)
+    [Fact]
+    public async Task Scenario10_AddSavedBuildToCart_WhenResultingQuantityExceeds99_Returns400AndPreservesCart()
+    {
+        var (client, user) = await CreateCustomerClientAsync();
+        // Live stock >= 100 so error is due to cart limit, not stock
+        var ram = await SeedProductAsync(ComponentType.Ram, stock: 150);
+
+        // Pre-create cart with quantity 98
+        Guid cartId;
+        int initialVersion;
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var cart = new Cart(user.Id);
+            cart.AddItem(ram.Id, 98);
+            db.Carts.Add(cart);
+            await db.SaveChangesAsync();
+            cartId = cart.Id;
+            initialVersion = cart.Version;
+        }
+
+        // Build requests quantity 2 for same product (resulting: 98 + 2 = 100 > 99)
+        var createBuildRes = await client.PostAsJsonAsync("/api/v1/pc-builds", new CreatePCBuildRequest(
+            "Over-limit Rig",
+            null,
+            [new(ram.Id, 2)]));
+        createBuildRes.StatusCode.Should().Be(HttpStatusCode.Created);
+        var build = await createBuildRes.Content.ReadFromJsonAsync<MyPCBuildDto>(JsonOptions);
+
+        // Attempt add to cart
+        var response = await client.PostAsync($"/api/v1/carts/from-pc-build/{build!.Id}", null);
+        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+
+        var err = await response.Content.ReadFromJsonAsync<BusinessErrorResponse>(JsonOptions);
+        err!.Code.Should().Be("Cart.MaxQuantityExceeded");
+
+        // Reload DB: quantity is still 98, version unchanged
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var cartInDb = await db.Carts.Include(c => c.Items).FirstAsync(c => c.Id == cartId);
+            cartInDb.Version.Should().Be(initialVersion);
+            cartInDb.Items.Should().HaveCount(1);
+            cartInDb.Items.First().Quantity.Should().Be(98);
+        }
+    }
+
+    // 11. Resulting distinct Products vượt 50 -> 400 Bad Request (Cart.MaxItemsExceeded)
+    [Fact]
+    public async Task Scenario11_AddSavedBuildToCart_WhenResultingDistinctProductsExceed50_Returns400AndPreservesCart()
+    {
+        var (client, user) = await CreateCustomerClientAsync();
+
+        var cartProductIds = new List<Guid>(49);
+        Product buildCpu;
+        Product buildMobo;
+
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var catRam = new Category("RAM Cat", $"cat-ram-{Guid.NewGuid():N}", ComponentType.Ram);
+            var catCpu = new Category("CPU Cat", $"cat-cpu-{Guid.NewGuid():N}", ComponentType.Cpu);
+            var catMobo = new Category("Mobo Cat", $"cat-mobo-{Guid.NewGuid():N}", ComponentType.Motherboard);
+            db.Categories.AddRange(catRam, catCpu, catMobo);
+            await db.SaveChangesAsync();
+
+            // 49 distinct RAM products
+            for (var i = 1; i <= 49; i++)
+            {
+                var suffix = Guid.NewGuid().ToString("N")[..8];
+                var p = new Product(catRam.Id, $"RAM {i} {suffix}", $"ram-{i}-{suffix}", $"SKU-R-{i}-{suffix}", "Brand", 500_000m, 10, "ram.png", ComponentType.Ram, new RamSpecification { MemoryType = RamType.DDR5 });
+                db.Products.Add(p);
+                cartProductIds.Add(p.Id);
+            }
+
+            // 2 distinct build products (CPU and Mobo)
+            var cpuSuffix = Guid.NewGuid().ToString("N")[..8];
+            buildCpu = new Product(catCpu.Id, $"CPU {cpuSuffix}", $"cpu-{cpuSuffix}", $"SKU-C-{cpuSuffix}", "Brand", 5_000_000m, 10, "cpu.png", ComponentType.Cpu, new CpuSpecification { Socket = CpuSocket.LGA1700 });
+            var moboSuffix = Guid.NewGuid().ToString("N")[..8];
+            buildMobo = new Product(catMobo.Id, $"Mobo {moboSuffix}", $"mobo-{moboSuffix}", $"SKU-M-{moboSuffix}", "Brand", 3_000_000m, 10, "mobo.png", ComponentType.Motherboard, new MotherboardSpecification { Socket = CpuSocket.LGA1700 });
+            db.Products.AddRange(buildCpu, buildMobo);
+
+            await db.SaveChangesAsync();
+        }
+
+        // Pre-create cart in DB with 49 distinct items
+        Guid cartId;
+        int initialVersion;
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var cart = new Cart(user.Id);
+            foreach (var pid in cartProductIds)
+            {
+                cart.AddItem(pid, 1);
+            }
+            db.Carts.Add(cart);
+            await db.SaveChangesAsync();
+            cartId = cart.Id;
+            initialVersion = cart.Version;
+        }
+
+        // Create saved build containing 2 items (CPU + Mobo)
+        var createBuildRes = await client.PostAsJsonAsync("/api/v1/pc-builds", new CreatePCBuildRequest(
+            "Distinct Limit Rig",
+            null,
+            [new(buildCpu.Id, 1), new(buildMobo.Id, 1)]));
+        createBuildRes.StatusCode.Should().Be(HttpStatusCode.Created);
+        var build = await createBuildRes.Content.ReadFromJsonAsync<MyPCBuildDto>(JsonOptions);
+
+        // Attempt add build to cart -> total distinct products would be 49 + 2 = 51 > 50
+        var response = await client.PostAsync($"/api/v1/carts/from-pc-build/{build!.Id}", null);
+        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+
+        var err = await response.Content.ReadFromJsonAsync<BusinessErrorResponse>(JsonOptions);
+        err!.Code.Should().Be("Cart.MaxItemsExceeded");
+
+        // Reload DB: still exactly 49 items, version unchanged
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var cartInDb = await db.Carts.Include(c => c.Items).FirstAsync(c => c.Id == cartId);
+            cartInDb.Version.Should().Be(initialVersion);
+            cartInDb.Items.Should().HaveCount(49);
         }
     }
 }
