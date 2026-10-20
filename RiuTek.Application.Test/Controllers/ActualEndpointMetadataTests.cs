@@ -35,9 +35,9 @@ public class ActualEndpointMetadataTests
 
             endpoints.Should().NotBeEmpty();
 
-            // Total controller actions: 6 Posts + 6 Comments + 7 Products + 5 Categories + 6 Carts + 4 Auth + 8 Orders + 1 Payments + 6 Users + 3 ProductMedia + 3 ProductImports + 9 Reviews + 6 PCBuilds = 70
+            // Total controller actions: 6 Posts + 6 Comments + 7 Products + 5 Categories + 6 Carts + 4 Auth + 9 Orders + 1 Payments + 6 Users + 3 ProductMedia + 3 ProductImports + 9 Reviews + 6 PCBuilds = 71
             var controllerEndpoints = endpoints.Where(e => e.Metadata.GetMetadata<ControllerActionDescriptor>() != null).ToList();
-            controllerEndpoints.Should().HaveCount(70);
+            controllerEndpoints.Should().HaveCount(71);
 
             // Helper to get action descriptor
             ControllerActionDescriptor GetDescriptor(RouteEndpoint e) => e.Metadata.GetMetadata<ControllerActionDescriptor>()!;
@@ -312,7 +312,7 @@ public class ActualEndpointMetadataTests
                 e.Metadata.GetMetadata<ControllerActionDescriptor>()?.ControllerTypeInfo.AsType() == typeof(OrdersController))
                 .ToList();
 
-            orderEndpoints.Should().HaveCount(8);
+            orderEndpoints.Should().HaveCount(9);
 
             var getManagedOrdersEndpoint = orderEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(OrdersController.GetManagedOrders) && GetHttpMethods(e).Contains("GET"));
             getManagedOrdersEndpoint.Should().NotBeNull();
@@ -357,6 +357,12 @@ public class ActualEndpointMetadataTests
             checkoutEndpoint.Should().NotBeNull();
             GetFullRoutePattern(checkoutEndpoint!).Should().BeEquivalentTo("api/v1/orders/checkout");
             AssertAuthorized(checkoutEndpoint!);
+
+            // 36. POST api/v1/orders/buy-now/product/{productId:guid} ([Authorize]) - Action: BuyNowProduct
+            var buyNowProductEndpoint = orderEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(OrdersController.BuyNowProduct) && GetHttpMethods(e).Contains("POST"));
+            buyNowProductEndpoint.Should().NotBeNull();
+            GetFullRoutePattern(buyNowProductEndpoint!).Should().BeEquivalentTo("api/v1/orders/buy-now/product/{productId:guid}");
+            AssertAuthorized(buyNowProductEndpoint!);
 
             #endregion
 

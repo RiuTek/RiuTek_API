@@ -108,6 +108,26 @@ public class OrdersControllerContractTests : IDisposable
         attrs.Should().Contain(a => a.StatusCode == StatusCodes.Status404NotFound);
     }
 
+    [Fact]
+    public void BuyNowProduct_HasCorrectHttpPostAttributeAndProducesResponseTypeAttributes()
+    {
+        var method = typeof(OrdersController).GetMethod(nameof(OrdersController.BuyNowProduct));
+        method.Should().NotBeNull();
+
+        var httpPostAttr = method!.GetCustomAttribute<HttpPostAttribute>();
+        httpPostAttr.Should().NotBeNull();
+        httpPostAttr!.Template.Should().Be("buy-now/product/{productId:guid}");
+
+        var attrs = method.GetCustomAttributes<ProducesResponseTypeAttribute>().ToList();
+        attrs.Should().Contain(a => a.StatusCode == StatusCodes.Status201Created && a.Type == typeof(CheckoutOrderDto));
+        attrs.Should().Contain(a => a.StatusCode == StatusCodes.Status400BadRequest);
+        attrs.Should().Contain(a => a.StatusCode == StatusCodes.Status401Unauthorized);
+        attrs.Should().Contain(a => a.StatusCode == StatusCodes.Status403Forbidden);
+        attrs.Should().Contain(a => a.StatusCode == StatusCodes.Status404NotFound);
+        attrs.Should().Contain(a => a.StatusCode == StatusCodes.Status409Conflict);
+        attrs.Should().Contain(a => a.StatusCode == StatusCodes.Status503ServiceUnavailable);
+    }
+
     #endregion
 
     #region Action Delegation to Mediator Tests

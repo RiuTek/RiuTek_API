@@ -49,25 +49,31 @@ public class CheckoutCartCommandHandler : IRequestHandler<CheckoutCartCommand, R
     private readonly IApplicationDbContext _context;
     private readonly ICurrentUserService _currentUserService;
     private readonly CheckoutOrderProcessor _orderProcessor;
-    private readonly IStripePaymentGateway? _stripeGateway;
+
+    public CheckoutCartCommandHandler(
+        IApplicationDbContext context,
+        ICurrentUserService currentUserService,
+        CheckoutOrderProcessor orderProcessor)
+    {
+        _context = context;
+        _currentUserService = currentUserService;
+        _orderProcessor = orderProcessor;
+    }
 
     public CheckoutCartCommandHandler(
         IApplicationDbContext context,
         ICurrentUserService currentUserService,
         CheckoutOrderProcessor orderProcessor,
-        IStripePaymentGateway? stripeGateway = null)
+        IStripePaymentGateway? stripeGateway)
+        : this(context, currentUserService, orderProcessor)
     {
-        _context = context;
-        _currentUserService = currentUserService;
-        _orderProcessor = orderProcessor;
-        _stripeGateway = stripeGateway;
     }
 
     public CheckoutCartCommandHandler(
         IApplicationDbContext context,
         ICurrentUserService currentUserService,
         IStripePaymentGateway? stripeGateway = null)
-        : this(context, currentUserService, new CheckoutOrderProcessor(context, stripeGateway), stripeGateway)
+        : this(context, currentUserService, new CheckoutOrderProcessor(context, stripeGateway))
     {
     }
 
@@ -85,20 +91,10 @@ public class CheckoutCartCommandHandler : IRequestHandler<CheckoutCartCommand, R
         var user = authResult.Value;
 
         // 2. Validate Payment Method
-        if (request.PaymentMethod == PaymentMethod.Stripe)
+        var paymentCheck = _orderProcessor.ValidatePaymentMethodAvailability(request.PaymentMethod);
+        if (paymentCheck.IsFailure)
         {
-            if (_stripeGateway is null || !_stripeGateway.IsEnabled)
-            {
-                return Result.Failure<CheckoutOrderDto>(Error.Validation(
-                    "Checkout.PaymentMethodNotAvailable",
-                    "Stripe payment is not available at this time."));
-            }
-        }
-        else if (request.PaymentMethod != PaymentMethod.COD)
-        {
-            return Result.Failure<CheckoutOrderDto>(Error.Validation(
-                "Checkout.PaymentMethodNotAvailable",
-                "Payment method is not available."));
+            return Result.Failure<CheckoutOrderDto>(paymentCheck.Error);
         }
 
         // 3. Normalize idempotency key

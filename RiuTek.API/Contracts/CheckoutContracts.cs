@@ -13,6 +13,14 @@ public record CheckoutCartRequest(
     string? Notes
 );
 
+public record BuyNowProductRequest(
+    Guid AddressId,
+    int Quantity,
+    [property: JsonConverter(typeof(JsonStringEnumConverter))]
+    PaymentMethod PaymentMethod,
+    string? Notes
+);
+
 public record UpdateOrderStatusRequest(
     [property: JsonConverter(typeof(JsonStringEnumConverter))]
     OrderStatus ExpectedStatus,

@@ -157,4 +157,30 @@ public class OrdersController : ApiControllerBase
 
         return HandleCreatedResult(result);
     }
+
+    [HttpPost("buy-now/product/{productId:guid}")]
+    [ProducesResponseType(typeof(CheckoutOrderDto), StatusCodes.Status201Created)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
+    public async Task<IActionResult> BuyNowProduct(
+        [FromRoute] Guid productId,
+        [FromHeader(Name = "Idempotency-Key")] string? idempotencyKey,
+        [FromBody] BuyNowProductRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await Mediator.Send(new BuyNowProductCommand(
+            ProductId: productId,
+            AddressId: request.AddressId,
+            Quantity: request.Quantity,
+            PaymentMethod: request.PaymentMethod,
+            Notes: request.Notes,
+            IdempotencyKey: idempotencyKey ?? string.Empty
+        ), cancellationToken);
+
+        return HandleCreatedResult(result);
+    }
 }

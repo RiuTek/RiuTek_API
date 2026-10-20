@@ -35,6 +35,27 @@ public class CheckoutOrderProcessor
         _stripeGateway = stripeGateway;
     }
 
+    public Result ValidatePaymentMethodAvailability(PaymentMethod paymentMethod)
+    {
+        if (paymentMethod == PaymentMethod.Stripe)
+        {
+            if (_stripeGateway is null || !_stripeGateway.IsEnabled)
+            {
+                return Result.Failure(Error.Validation(
+                    "Checkout.PaymentMethodNotAvailable",
+                    "Stripe payment is not available at this time."));
+            }
+        }
+        else if (paymentMethod != PaymentMethod.COD)
+        {
+            return Result.Failure(Error.Validation(
+                "Checkout.PaymentMethodNotAvailable",
+                "Payment method is not available."));
+        }
+
+        return Result.Success();
+    }
+
     public async Task<Result<CheckoutOrderDto>> PlaceOrderAsync(
         PlaceCheckoutOrderInput input,
         CancellationToken cancellationToken = default)
@@ -42,20 +63,10 @@ public class CheckoutOrderProcessor
         ArgumentNullException.ThrowIfNull(input);
 
         // 1. Validate Payment Method availability
-        if (input.PaymentMethod == PaymentMethod.Stripe)
+        var paymentCheck = ValidatePaymentMethodAvailability(input.PaymentMethod);
+        if (paymentCheck.IsFailure)
         {
-            if (_stripeGateway is null || !_stripeGateway.IsEnabled)
-            {
-                return Result.Failure<CheckoutOrderDto>(Error.Validation(
-                    "Checkout.PaymentMethodNotAvailable",
-                    "Stripe payment is not available at this time."));
-            }
-        }
-        else if (input.PaymentMethod != PaymentMethod.COD)
-        {
-            return Result.Failure<CheckoutOrderDto>(Error.Validation(
-                "Checkout.PaymentMethodNotAvailable",
-                "Payment method is not available."));
+            return Result.Failure<CheckoutOrderDto>(paymentCheck.Error);
         }
 
         // 2. Validate Lines defensively
@@ -222,11 +233,10 @@ public class CheckoutOrderProcessor
 
         if (existingOrder.PaymentMethod == PaymentMethod.Stripe)
         {
-            if (_stripeGateway is null || !_stripeGateway.IsEnabled)
+            var paymentCheck = ValidatePaymentMethodAvailability(existingOrder.PaymentMethod);
+            if (paymentCheck.IsFailure)
             {
-                return Result.Failure<CheckoutOrderDto>(Error.Validation(
-                    "Checkout.PaymentMethodNotAvailable",
-                    "Stripe payment is not available at this time."));
+                return Result.Failure<CheckoutOrderDto>(paymentCheck.Error);
             }
 
             var attempt = existingOrder.PaymentAttempts.OrderByDescending(p => p.CreatedAt).FirstOrDefault();
