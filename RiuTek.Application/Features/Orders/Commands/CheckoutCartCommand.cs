@@ -48,16 +48,27 @@ public class CheckoutCartCommandHandler : IRequestHandler<CheckoutCartCommand, R
 {
     private readonly IApplicationDbContext _context;
     private readonly ICurrentUserService _currentUserService;
+    private readonly CheckoutOrderProcessor _orderProcessor;
     private readonly IStripePaymentGateway? _stripeGateway;
 
     public CheckoutCartCommandHandler(
         IApplicationDbContext context,
         ICurrentUserService currentUserService,
+        CheckoutOrderProcessor orderProcessor,
         IStripePaymentGateway? stripeGateway = null)
     {
         _context = context;
         _currentUserService = currentUserService;
+        _orderProcessor = orderProcessor;
         _stripeGateway = stripeGateway;
+    }
+
+    public CheckoutCartCommandHandler(
+        IApplicationDbContext context,
+        ICurrentUserService currentUserService,
+        IStripePaymentGateway? stripeGateway = null)
+        : this(context, currentUserService, new CheckoutOrderProcessor(context, stripeGateway), stripeGateway)
+    {
     }
 
     public async Task<Result<CheckoutOrderDto>> Handle(
@@ -101,7 +112,7 @@ public class CheckoutCartCommandHandler : IRequestHandler<CheckoutCartCommand, R
 
         if (existingOrder is not null)
         {
-            return await HandleExistingOrderAsync(existingOrder, cancellationToken);
+            return await _orderProcessor.ReplayExistingOrderAsync(existingOrder, cancellationToken);
         }
 
         // 5. Query address by (AddressId, UserId)
@@ -157,78 +168,23 @@ public class CheckoutCartCommandHandler : IRequestHandler<CheckoutCartCommand, R
             return Result.Failure<CheckoutOrderDto>(validationResult.Error);
         }
 
-        // 9. Build Order entity and items
-        var orderResult = BuildOrder(request, user, address, normalizedKey, cart, productMap);
-        if (orderResult.IsFailure)
-        {
-            return Result.Failure<CheckoutOrderDto>(orderResult.Error);
-        }
-        var order = orderResult.Value;
+        // 9. Convert cart items to CheckoutOrderLine (PCBuildId = null for cart checkout)
+        var lines = cart.Items
+            .Select(i => new CheckoutOrderLine(productMap[i.ProductId], i.Quantity, PCBuildId: null))
+            .ToList();
 
-        // 10. Decrement Product.StockQuantity for each item and record StockMovement
-        foreach (var cartItem in cart.Items)
-        {
-            var product = productMap[cartItem.ProductId];
-            var movementResult = StockMovementHelper.ApplyStockMovement(
-                product,
-                -cartItem.Quantity,
-                StockMovementReason.Checkout,
-                note: null,
-                actorUserId: user.Id,
-                orderId: order.Id,
-                context: _context);
+        // 10. Delegate order creation and execution to shared processor
+        var input = new PlaceCheckoutOrderInput(
+            User: user,
+            Address: address,
+            PaymentMethod: request.PaymentMethod,
+            Notes: request.Notes,
+            IdempotencyKey: normalizedKey,
+            Lines: lines,
+            CartToClear: cart
+        );
 
-            if (movementResult.IsFailure)
-            {
-                return Result.Failure<CheckoutOrderDto>(movementResult.Error);
-            }
-        }
-
-        // 11. Clear cart
-        cart.Clear();
-
-        // 12. Create PaymentAttempt for online payment (Stripe) within the initial DB transaction
-        PaymentAttempt? stripeAttempt = null;
-        if (request.PaymentMethod == PaymentMethod.Stripe)
-        {
-            var nowUtc = DateTime.UtcNow;
-            var expiresAtUtc = nowUtc.Add(_stripeGateway!.CheckoutSessionLifetime);
-            var providerIdempotencyKey = $"stripe-{order.Id:N}";
-            var attemptResult = order.CreatePaymentAttempt(providerIdempotencyKey, expiresAtUtc, nowUtc: nowUtc);
-            if (attemptResult.IsFailure)
-            {
-                return Result.Failure<CheckoutOrderDto>(attemptResult.Error);
-            }
-            stripeAttempt = attemptResult.Value;
-        }
-
-        // 13. Add Order and execute single SaveChangesAsync
-        _context.Orders.Add(order);
-
-        try
-        {
-            await _context.SaveChangesAsync(cancellationToken);
-        }
-        catch (DbUpdateConcurrencyException)
-        {
-            _context.ClearTrackedChanges();
-            return await ReloadAndReplayExistingOrderAsync(user.Id, normalizedKey, cancellationToken, isConcurrency: true);
-        }
-        catch (DbUpdateException ex)
-            when (_context.IsUniqueViolation(ex, "UX_Orders_UserId_CheckoutIdempotencyKey"))
-        {
-            _context.ClearTrackedChanges();
-            return await ReloadAndReplayExistingOrderAsync(user.Id, normalizedKey, cancellationToken, isConcurrency: false);
-        }
-
-        // 14. If COD, return success immediately
-        if (request.PaymentMethod == PaymentMethod.COD)
-        {
-            return Result.Success(CheckoutMappingExtensions.MapToDto(order));
-        }
-
-        // 15. If Stripe, invoke Stripe gateway outside the database transaction
-        return await InitiateStripeCheckoutAsync(order, stripeAttempt!, cancellationToken);
+        return await _orderProcessor.PlaceOrderAsync(input, cancellationToken);
     }
 
     private static Result ValidateCartItems(Cart cart, Dictionary<Guid, Product> productMap)
@@ -265,232 +221,5 @@ public class CheckoutCartCommandHandler : IRequestHandler<CheckoutCartCommand, R
         }
 
         return Result.Success();
-    }
-
-    private static Result<Order> BuildOrder(
-        CheckoutCartCommand request,
-        User user,
-        UserAddress address,
-        string normalizedKey,
-        Cart cart,
-        Dictionary<Guid, Product> productMap)
-    {
-        var orderNumber = $"ORD-{DateTime.UtcNow:yyyyMMddHHmmss}-{Guid.NewGuid().ToString("N")[..8].ToUpperInvariant()}";
-        var customerName = !string.IsNullOrWhiteSpace(address.ReceiverName) ? address.ReceiverName : user.FullName;
-        var customerPhone = !string.IsNullOrWhiteSpace(address.PhoneNumber) ? address.PhoneNumber : (user.PhoneNumber ?? "0000000000");
-        var customerEmail = user.Email;
-        var formattedShippingAddress = CheckoutMappingExtensions.FormatShippingAddress(address);
-        var notes = string.IsNullOrWhiteSpace(request.Notes) ? null : request.Notes.Trim();
-
-        var order = new Order(
-            orderNumber: orderNumber,
-            userId: user.Id,
-            checkoutIdempotencyKey: normalizedKey,
-            customerName: customerName,
-            customerEmail: customerEmail,
-            customerPhone: customerPhone,
-            shippingAddress: formattedShippingAddress,
-            paymentMethod: request.PaymentMethod,
-            notes: notes
-        );
-
-        foreach (var cartItem in cart.Items)
-        {
-            var product = productMap[cartItem.ProductId];
-            var addItemResult = order.AddItem(
-                productId: product.Id,
-                productName: product.Name,
-                productSku: product.Sku,
-                unitPrice: product.Price,
-                quantity: cartItem.Quantity
-            );
-
-            if (addItemResult.IsFailure)
-            {
-                return Result.Failure<Order>(addItemResult.Error);
-            }
-        }
-
-        return Result.Success(order);
-    }
-
-    private async Task<Result<CheckoutOrderDto>> InitiateStripeCheckoutAsync(
-        Order order,
-        PaymentAttempt attempt,
-        CancellationToken cancellationToken)
-    {
-        Result<StripeCheckoutSessionResult> sessionResult;
-        try
-        {
-            sessionResult = await _stripeGateway!.EnsureCheckoutSessionAsync(
-                new CreateStripeCheckoutSessionRequest(
-                    order.Id,
-                    attempt.Id,
-                    order.OrderNumber,
-                    attempt.Amount,
-                    attempt.Currency,
-                    order.CustomerEmail,
-                    attempt.IdempotencyKey,
-                    attempt.ExpiresAt
-                ),
-                attempt.ProviderReference,
-                cancellationToken
-            );
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (OperationCanceledException)
-        {
-            return Result.Failure<CheckoutOrderDto>(Error.Unavailable(
-                "Payment.GatewayUnavailable",
-                "Stripe payment gateway is temporarily unavailable. Please retry."));
-        }
-
-        if (sessionResult.IsFailure)
-        {
-            // Order and Pending payment attempt are already saved in DB; return 503 so client can retry with same key
-            return Result.Failure<CheckoutOrderDto>(sessionResult.Error);
-        }
-
-        var setRefResult = attempt.SetProviderReference(sessionResult.Value.SessionId);
-        if (setRefResult.IsFailure)
-        {
-            return Result.Failure<CheckoutOrderDto>(setRefResult.Error);
-        }
-
-        await _context.SaveChangesAsync(cancellationToken);
-
-        var paymentAction = new PaymentActionDto(
-            Type: "Redirect",
-            Url: sessionResult.Value.Url,
-            ExpiresAt: sessionResult.Value.ExpiresAt
-        );
-
-        return Result.Success(CheckoutMappingExtensions.MapToDto(order, paymentAction));
-    }
-
-    private async Task<Result<CheckoutOrderDto>> HandleExistingOrderAsync(
-        Order existingOrder,
-        CancellationToken cancellationToken)
-    {
-        if (existingOrder.PaymentMethod == PaymentMethod.COD)
-        {
-            return Result.Success(CheckoutMappingExtensions.MapToDto(existingOrder));
-        }
-
-        if (existingOrder.PaymentMethod == PaymentMethod.Stripe)
-        {
-            if (_stripeGateway is null || !_stripeGateway.IsEnabled)
-            {
-                return Result.Failure<CheckoutOrderDto>(Error.Validation(
-                    "Checkout.PaymentMethodNotAvailable",
-                    "Stripe payment is not available at this time."));
-            }
-
-            var attempt = existingOrder.PaymentAttempts.OrderByDescending(p => p.CreatedAt).FirstOrDefault();
-            if (attempt is null)
-            {
-                return Result.Failure<CheckoutOrderDto>(Error.Conflict(
-                    "Checkout.IdempotencyConflict",
-                    "Payment attempt not found for existing order."));
-            }
-
-            if (attempt.Status == PaymentAttemptStatus.Succeeded)
-            {
-                return Result.Success(CheckoutMappingExtensions.MapToDto(existingOrder, null));
-            }
-
-            if (attempt.Status == PaymentAttemptStatus.Pending)
-            {
-                Result<StripeCheckoutSessionResult> sessionResult;
-                try
-                {
-                    sessionResult = await _stripeGateway.EnsureCheckoutSessionAsync(
-                        new CreateStripeCheckoutSessionRequest(
-                            existingOrder.Id,
-                            attempt.Id,
-                            existingOrder.OrderNumber,
-                            attempt.Amount,
-                            attempt.Currency,
-                            existingOrder.CustomerEmail,
-                            attempt.IdempotencyKey,
-                            attempt.ExpiresAt
-                        ),
-                        attempt.ProviderReference,
-                        cancellationToken
-                    );
-                }
-                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-                {
-                    throw;
-                }
-                catch (OperationCanceledException)
-                {
-                    return Result.Failure<CheckoutOrderDto>(Error.Unavailable(
-                        "Payment.GatewayUnavailable",
-                        "Stripe payment gateway is temporarily unavailable. Please retry."));
-                }
-
-                if (sessionResult.IsFailure)
-                {
-                    return Result.Failure<CheckoutOrderDto>(sessionResult.Error);
-                }
-
-                if (string.IsNullOrWhiteSpace(attempt.ProviderReference))
-                {
-                    var setRefResult = attempt.SetProviderReference(sessionResult.Value.SessionId);
-                    if (setRefResult.IsFailure)
-                    {
-                        return Result.Failure<CheckoutOrderDto>(setRefResult.Error);
-                    }
-
-                    await _context.SaveChangesAsync(cancellationToken);
-                }
-
-                var paymentAction = new PaymentActionDto(
-                    Type: "Redirect",
-                    Url: sessionResult.Value.Url,
-                    ExpiresAt: sessionResult.Value.ExpiresAt
-                );
-
-                return Result.Success(CheckoutMappingExtensions.MapToDto(existingOrder, paymentAction));
-            }
-
-            return Result.Failure<CheckoutOrderDto>(Error.Conflict(
-                "Checkout.IdempotencyConflict",
-                "The previous payment attempt has ended."));
-        }
-
-        return Result.Success(CheckoutMappingExtensions.MapToDto(existingOrder));
-    }
-
-    private async Task<Result<CheckoutOrderDto>> ReloadAndReplayExistingOrderAsync(
-        Guid userId,
-        string normalizedKey,
-        CancellationToken cancellationToken,
-        bool isConcurrency)
-    {
-        var replayedOrder = await _context.Orders
-            .Include(o => o.Items)
-            .Include(o => o.PaymentAttempts)
-            .FirstOrDefaultAsync(o => o.UserId == userId && o.CheckoutIdempotencyKey == normalizedKey, cancellationToken);
-
-        if (replayedOrder is not null)
-        {
-            return await HandleExistingOrderAsync(replayedOrder, cancellationToken);
-        }
-
-        if (isConcurrency)
-        {
-            return Result.Failure<CheckoutOrderDto>(Error.Conflict(
-                "Checkout.InventoryChanged",
-                "Inventory or cart version changed during checkout. Please try again."));
-        }
-
-        return Result.Failure<CheckoutOrderDto>(Error.Conflict(
-            "Checkout.IdempotencyConflict",
-            "An idempotency conflict occurred during checkout."));
     }
 }

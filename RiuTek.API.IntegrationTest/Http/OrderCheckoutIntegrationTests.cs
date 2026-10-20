@@ -307,6 +307,7 @@ public class OrderCheckoutIntegrationTests : IAsyncLifetime
         dbOrder.OrderNumber.Should().Be(orderDto.OrderNumber);
         dbOrder.CheckoutIdempotencyKey.Should().Be(idempotencyKey);
         dbOrder.Items.Should().ContainSingle();
+        dbOrder.Items.First().PCBuildId.Should().BeNull("Cart checkout must not set PCBuildId on OrderItems");
 
         var freshProduct = await verifyDb.Products.FindAsync(product.Id);
         freshProduct!.StockQuantity.Should().Be(initialStock - cartQty);

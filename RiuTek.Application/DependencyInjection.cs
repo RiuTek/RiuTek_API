@@ -19,6 +19,7 @@ public static class DependencyInjection
 
         // Core Domain & Application Services
         services.AddScoped<Common.Interfaces.IHardwareCompatibilityService, Services.HardwareCompatibilityService>();
+        services.AddScoped<Features.Orders.Common.CheckoutOrderProcessor>();
 
         return services;
     }
