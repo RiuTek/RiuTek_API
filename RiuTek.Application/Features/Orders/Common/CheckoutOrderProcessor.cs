@@ -254,10 +254,11 @@ public class CheckoutOrderProcessor
 
             if (attempt.Status == PaymentAttemptStatus.Pending)
             {
+                var stripeGateway = _stripeGateway!;
                 Result<StripeCheckoutSessionResult> sessionResult;
                 try
                 {
-                    sessionResult = await _stripeGateway.EnsureCheckoutSessionAsync(
+                    sessionResult = await stripeGateway.EnsureCheckoutSessionAsync(
                         new CreateStripeCheckoutSessionRequest(
                             existingOrder.Id,
                             attempt.Id,
