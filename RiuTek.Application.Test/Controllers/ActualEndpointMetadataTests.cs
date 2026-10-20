@@ -35,9 +35,9 @@ public class ActualEndpointMetadataTests
 
             endpoints.Should().NotBeEmpty();
 
-            // Total controller actions: 6 Posts + 6 Comments + 7 Products + 5 Categories + 6 Carts + 4 Auth + 9 Orders + 1 Payments + 6 Users + 3 ProductMedia + 3 ProductImports + 9 Reviews + 6 PCBuilds = 71
+            // Total controller actions: 6 Posts + 6 Comments + 7 Products + 5 Categories + 6 Carts + 4 Auth + 10 Orders + 1 Payments + 6 Users + 3 ProductMedia + 3 ProductImports + 9 Reviews + 6 PCBuilds = 72
             var controllerEndpoints = endpoints.Where(e => e.Metadata.GetMetadata<ControllerActionDescriptor>() != null).ToList();
-            controllerEndpoints.Should().HaveCount(71);
+            controllerEndpoints.Should().HaveCount(72);
 
             // Helper to get action descriptor
             ControllerActionDescriptor GetDescriptor(RouteEndpoint e) => e.Metadata.GetMetadata<ControllerActionDescriptor>()!;
@@ -312,7 +312,7 @@ public class ActualEndpointMetadataTests
                 e.Metadata.GetMetadata<ControllerActionDescriptor>()?.ControllerTypeInfo.AsType() == typeof(OrdersController))
                 .ToList();
 
-            orderEndpoints.Should().HaveCount(9);
+            orderEndpoints.Should().HaveCount(10);
 
             var getManagedOrdersEndpoint = orderEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(OrdersController.GetManagedOrders) && GetHttpMethods(e).Contains("GET"));
             getManagedOrdersEndpoint.Should().NotBeNull();
@@ -363,6 +363,12 @@ public class ActualEndpointMetadataTests
             buyNowProductEndpoint.Should().NotBeNull();
             GetFullRoutePattern(buyNowProductEndpoint!).Should().BeEquivalentTo("api/v1/orders/buy-now/product/{productId:guid}");
             AssertAuthorized(buyNowProductEndpoint!);
+
+            // 37. POST api/v1/orders/buy-now/pc-build/{buildId:guid} ([Authorize]) - Action: BuyNowPCBuild
+            var buyNowPCBuildEndpoint = orderEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(OrdersController.BuyNowPCBuild) && GetHttpMethods(e).Contains("POST"));
+            buyNowPCBuildEndpoint.Should().NotBeNull();
+            GetFullRoutePattern(buyNowPCBuildEndpoint!).Should().BeEquivalentTo("api/v1/orders/buy-now/pc-build/{buildId:guid}");
+            AssertAuthorized(buyNowPCBuildEndpoint!);
 
             #endregion
 

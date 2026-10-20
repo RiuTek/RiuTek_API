@@ -183,4 +183,29 @@ public class OrdersController : ApiControllerBase
 
         return HandleCreatedResult(result);
     }
+
+    [HttpPost("buy-now/pc-build/{buildId:guid}")]
+    [ProducesResponseType(typeof(CheckoutOrderDto), StatusCodes.Status201Created)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
+    public async Task<IActionResult> BuyNowPCBuild(
+        [FromRoute] Guid buildId,
+        [FromHeader(Name = "Idempotency-Key")] string? idempotencyKey,
+        [FromBody] BuyNowPCBuildRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await Mediator.Send(new BuyNowPCBuildCommand(
+            PCBuildId: buildId,
+            AddressId: request.AddressId,
+            PaymentMethod: request.PaymentMethod,
+            Notes: request.Notes,
+            IdempotencyKey: idempotencyKey ?? string.Empty
+        ), cancellationToken);
+
+        return HandleCreatedResult(result);
+    }
 }

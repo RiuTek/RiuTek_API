@@ -128,6 +128,26 @@ public class OrdersControllerContractTests : IDisposable
         attrs.Should().Contain(a => a.StatusCode == StatusCodes.Status503ServiceUnavailable);
     }
 
+    [Fact]
+    public void BuyNowPCBuild_HasCorrectHttpPostAttributeAndProducesResponseTypeAttributes()
+    {
+        var method = typeof(OrdersController).GetMethod(nameof(OrdersController.BuyNowPCBuild));
+        method.Should().NotBeNull();
+
+        var httpPostAttr = method!.GetCustomAttribute<HttpPostAttribute>();
+        httpPostAttr.Should().NotBeNull();
+        httpPostAttr!.Template.Should().Be("buy-now/pc-build/{buildId:guid}");
+
+        var attrs = method.GetCustomAttributes<ProducesResponseTypeAttribute>().ToList();
+        attrs.Should().Contain(a => a.StatusCode == StatusCodes.Status201Created && a.Type == typeof(CheckoutOrderDto));
+        attrs.Should().Contain(a => a.StatusCode == StatusCodes.Status400BadRequest);
+        attrs.Should().Contain(a => a.StatusCode == StatusCodes.Status401Unauthorized);
+        attrs.Should().Contain(a => a.StatusCode == StatusCodes.Status403Forbidden);
+        attrs.Should().Contain(a => a.StatusCode == StatusCodes.Status404NotFound);
+        attrs.Should().Contain(a => a.StatusCode == StatusCodes.Status409Conflict);
+        attrs.Should().Contain(a => a.StatusCode == StatusCodes.Status503ServiceUnavailable);
+    }
+
     #endregion
 
     #region Action Delegation to Mediator Tests

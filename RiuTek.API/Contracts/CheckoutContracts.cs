@@ -21,6 +21,13 @@ public record BuyNowProductRequest(
     string? Notes
 );
 
+public record BuyNowPCBuildRequest(
+    Guid AddressId,
+    [property: JsonConverter(typeof(JsonStringEnumConverter))]
+    PaymentMethod PaymentMethod,
+    string? Notes = null
+);
+
 public record UpdateOrderStatusRequest(
     [property: JsonConverter(typeof(JsonStringEnumConverter))]
     OrderStatus ExpectedStatus,
