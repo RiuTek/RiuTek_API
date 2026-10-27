@@ -28,13 +28,41 @@ public class ProductQueryHandlerTests
         return entity;
     }
 
+    private sealed class PassThroughProductSpecificationFilterService : IProductSpecificationFilterService
+    {
+        public IQueryable<Product> Apply(IQueryable<Product> query, ProductFilterOptions options) => query;
+    }
+
+    private static readonly IProductSpecificationFilterService PassThroughSpecFilterService =
+        new PassThroughProductSpecificationFilterService();
+
+    private static GetProductsQueryHandler CreateHandler(
+        IApplicationDbContext context,
+        IProductSpecificationFilterService? specFilterService = null) =>
+        new(context, specFilterService ?? PassThroughSpecFilterService);
+
     #region Public List Tests (GetProductsQueryHandler)
+
+    [Fact]
+    public void GetProductsQueryHandler_Constructor_WhenContextIsNull_ThrowsArgumentNullException()
+    {
+        var act = () => new GetProductsQueryHandler(null!, PassThroughSpecFilterService);
+        act.Should().Throw<ArgumentNullException>().WithParameterName("context");
+    }
+
+    [Fact]
+    public void GetProductsQueryHandler_Constructor_WhenSpecFilterServiceIsNull_ThrowsArgumentNullException()
+    {
+        using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var act = () => new GetProductsQueryHandler(context, null!);
+        act.Should().Throw<ArgumentNullException>().WithParameterName("specFilterService");
+    }
 
     [Fact]
     public async Task GetProducts_WhenDatabaseIsEmpty_ReturnsEmptyPagedResult()
     {
         await using var context = TestDbContextFactory.CreateInMemoryDbContext();
-        var handler = new GetProductsQueryHandler(context);
+        var handler = CreateHandler(context);
 
         var query = new GetProductsQuery(new ProductFilterOptions(PageIndex: 1, PageSize: 10));
         var result = await handler.Handle(query, CancellationToken.None);
@@ -98,7 +126,7 @@ public class ProductQueryHandlerTests
         context.Products.AddRange(p1, p2);
         await context.SaveChangesAsync();
 
-        var handler = new GetProductsQueryHandler(context);
+        var handler = CreateHandler(context);
         var query = new GetProductsQuery(new ProductFilterOptions());
         var result = await handler.Handle(query, CancellationToken.None);
 
@@ -122,7 +150,7 @@ public class ProductQueryHandlerTests
         context.Products.AddRange(p1, p2);
         await context.SaveChangesAsync();
 
-        var handler = new GetProductsQueryHandler(context);
+        var handler = CreateHandler(context);
         var query = new GetProductsQuery(new ProductFilterOptions(IsActive: isActiveFilter));
         var result = await handler.Handle(query, CancellationToken.None);
 
@@ -152,7 +180,7 @@ public class ProductQueryHandlerTests
         context.Products.AddRange(p1, p2, p3);
         await context.SaveChangesAsync();
 
-        var handler = new GetProductsQueryHandler(context);
+        var handler = CreateHandler(context);
         var query = new GetProductsQuery(new ProductFilterOptions(SearchTerm: searchTerm));
         var result = await handler.Handle(query, CancellationToken.None);
 
@@ -173,7 +201,7 @@ public class ProductQueryHandlerTests
         context.Products.AddRange(p1, p2, p3);
         await context.SaveChangesAsync();
 
-        var handler = new GetProductsQueryHandler(context);
+        var handler = CreateHandler(context);
         var query = new GetProductsQuery(new ProductFilterOptions(Brand: "  intel  ", ComponentType: ComponentType.Cpu));
         var result = await handler.Handle(query, CancellationToken.None);
 
@@ -195,7 +223,7 @@ public class ProductQueryHandlerTests
         context.Products.AddRange(p1, p2, p3);
         await context.SaveChangesAsync();
 
-        var handler = new GetProductsQueryHandler(context);
+        var handler = CreateHandler(context);
         var query = new GetProductsQuery(new ProductFilterOptions(MinPrice: 100, MaxPrice: 200));
         var result = await handler.Handle(query, CancellationToken.None);
 
@@ -219,7 +247,7 @@ public class ProductQueryHandlerTests
         context.Products.AddRange(p1, p2);
         await context.SaveChangesAsync();
 
-        var handler = new GetProductsQueryHandler(context);
+        var handler = CreateHandler(context);
         var query = new GetProductsQuery(new ProductFilterOptions(InStock: inStock));
         var result = await handler.Handle(query, CancellationToken.None);
 
@@ -251,7 +279,7 @@ public class ProductQueryHandlerTests
         context.Products.AddRange(pRoot, pIntel, pI9, pGpu);
         await context.SaveChangesAsync();
 
-        var handler = new GetProductsQueryHandler(context);
+        var handler = CreateHandler(context);
 
         var resultRoot = await handler.Handle(new GetProductsQuery(new ProductFilterOptions(CategoryId: cpuRoot.Id)), CancellationToken.None);
         resultRoot.IsSuccess.Should().BeTrue();
@@ -270,7 +298,7 @@ public class ProductQueryHandlerTests
     public async Task GetProducts_WhenCategoryIdDoesNotExist_ReturnsCategoryNotFound()
     {
         await using var context = TestDbContextFactory.CreateInMemoryDbContext();
-        var handler = new GetProductsQueryHandler(context);
+        var handler = CreateHandler(context);
 
         var query = new GetProductsQuery(new ProductFilterOptions(CategoryId: Guid.NewGuid()));
         var result = await handler.Handle(query, CancellationToken.None);
@@ -293,7 +321,7 @@ public class ProductQueryHandlerTests
         context.Products.AddRange(pA, pB, pC);
         await context.SaveChangesAsync();
 
-        var handler = new GetProductsQueryHandler(context);
+        var handler = CreateHandler(context);
 
         // 1. Newest (pC, pB, pA)
         var resNewest = await handler.Handle(new GetProductsQuery(new ProductFilterOptions(SortBy: ProductSortOption.Newest)), CancellationToken.None);
@@ -338,7 +366,7 @@ public class ProductQueryHandlerTests
         context.Products.AddRange(p4, p2, p3, p1);
         await context.SaveChangesAsync();
 
-        var handler = new GetProductsQueryHandler(context);
+        var handler = CreateHandler(context);
 
         // NameAToZ: alpha/ALPHA first (tied on normalized name, ordered by Id: id1, id2), then Beta/beta (tied, ordered by Id: id3, id4)
         var resultAsc = await handler.Handle(new GetProductsQuery(new ProductFilterOptions(SortBy: ProductSortOption.NameAToZ)), CancellationToken.None);
@@ -371,7 +399,7 @@ public class ProductQueryHandlerTests
         context.Products.AddRange(p4, p3, p1, p2);
         await context.SaveChangesAsync();
 
-        var handler = new GetProductsQueryHandler(context);
+        var handler = CreateHandler(context);
 
         // PriceLowToHigh: Price 100 (p2, p3: alpha/ALPHA ordered by Id [id2, id3], then p1: beta [id1]), then Price 200 (p4 [id4])
         var resAsc = await handler.Handle(new GetProductsQuery(new ProductFilterOptions(SortBy: ProductSortOption.PriceLowToHigh)), CancellationToken.None);
@@ -404,7 +432,7 @@ public class ProductQueryHandlerTests
         context.Products.AddRange(p3, p2, p1);
         await context.SaveChangesAsync();
 
-        var handler = new GetProductsQueryHandler(context);
+        var handler = CreateHandler(context);
         var result = await handler.Handle(new GetProductsQuery(new ProductFilterOptions(SortBy: ProductSortOption.Newest)), CancellationToken.None);
 
         // p1 and p2 tied on CreatedAt -> ordered by Id ascending: id1, then id2. Followed by older p3: id3.
@@ -434,7 +462,7 @@ public class ProductQueryHandlerTests
         context.Products.AddRange(p4, p3, p2, p1);
         await context.SaveChangesAsync();
 
-        var handler = new GetProductsQueryHandler(context);
+        var handler = CreateHandler(context);
 
         // Page 1 with size 2 -> should take [id1, id2]
         var page1 = await handler.Handle(new GetProductsQuery(new ProductFilterOptions(PageIndex: 1, PageSize: 2, SortBy: ProductSortOption.NameAToZ)), CancellationToken.None);
@@ -467,7 +495,7 @@ public class ProductQueryHandlerTests
         context.Products.AddRange(products);
         await context.SaveChangesAsync();
 
-        var handler = new GetProductsQueryHandler(context);
+        var handler = CreateHandler(context);
 
         // 1. PageIndex = 214748366 with PageSize = 20 -> previously would overflow int offset to 4 and return 2 items.
         // With long offset calculation, offset >= totalCount (6) -> safely returns empty items.
@@ -525,7 +553,7 @@ public class ProductQueryHandlerTests
         context.Products.AddRange(pCpu, pGpu, pMobo);
         await context.SaveChangesAsync();
 
-        var handler = new GetProductsQueryHandler(context);
+        var handler = CreateHandler(context);
         var query = new GetProductsQuery(new ProductFilterOptions(ComponentType: ComponentType.Gpu));
         var result = await handler.Handle(query, CancellationToken.None);
 
@@ -567,7 +595,7 @@ public class ProductQueryHandlerTests
         context.Products.AddRange(pTarget, pFailBrand, pFailType, pFailPrice, pFailStock, pFailActive);
         await context.SaveChangesAsync();
 
-        var handler = new GetProductsQueryHandler(context);
+        var handler = CreateHandler(context);
         var query = new GetProductsQuery(new ProductFilterOptions(
             Brand: "corsair",
             ComponentType: ComponentType.Ram,
@@ -599,7 +627,7 @@ public class ProductQueryHandlerTests
         context.ChangeTracker.Clear();
         context.ChangeTracker.Entries().Should().BeEmpty();
 
-        var listHandler = new GetProductsQueryHandler(context);
+        var listHandler = CreateHandler(context);
         var listResult = await listHandler.Handle(new GetProductsQuery(new ProductFilterOptions()), CancellationToken.None);
         listResult.IsSuccess.Should().BeTrue();
         context.ChangeTracker.Entries().Should().BeEmpty("GetProductsQuery must not track any entities");
@@ -637,7 +665,7 @@ public class ProductQueryHandlerTests
         context.Products.AddRange(products);
         await context.SaveChangesAsync();
 
-        var handler = new GetProductsQueryHandler(context);
+        var handler = CreateHandler(context);
 
         // Page 1 of size 10 (items 1..10)
         var page1 = await handler.Handle(new GetProductsQuery(new ProductFilterOptions(PageIndex: 1, PageSize: 10, SortBy: ProductSortOption.NameAToZ)), CancellationToken.None);
