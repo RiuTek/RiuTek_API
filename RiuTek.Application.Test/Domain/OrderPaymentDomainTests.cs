@@ -260,6 +260,111 @@ public class OrderPaymentDomainTests
         typeof(PaymentAttempt).GetProperty(nameof(PaymentAttempt.ProviderReference)).Should().NotBeNull();
     }
 
+    [Fact]
+    public void CancelPendingStripePayment_WhenValid_TransitionsOrderAndAttemptToCancelled()
+    {
+        var order = CreatePayableOrder(PaymentMethod.Stripe);
+        var attempt = order.CreatePaymentAttempt("attempt-1", Now.AddMinutes(15), Now).Value;
+        var cancelTime = Now.AddMinutes(2);
+
+        var result = order.CancelPendingStripePayment(attempt.Id, cancelTime);
+
+        result.IsSuccess.Should().BeTrue();
+        order.Status.Should().Be(OrderStatus.Cancelled);
+        order.PaymentStatus.Should().Be(PaymentStatus.Failed);
+        order.UpdatedAt.Should().Be(cancelTime);
+        attempt.Status.Should().Be(PaymentAttemptStatus.Cancelled);
+        attempt.CompletedAt.Should().Be(cancelTime);
+    }
+
+    [Fact]
+    public void CancelPendingStripePayment_WhenAlreadyCancelled_ReturnsSuccessIdempotently()
+    {
+        var order = CreatePayableOrder(PaymentMethod.Stripe);
+        var attempt = order.CreatePaymentAttempt("attempt-1", Now.AddMinutes(15), Now).Value;
+        var cancelTime = Now.AddMinutes(2);
+
+        var firstResult = order.CancelPendingStripePayment(attempt.Id, cancelTime);
+        var secondResult = order.CancelPendingStripePayment(attempt.Id, cancelTime.AddMinutes(1));
+
+        firstResult.IsSuccess.Should().BeTrue();
+        secondResult.IsSuccess.Should().BeTrue();
+        order.Status.Should().Be(OrderStatus.Cancelled);
+        order.PaymentStatus.Should().Be(PaymentStatus.Failed);
+    }
+
+    [Fact]
+    public void CancelPendingStripePayment_WhenAttemptNotFound_ReturnsFailureWithoutMutation()
+    {
+        var order = CreatePayableOrder(PaymentMethod.Stripe);
+        order.CreatePaymentAttempt("attempt-1", Now.AddMinutes(15), Now);
+
+        var result = order.CancelPendingStripePayment(Guid.NewGuid(), Now.AddMinutes(2));
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be("Payment.AttemptNotFound");
+        order.Status.Should().Be(OrderStatus.PendingPayment);
+        order.PaymentStatus.Should().Be(PaymentStatus.Pending);
+    }
+
+    [Fact]
+    public void CancelPendingStripePayment_WhenCodOrder_ReturnsFailureWithoutMutation()
+    {
+        var order = CreatePayableOrder(PaymentMethod.COD);
+
+        var result = order.CancelPendingStripePayment(Guid.NewGuid(), Now.AddMinutes(2));
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be("Payment.InvalidMethod");
+        order.Status.Should().Be(OrderStatus.Confirmed);
+    }
+
+    [Fact]
+    public void CancelPendingStripePayment_WhenOrderStatusNotPendingPayment_ReturnsFailure()
+    {
+        var order = CreatePayableOrder(PaymentMethod.Stripe);
+        var attempt = order.CreatePaymentAttempt("attempt-1", Now.AddMinutes(15), Now).Value;
+        attempt.SetProviderReference("cs_test");
+        order.MarkPaymentSucceeded(attempt.Id, Now.AddMinutes(1));
+
+        var result = order.CancelPendingStripePayment(attempt.Id, Now.AddMinutes(2));
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be("Order.InvalidStatusForCancellation");
+        order.Status.Should().Be(OrderStatus.Confirmed);
+        order.PaymentStatus.Should().Be(PaymentStatus.Completed);
+    }
+
+    [Fact]
+    public void CancelPendingStripePayment_WhenAttemptNotPending_ReturnsFailureWithoutOrderMutation()
+    {
+        var order = CreatePayableOrder(PaymentMethod.Stripe);
+        var attempt = order.CreatePaymentAttempt("attempt-1", Now.AddMinutes(15), Now).Value;
+        attempt.MarkFailed("DECLINED", Now.AddMinutes(1));
+
+        var result = order.CancelPendingStripePayment(attempt.Id, Now.AddMinutes(2));
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be("Payment.InvalidStatusTransition");
+        order.Status.Should().Be(OrderStatus.PendingPayment);
+        order.PaymentStatus.Should().Be(PaymentStatus.Pending);
+    }
+
+    [Fact]
+    public void CancelPendingStripePayment_WhenCancellationTimePrecedesCreatedAt_ReturnsFailureWithoutMutation()
+    {
+        var order = CreatePayableOrder(PaymentMethod.Stripe);
+        var attempt = order.CreatePaymentAttempt("attempt-1", Now.AddMinutes(15), Now).Value;
+
+        var result = order.CancelPendingStripePayment(attempt.Id, Now.AddMinutes(-5));
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be("Payment.InvalidTimestamp");
+        order.Status.Should().Be(OrderStatus.PendingPayment);
+        order.PaymentStatus.Should().Be(PaymentStatus.Pending);
+        attempt.Status.Should().Be(PaymentAttemptStatus.Pending);
+    }
+
     private static Order CreatePayableOrder(PaymentMethod method)
     {
         var order = CreateOrder(method);

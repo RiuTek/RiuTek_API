@@ -47,5 +47,9 @@ public interface IStripePaymentGateway
         string? existingProviderReference,
         CancellationToken cancellationToken = default);
 
+    Task<Result> ExpireCheckoutSessionAsync(
+        string providerReference,
+        CancellationToken cancellationToken = default);
+
     Result<StripeWebhookEvent> ParseAndVerifyWebhook(string payload, string signature);
 }

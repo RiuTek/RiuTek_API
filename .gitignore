@@ -14,6 +14,9 @@
 .context/
 *.context.md
 
+# Local implementation plan exchanged between development agents
+docs/PLAN.md
+
 # Cấu hình bảo mật file appsettings cho .NET
 appsettings.json
 appsettings.*.json

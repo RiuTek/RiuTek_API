@@ -236,6 +236,36 @@ public class Order : BaseEntity, IAggregateRoot
         return Result.Success();
     }
 
+    public Result CancelPendingStripePayment(Guid paymentAttemptId, DateTime cancelledAtUtc)
+    {
+        if (PaymentMethod != PaymentMethod.Stripe)
+            return Result.Failure(Error.Conflict("Payment.InvalidMethod", "Only Stripe payment attempts can be cancelled via this method."));
+
+        var attemptResult = FindPaymentAttempt(paymentAttemptId);
+        if (attemptResult.IsFailure)
+            return Result.Failure(attemptResult.Error);
+
+        var attempt = attemptResult.Value;
+        if (attempt.Method != PaymentMethod.Stripe)
+            return Result.Failure(Error.Conflict("Payment.InvalidMethod", "Only Stripe payment attempts can be cancelled via this method."));
+
+        // If attempt is already cancelled and order is already cancelled, idempotent success
+        if (attempt.Status == PaymentAttemptStatus.Cancelled && Status == OrderStatus.Cancelled)
+            return Result.Success();
+
+        if (Status != OrderStatus.PendingPayment || PaymentStatus != PaymentStatus.Pending)
+            return Result.Failure(Error.Conflict("Order.InvalidStatusForCancellation", "Order must be in PendingPayment status with Pending payment status to cancel."));
+
+        var result = attempt.MarkCancelled(cancelledAtUtc);
+        if (result.IsFailure)
+            return result;
+
+        Status = OrderStatus.Cancelled;
+        PaymentStatus = PaymentStatus.Failed;
+        UpdatedAt = cancelledAtUtc;
+        return Result.Success();
+    }
+
     public Result ChangeFulfillmentStatus(
         OrderStatus expectedStatus,
         OrderStatus newStatus,

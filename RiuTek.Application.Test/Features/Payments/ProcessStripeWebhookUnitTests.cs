@@ -737,4 +737,86 @@ public class ProcessStripeWebhookUnitTests
         result.IsFailure.Should().BeTrue();
         result.Error.Code.Should().Be("Payment.AmountMismatch");
     }
+
+    [Fact]
+    public async Task Handle_CheckoutSessionExpired_WhenOrderAlreadyCancelledByCustomer_ReturnsSuccessAsNoOpWithoutDuplicateStockRestoration()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var (order, attempt, product) = await SeedOrderAndAttemptAsync(context, stockQuantity: 48, itemQuantity: 2, providerReference: "cs_cancel_session");
+
+        // Customer cancelled the order first
+        order.CancelPendingStripePayment(attempt.Id, DateTime.UtcNow);
+        product.StockQuantity += 2;
+        context.StockMovements.Add(new StockMovement(
+            product.Id,
+            2,
+            48,
+            50,
+            StockMovementReason.OrderCancellation,
+            orderId: order.Id,
+            actorUserId: order.UserId));
+        await context.SaveChangesAsync();
+
+        var gatewayMock = new Mock<IStripePaymentGateway>();
+        gatewayMock.Setup(g => g.ParseAndVerifyWebhook(It.IsAny<string>(), It.IsAny<string>()))
+            .Returns(Result.Success(new StripeWebhookEvent(
+                EventType: StripeWebhookEventType.CheckoutSessionExpired,
+                EventId: "evt_late_expired",
+                SessionId: "cs_cancel_session",
+                OrderIdString: order.Id.ToString(),
+                PaymentAttemptIdString: attempt.Id.ToString(),
+                AmountTotal: attempt.Amount,
+                Currency: "vnd",
+                PaymentStatus: "unpaid"
+            )));
+
+        var handler = new ProcessStripeWebhookCommandHandler(context, gatewayMock.Object);
+
+        var result = await handler.Handle(new ProcessStripeWebhookCommand("{}", "sig"), CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+
+        var dbProd = await context.Products.FindAsync(product.Id);
+        dbProd!.StockQuantity.Should().Be(50); // still 50, not double restored to 52
+
+        var movements = await context.StockMovements.Where(m => m.OrderId == order.Id).ToListAsync();
+        movements.Should().ContainSingle();
+        movements[0].Reason.Should().Be(StockMovementReason.OrderCancellation);
+    }
+
+    [Fact]
+    public async Task Handle_CheckoutSessionCompleted_WhenOrderAlreadyCancelledByCustomer_ReturnsConflictAndDoesNotConfirmOrder()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var (order, attempt, product) = await SeedOrderAndAttemptAsync(context, stockQuantity: 48, itemQuantity: 2, providerReference: "cs_cancel_session_2");
+
+        // Customer cancelled the order first
+        order.CancelPendingStripePayment(attempt.Id, DateTime.UtcNow);
+        product.StockQuantity += 2;
+        await context.SaveChangesAsync();
+
+        var gatewayMock = new Mock<IStripePaymentGateway>();
+        gatewayMock.Setup(g => g.ParseAndVerifyWebhook(It.IsAny<string>(), It.IsAny<string>()))
+            .Returns(Result.Success(new StripeWebhookEvent(
+                EventType: StripeWebhookEventType.CheckoutSessionCompleted,
+                EventId: "evt_late_completed",
+                SessionId: "cs_cancel_session_2",
+                OrderIdString: order.Id.ToString(),
+                PaymentAttemptIdString: attempt.Id.ToString(),
+                AmountTotal: attempt.Amount,
+                Currency: "vnd",
+                PaymentStatus: "paid"
+            )));
+
+        var handler = new ProcessStripeWebhookCommandHandler(context, gatewayMock.Object);
+
+        var result = await handler.Handle(new ProcessStripeWebhookCommand("{}", "sig"), CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be("Payment.InvalidState");
+
+        var dbOrder = await context.Orders.FindAsync(order.Id);
+        dbOrder!.Status.Should().Be(OrderStatus.Cancelled);
+        dbOrder.PaymentStatus.Should().Be(PaymentStatus.Failed);
+    }
 }

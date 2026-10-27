@@ -28,6 +28,40 @@ public class FakeStripePaymentGateway : IStripePaymentGateway
 
     public Func<CreateStripeCheckoutSessionRequest, string?, Result<StripeCheckoutSessionResult>>? OnEnsureSession { get; set; }
     public Func<string, string, Result<StripeWebhookEvent>>? OnParseWebhook { get; set; }
+    public Func<string, Result>? OnExpireSession { get; set; }
+
+    public Task<Result> ExpireCheckoutSessionAsync(
+        string providerReference,
+        CancellationToken cancellationToken = default)
+    {
+        if (!IsEnabled)
+        {
+            return Task.FromResult(Result.Failure(Error.Unavailable(
+                "Payment.GatewayUnavailable",
+                "Stripe payment gateway is temporarily unavailable. Please retry.")));
+        }
+
+        if (ShouldFailWithUnavailable)
+        {
+            return Task.FromResult(Result.Failure(Error.Unavailable(
+                "Payment.GatewayUnavailable",
+                "Stripe payment gateway is temporarily unavailable. Please retry.")));
+        }
+
+        if (string.IsNullOrWhiteSpace(providerReference))
+        {
+            return Task.FromResult(Result.Failure(Error.Validation(
+                "Payment.InvalidProviderReference",
+                "Provider reference is required.")));
+        }
+
+        if (OnExpireSession != null)
+        {
+            return Task.FromResult(OnExpireSession(providerReference));
+        }
+
+        return Task.FromResult(Result.Success());
+    }
 
     public Task<Result<StripeCheckoutSessionResult>> EnsureCheckoutSessionAsync(
         CreateStripeCheckoutSessionRequest request,
@@ -1315,5 +1349,268 @@ public class PaymentStripeIntegrationTests : IAsyncLifetime
         req2.Headers.Add("Stripe-Signature", "valid_signature");
         var res2 = await client.SendAsync(req2);
         res2.StatusCode.Should().Be(HttpStatusCode.Conflict);
+    }
+
+    [Fact]
+    public async Task CancelMyOrder_PendingStripeOrder_Succeeds_RestoresStockAndAuditsMovement()
+    {
+        string? expiredReference = null;
+        var (client, fakeGateway) = CreateClientWithFakeGateway(gw =>
+        {
+            gw.OnExpireSession = pref =>
+            {
+                expiredReference = pref;
+                return Result.Success();
+            };
+        });
+
+        var (user, address, product, cart, token) = await SeedPrerequisitesAsync(stockQuantity: 50, cartQuantity: 2);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        var requestBody = new CheckoutCartRequest(
+            AddressId: address.Id,
+            ExpectedCartVersion: cart.Version,
+            PaymentMethod: PaymentMethod.Stripe,
+            Notes: "Stripe cancel test"
+        );
+
+        using var request1 = new HttpRequestMessage(HttpMethod.Post, "/api/v1/orders/checkout")
+        {
+            Content = JsonContent.Create(requestBody)
+        };
+        request1.Headers.Add("Idempotency-Key", "idemp-cancel-" + Guid.NewGuid().ToString("N"));
+        var response1 = await client.SendAsync(request1);
+        response1.StatusCode.Should().Be(HttpStatusCode.Created);
+        var orderDto = (await response1.Content.ReadFromJsonAsync<CheckoutOrderDto>(JsonOptions))!;
+
+        // Customer cancels order
+        var cancelResp = await client.PostAsync($"/api/v1/orders/{orderDto.Id}/cancel", null);
+        cancelResp.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var detail = (await cancelResp.Content.ReadFromJsonAsync<OrderDetailDto>(JsonOptions))!;
+        detail.Id.Should().Be(orderDto.Id);
+        detail.Status.Should().Be(OrderStatus.Cancelled);
+        detail.PaymentStatus.Should().Be(PaymentStatus.Failed);
+
+        expiredReference.Should().NotBeNullOrWhiteSpace();
+
+        // Verify database state: order, payment attempt, product stock, stock movement
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+            var dbOrder = await db.Orders.Include(o => o.PaymentAttempts).FirstAsync(o => o.Id == orderDto.Id);
+            dbOrder.Status.Should().Be(OrderStatus.Cancelled);
+            dbOrder.PaymentStatus.Should().Be(PaymentStatus.Failed);
+            dbOrder.PaymentAttempts.Should().ContainSingle();
+            dbOrder.PaymentAttempts.First().Status.Should().Be(PaymentAttemptStatus.Cancelled);
+
+            var dbProduct = await db.Products.FindAsync(product.Id);
+            dbProduct!.StockQuantity.Should().Be(50); // 48 + 2 restored to 50
+
+            var movements = await db.StockMovements
+                .Where(m => m.OrderId == orderDto.Id && m.Reason == StockMovementReason.OrderCancellation)
+                .ToListAsync();
+
+            movements.Should().ContainSingle();
+            movements[0].QuantityDelta.Should().Be(2);
+            movements[0].ActorUserId.Should().Be(user.Id);
+            movements[0].StockBefore.Should().Be(48);
+            movements[0].StockAfter.Should().Be(50);
+        }
+    }
+
+    [Fact]
+    public async Task CancelMyOrder_WhenOtherUser_ReturnsNotFound()
+    {
+        var (client, _) = CreateClientWithFakeGateway();
+        var (user, address, product, cart, token) = await SeedPrerequisitesAsync(stockQuantity: 50, cartQuantity: 2);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        var requestBody = new CheckoutCartRequest(
+            AddressId: address.Id,
+            ExpectedCartVersion: cart.Version,
+            PaymentMethod: PaymentMethod.Stripe,
+            Notes: "Stripe cancel other user"
+        );
+
+        using var request1 = new HttpRequestMessage(HttpMethod.Post, "/api/v1/orders/checkout")
+        {
+            Content = JsonContent.Create(requestBody)
+        };
+        request1.Headers.Add("Idempotency-Key", "idemp-other-" + Guid.NewGuid().ToString("N"));
+        var response1 = await client.SendAsync(request1);
+        response1.StatusCode.Should().Be(HttpStatusCode.Created);
+        var orderDto = (await response1.Content.ReadFromJsonAsync<CheckoutOrderDto>(JsonOptions))!;
+
+        // Different user token
+        var (_, _, _, _, otherToken) = await SeedPrerequisitesAsync(stockQuantity: 20, cartQuantity: 1);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", otherToken);
+
+        var cancelResp = await client.PostAsync($"/api/v1/orders/{orderDto.Id}/cancel", null);
+        cancelResp.StatusCode.Should().Be(HttpStatusCode.NotFound);
+
+        // Verify database: order remains pending
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var dbOrder = await db.Orders.FindAsync(orderDto.Id);
+            dbOrder!.Status.Should().Be(OrderStatus.PendingPayment);
+        }
+    }
+
+    [Fact]
+    public async Task CancelMyOrder_WhenGatewayUnavailable_Returns503AndPreservesDatabase()
+    {
+        var (client, _) = CreateClientWithFakeGateway(gw =>
+        {
+            gw.ShouldFailWithUnavailable = false; // checkout succeeds
+        });
+
+        var (user, address, product, cart, token) = await SeedPrerequisitesAsync(stockQuantity: 50, cartQuantity: 2);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        var requestBody = new CheckoutCartRequest(
+            AddressId: address.Id,
+            ExpectedCartVersion: cart.Version,
+            PaymentMethod: PaymentMethod.Stripe,
+            Notes: "Stripe 503 test"
+        );
+
+        using var request1 = new HttpRequestMessage(HttpMethod.Post, "/api/v1/orders/checkout")
+        {
+            Content = JsonContent.Create(requestBody)
+        };
+        request1.Headers.Add("Idempotency-Key", "idemp-503-" + Guid.NewGuid().ToString("N"));
+        var response1 = await client.SendAsync(request1);
+        response1.StatusCode.Should().Be(HttpStatusCode.Created);
+        var orderDto = (await response1.Content.ReadFromJsonAsync<CheckoutOrderDto>(JsonOptions))!;
+
+        // Configure gateway to fail on expire
+        var (client2, _) = CreateClientWithFakeGateway(gw =>
+        {
+            gw.ShouldFailWithUnavailable = true;
+        });
+        client2.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        var cancelResp = await client2.PostAsync($"/api/v1/orders/{orderDto.Id}/cancel", null);
+        cancelResp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+
+        // Verify DB not mutated
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var dbOrder = await db.Orders.FindAsync(orderDto.Id);
+            dbOrder!.Status.Should().Be(OrderStatus.PendingPayment);
+
+            var dbProduct = await db.Products.FindAsync(product.Id);
+            dbProduct!.StockQuantity.Should().Be(48); // not restored
+        }
+    }
+
+    [Fact]
+    public async Task CancelMyOrder_WhenGatewayConflict_ReturnsConflictAndPreservesDatabase()
+    {
+        var (client, _) = CreateClientWithFakeGateway();
+
+        var (user, address, product, cart, token) = await SeedPrerequisitesAsync(stockQuantity: 50, cartQuantity: 2);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        var requestBody = new CheckoutCartRequest(
+            AddressId: address.Id,
+            ExpectedCartVersion: cart.Version,
+            PaymentMethod: PaymentMethod.Stripe,
+            Notes: "Stripe 409 test"
+        );
+
+        using var request1 = new HttpRequestMessage(HttpMethod.Post, "/api/v1/orders/checkout")
+        {
+            Content = JsonContent.Create(requestBody)
+        };
+        request1.Headers.Add("Idempotency-Key", "idemp-409-" + Guid.NewGuid().ToString("N"));
+        var response1 = await client.SendAsync(request1);
+        response1.StatusCode.Should().Be(HttpStatusCode.Created);
+        var orderDto = (await response1.Content.ReadFromJsonAsync<CheckoutOrderDto>(JsonOptions))!;
+
+        // Configure gateway to return conflict on expire (e.g. session completed on Stripe)
+        var (client2, _) = CreateClientWithFakeGateway(gw =>
+        {
+            gw.OnExpireSession = _ => Result.Failure(Error.Conflict("Payment.CannotExpireCompletedSession", "Completed"));
+        });
+        client2.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        var cancelResp = await client2.PostAsync($"/api/v1/orders/{orderDto.Id}/cancel", null);
+        cancelResp.StatusCode.Should().Be(HttpStatusCode.Conflict);
+
+        // Verify DB not mutated
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var dbOrder = await db.Orders.FindAsync(orderDto.Id);
+            dbOrder!.Status.Should().Be(OrderStatus.PendingPayment);
+
+            var dbProduct = await db.Products.FindAsync(product.Id);
+            dbProduct!.StockQuantity.Should().Be(48); // not restored
+        }
+    }
+
+    [Fact]
+    public async Task CancelMyOrder_IdempotentReplay_ReturnsCancelledWithoutDuplicateStockRestoration()
+    {
+        int expireCallCount = 0;
+        var (client, _) = CreateClientWithFakeGateway(gw =>
+        {
+            gw.OnExpireSession = _ =>
+            {
+                Interlocked.Increment(ref expireCallCount);
+                return Result.Success();
+            };
+        });
+
+        var (user, address, product, cart, token) = await SeedPrerequisitesAsync(stockQuantity: 50, cartQuantity: 2);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        var requestBody = new CheckoutCartRequest(
+            AddressId: address.Id,
+            ExpectedCartVersion: cart.Version,
+            PaymentMethod: PaymentMethod.Stripe,
+            Notes: "Stripe replay cancel test"
+        );
+
+        using var request1 = new HttpRequestMessage(HttpMethod.Post, "/api/v1/orders/checkout")
+        {
+            Content = JsonContent.Create(requestBody)
+        };
+        request1.Headers.Add("Idempotency-Key", "idemp-replay-" + Guid.NewGuid().ToString("N"));
+        var response1 = await client.SendAsync(request1);
+        response1.StatusCode.Should().Be(HttpStatusCode.Created);
+        var orderDto = (await response1.Content.ReadFromJsonAsync<CheckoutOrderDto>(JsonOptions))!;
+
+        // First cancel
+        var cancelResp1 = await client.PostAsync($"/api/v1/orders/{orderDto.Id}/cancel", null);
+        cancelResp1.StatusCode.Should().Be(HttpStatusCode.OK);
+        expireCallCount.Should().Be(1);
+
+        // Replay cancel
+        var cancelResp2 = await client.PostAsync($"/api/v1/orders/{orderDto.Id}/cancel", null);
+        cancelResp2.StatusCode.Should().Be(HttpStatusCode.OK);
+        expireCallCount.Should().Be(1); // not called again
+
+        var detail2 = (await cancelResp2.Content.ReadFromJsonAsync<OrderDetailDto>(JsonOptions))!;
+        detail2.Status.Should().Be(OrderStatus.Cancelled);
+
+        // Verify stock is still 50 and exactly 1 movement exists
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var dbProduct = await db.Products.FindAsync(product.Id);
+            dbProduct!.StockQuantity.Should().Be(50);
+
+            var movements = await db.StockMovements
+                .Where(m => m.OrderId == orderDto.Id && m.Reason == StockMovementReason.OrderCancellation)
+                .ToListAsync();
+
+            movements.Should().ContainSingle();
+        }
     }
 }

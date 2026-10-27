@@ -13,6 +13,7 @@ using Moq;
 using RiuTek.API.Controllers;
 using RiuTek.Application.Common.Models;
 using RiuTek.Application.DTOs;
+using RiuTek.Application.Features.Orders.Commands;
 using RiuTek.Application.Features.Orders.Queries;
 using RiuTek.Core.Common;
 using RiuTek.Core.Enums;
@@ -148,6 +149,26 @@ public class OrdersControllerContractTests : IDisposable
         attrs.Should().Contain(a => a.StatusCode == StatusCodes.Status503ServiceUnavailable);
     }
 
+    [Fact]
+    public void CancelMyOrder_HasCorrectHttpPostAttributeAndProducesResponseTypeAttributes()
+    {
+        var method = typeof(OrdersController).GetMethod(nameof(OrdersController.CancelMyOrder));
+        method.Should().NotBeNull();
+
+        var httpPostAttr = method!.GetCustomAttribute<HttpPostAttribute>();
+        httpPostAttr.Should().NotBeNull();
+        httpPostAttr!.Template.Should().Be("{id:guid}/cancel");
+
+        var attrs = method.GetCustomAttributes<ProducesResponseTypeAttribute>().ToList();
+        attrs.Should().Contain(a => a.StatusCode == StatusCodes.Status200OK && a.Type == typeof(OrderDetailDto));
+        attrs.Should().Contain(a => a.StatusCode == StatusCodes.Status400BadRequest);
+        attrs.Should().Contain(a => a.StatusCode == StatusCodes.Status401Unauthorized);
+        attrs.Should().Contain(a => a.StatusCode == StatusCodes.Status403Forbidden);
+        attrs.Should().Contain(a => a.StatusCode == StatusCodes.Status404NotFound);
+        attrs.Should().Contain(a => a.StatusCode == StatusCodes.Status409Conflict);
+        attrs.Should().Contain(a => a.StatusCode == StatusCodes.Status503ServiceUnavailable);
+    }
+
     #endregion
 
     #region Action Delegation to Mediator Tests
@@ -205,6 +226,28 @@ public class OrdersControllerContractTests : IDisposable
         var notFoundResult = actionResult as NotFoundObjectResult;
         notFoundResult.Should().NotBeNull();
         notFoundResult!.StatusCode.Should().Be(StatusCodes.Status404NotFound);
+    }
+
+    [Fact]
+    public async Task CancelMyOrder_PassesIdToMediator_AndReturnsOk()
+    {
+        var orderId = Guid.NewGuid();
+        var detailDto = new OrderDetailDto(
+            orderId, "ORD-123", OrderStatus.Cancelled, PaymentMethod.Stripe, PaymentStatus.Failed,
+            "VND", "Cust", "cust@test.com", "0901", "Addr", 100m, 0m, 100m, null, DateTime.UtcNow, []
+        );
+
+        _senderMock.Setup(s => s.Send(
+            It.Is<CancelMyOrderCommand>(c => c.OrderId == orderId),
+            It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Result.Success(detailDto));
+
+        var actionResult = await _controller.CancelMyOrder(orderId);
+
+        var okResult = actionResult as OkObjectResult;
+        okResult.Should().NotBeNull();
+        okResult!.StatusCode.Should().Be(StatusCodes.Status200OK);
+        okResult.Value.Should().Be(detailDto);
     }
 
     #endregion

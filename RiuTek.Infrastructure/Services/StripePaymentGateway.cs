@@ -283,4 +283,153 @@ public class StripePaymentGateway : IStripePaymentGateway
             PaymentStatus: null
         ));
     }
+
+    public async Task<Result> ExpireCheckoutSessionAsync(
+        string providerReference,
+        CancellationToken cancellationToken = default)
+    {
+        if (!IsEnabled || _stripeClient is null)
+        {
+            return Result.Failure(Error.Unavailable(
+                "Payment.GatewayUnavailable",
+                "Stripe payment gateway is temporarily unavailable. Please retry."));
+        }
+
+        if (string.IsNullOrWhiteSpace(providerReference))
+        {
+            return Result.Failure(Error.Validation(
+                "Payment.InvalidProviderReference",
+                "Provider reference is required."));
+        }
+
+        var sessionService = new SessionService(_stripeClient);
+        var trimmedReference = providerReference.Trim();
+
+        try
+        {
+            Session session;
+            try
+            {
+                session = await sessionService.GetAsync(trimmedReference, cancellationToken: cancellationToken);
+            }
+            catch (StripeException ex) when (ex.HttpStatusCode == System.Net.HttpStatusCode.NotFound ||
+                                            ex.StripeError?.Code == "resource_missing")
+            {
+                _logger.LogWarning("Checkout session was not found on Stripe. StatusCode: {StatusCode}", ex.HttpStatusCode);
+                return Result.Failure(Error.Conflict(
+                    "Payment.InvalidSessionState",
+                    "Checkout session was not found on Stripe."));
+            }
+
+            if (session is null)
+            {
+                return Result.Failure(Error.Conflict(
+                    "Payment.InvalidSessionState",
+                    "Checkout session was not found on Stripe."));
+            }
+
+            // 1. If already expired, return success (idempotent / retry)
+            if (string.Equals(session.Status, "expired", StringComparison.OrdinalIgnoreCase))
+            {
+                return Result.Success();
+            }
+
+            // 2. If complete or paid, return conflict
+            if (string.Equals(session.Status, "complete", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(session.PaymentStatus, "paid", StringComparison.OrdinalIgnoreCase))
+            {
+                return Result.Failure(Error.Conflict(
+                    "Payment.CannotExpireCompletedSession",
+                    "Stripe checkout session has already been completed or paid."));
+            }
+
+            // 3. If open, attempt to expire
+            if (string.Equals(session.Status, "open", StringComparison.OrdinalIgnoreCase))
+            {
+                Session expiredSession;
+                try
+                {
+                    expiredSession = await sessionService.ExpireAsync(trimmedReference, cancellationToken: cancellationToken);
+                }
+                catch (StripeException ex)
+                {
+                    _logger.LogWarning("Stripe error on expire attempt. Checking session state. StripeErrorCode: {StripeErrorCode}", ex.StripeError?.Code);
+                    try
+                    {
+                        var recheckSession = await sessionService.GetAsync(trimmedReference, cancellationToken: cancellationToken);
+                        if (string.Equals(recheckSession.Status, "expired", StringComparison.OrdinalIgnoreCase))
+                        {
+                            return Result.Success();
+                        }
+
+                        if (string.Equals(recheckSession.Status, "complete", StringComparison.OrdinalIgnoreCase) ||
+                            string.Equals(recheckSession.PaymentStatus, "paid", StringComparison.OrdinalIgnoreCase))
+                        {
+                            return Result.Failure(Error.Conflict(
+                                "Payment.CannotExpireCompletedSession",
+                                "Stripe checkout session has already been completed or paid."));
+                        }
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch
+                    {
+                        // fall through to throw outer StripeException
+                    }
+
+                    throw;
+                }
+
+                if (string.Equals(expiredSession.Status, "expired", StringComparison.OrdinalIgnoreCase))
+                {
+                    return Result.Success();
+                }
+
+                if (string.Equals(expiredSession.Status, "complete", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(expiredSession.PaymentStatus, "paid", StringComparison.OrdinalIgnoreCase))
+                {
+                    return Result.Failure(Error.Conflict(
+                        "Payment.CannotExpireCompletedSession",
+                        "Stripe checkout session has already been completed or paid."));
+                }
+
+                return Result.Failure(Error.Conflict(
+                    "Payment.InvalidSessionState",
+                    $"Stripe checkout session could not be expired (Status: {expiredSession.Status})."));
+            }
+
+            return Result.Failure(Error.Conflict(
+                "Payment.InvalidSessionState",
+                $"Stripe checkout session is in an invalid state for expiry (Status: {session.Status})."));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogError("Stripe API call timed out or was canceled internally during session expiry.");
+            return Result.Failure(Error.Unavailable(
+                "Payment.GatewayUnavailable",
+                "Stripe payment gateway is temporarily unavailable. Please retry."));
+        }
+        catch (StripeException ex)
+        {
+            _logger.LogError("Stripe API error expiring checkout session. StripeErrorCode: {StripeErrorCode}, HttpStatusCode: {StatusCode}",
+                ex.StripeError?.Code ?? "Unknown",
+                ex.HttpStatusCode);
+            return Result.Failure(Error.Unavailable(
+                "Payment.GatewayUnavailable",
+                "Stripe payment gateway is temporarily unavailable. Please retry."));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError("Unexpected error communicating with Stripe gateway during session expiry. ExceptionType: {ExceptionType}", ex.GetType().Name);
+            return Result.Failure(Error.Unavailable(
+                "Payment.GatewayUnavailable",
+                "Stripe payment gateway is temporarily unavailable. Please retry."));
+        }
+    }
 }
