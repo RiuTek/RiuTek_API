@@ -68,6 +68,11 @@ public class ProductConfiguration : IEntityTypeConfiguration<Product>
             .HasColumnType("jsonb")
             .IsRequired();
 
+        // GIN index for JSONB hardware specifications containment queries
+        builder.HasIndex(p => p.Specifications)
+            .HasMethod("gin")
+            .HasOperators("jsonb_path_ops");
+
         // Native pgvector column vector(1536)
         builder.Property(p => p.Embedding)
             .HasColumnType("vector(1536)");

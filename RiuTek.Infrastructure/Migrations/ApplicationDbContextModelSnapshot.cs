@@ -659,6 +659,11 @@ namespace RiuTek.Infrastructure.Migrations
                     b.HasIndex("Slug")
                         .IsUnique();
 
+                    b.HasIndex("Specifications");
+
+                    NpgsqlIndexBuilderExtensions.HasMethod(b.HasIndex("Specifications"), "gin");
+                    NpgsqlIndexBuilderExtensions.HasOperators(b.HasIndex("Specifications"), new[] { "jsonb_path_ops" });
+
                     b.ToTable("Products", (string)null);
                 });
 

@@ -42,6 +42,7 @@ public static class DependencyInjection
         services.AddScoped<IApplicationDbContext>(sp => sp.GetRequiredService<ApplicationDbContext>());
         services.AddScoped<IUnitOfWork>(sp => sp.GetRequiredService<ApplicationDbContext>());
         services.AddScoped(typeof(IRepository<>), typeof(Repository<>));
+        services.AddScoped<IProductSpecificationFilterService, Services.ProductSpecificationFilterService>();
 
         // JWT Settings Configuration & Fail-Fast Validation
         var jwtSettings = new JwtSettings();

@@ -26,10 +26,14 @@ public class GetProductsQueryValidator : AbstractValidator<GetProductsQuery>
 public class GetProductsQueryHandler : IRequestHandler<GetProductsQuery, Result<PagedResult<ProductSummaryDto>>>
 {
     private readonly IApplicationDbContext _context;
+    private readonly IProductSpecificationFilterService? _specFilterService;
 
-    public GetProductsQueryHandler(IApplicationDbContext context)
+    public GetProductsQueryHandler(
+        IApplicationDbContext context,
+        IProductSpecificationFilterService? specFilterService = null)
     {
         _context = context;
+        _specFilterService = specFilterService;
     }
 
     public async Task<Result<PagedResult<ProductSummaryDto>>> Handle(
@@ -56,6 +60,11 @@ public class GetProductsQueryHandler : IRequestHandler<GetProductsQuery, Result<
         var query = _context.Products
             .AsNoTracking()
             .ApplyFilters(request.Options, categoryIds);
+
+        if (_specFilterService != null)
+        {
+            query = _specFilterService.Apply(query, request.Options);
+        }
 
         var totalCount = await query.CountAsync(cancellationToken);
 

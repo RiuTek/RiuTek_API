@@ -48,6 +48,45 @@ public class ProductQueryHandlerTests
     }
 
     [Fact]
+    public async Task GetProducts_InvokesSpecificationFilterService_BeforeCountAndPagination_WithIntactOptions()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var category = CreateCategory("CPU", "cpu", ComponentType.Cpu);
+        context.Categories.Add(category);
+
+        var p1 = new Product(category.Id, "Product 1", "prod-1", "SKU1", "BrandA", 100, 10, "img.jpg", ComponentType.Cpu, CreateCpuSpec()) { IsActive = true };
+        var p2 = new Product(category.Id, "Product 2", "prod-2", "SKU2", "BrandB", 200, 5, "img.jpg", ComponentType.Cpu, CreateCpuSpec()) { IsActive = true };
+        context.Products.AddRange(p1, p2);
+        await context.SaveChangesAsync();
+
+        var options = new ProductFilterOptions(
+            ComponentType: ComponentType.Cpu,
+            Socket: CpuSocket.AM5,
+            HasIntegratedGpu: true);
+
+        ProductFilterOptions? capturedOptions = null;
+        var mockFilterService = new Mock<IProductSpecificationFilterService>();
+        mockFilterService
+            .Setup(s => s.Apply(It.IsAny<IQueryable<Product>>(), It.IsAny<ProductFilterOptions>()))
+            .Returns<IQueryable<Product>, ProductFilterOptions>((q, opt) =>
+            {
+                capturedOptions = opt;
+                // Filter down to p1 to verify total count and pagination use filtered dataset
+                return q.Where(p => p.Id == p1.Id);
+            });
+
+        var handler = new GetProductsQueryHandler(context, mockFilterService.Object);
+        var result = await handler.Handle(new GetProductsQuery(options), CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+        capturedOptions.Should().Be(options);
+        result.Value.TotalCount.Should().Be(1);
+        result.Value.Items.Should().HaveCount(1);
+        result.Value.Items.Single().Id.Should().Be(p1.Id);
+        mockFilterService.Verify(s => s.Apply(It.IsAny<IQueryable<Product>>(), options), Times.Once);
+    }
+
+    [Fact]
     public async Task GetProducts_DefaultFilter_ReturnsBothActiveAndInactiveProducts()
     {
         await using var context = TestDbContextFactory.CreateInMemoryDbContext();
