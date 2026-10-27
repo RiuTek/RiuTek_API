@@ -328,22 +328,13 @@ public class StripePaymentGateway : IStripePaymentGateway
                     "Checkout session was not found on Stripe."));
             }
 
-            // 1. If already expired, return success (idempotent / retry)
-            if (string.Equals(session.Status, "expired", StringComparison.OrdinalIgnoreCase))
+            var classified = ClassifySessionState(session);
+            if (classified is not null)
             {
-                return Result.Success();
+                return classified;
             }
 
-            // 2. If complete or paid, return conflict
-            if (string.Equals(session.Status, "complete", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(session.PaymentStatus, "paid", StringComparison.OrdinalIgnoreCase))
-            {
-                return Result.Failure(Error.Conflict(
-                    "Payment.CannotExpireCompletedSession",
-                    "Stripe checkout session has already been completed or paid."));
-            }
-
-            // 3. If open, attempt to expire
+            // If open, attempt to expire
             if (string.Equals(session.Status, "open", StringComparison.OrdinalIgnoreCase))
             {
                 Session expiredSession;
@@ -357,17 +348,10 @@ public class StripePaymentGateway : IStripePaymentGateway
                     try
                     {
                         var recheckSession = await sessionService.GetAsync(trimmedReference, cancellationToken: cancellationToken);
-                        if (string.Equals(recheckSession.Status, "expired", StringComparison.OrdinalIgnoreCase))
+                        var recheckClassified = ClassifySessionState(recheckSession);
+                        if (recheckClassified is not null)
                         {
-                            return Result.Success();
-                        }
-
-                        if (string.Equals(recheckSession.Status, "complete", StringComparison.OrdinalIgnoreCase) ||
-                            string.Equals(recheckSession.PaymentStatus, "paid", StringComparison.OrdinalIgnoreCase))
-                        {
-                            return Result.Failure(Error.Conflict(
-                                "Payment.CannotExpireCompletedSession",
-                                "Stripe checkout session has already been completed or paid."));
+                            return recheckClassified;
                         }
                     }
                     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -382,17 +366,10 @@ public class StripePaymentGateway : IStripePaymentGateway
                     throw;
                 }
 
-                if (string.Equals(expiredSession.Status, "expired", StringComparison.OrdinalIgnoreCase))
+                var expiredClassified = ClassifySessionState(expiredSession);
+                if (expiredClassified is not null)
                 {
-                    return Result.Success();
-                }
-
-                if (string.Equals(expiredSession.Status, "complete", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(expiredSession.PaymentStatus, "paid", StringComparison.OrdinalIgnoreCase))
-                {
-                    return Result.Failure(Error.Conflict(
-                        "Payment.CannotExpireCompletedSession",
-                        "Stripe checkout session has already been completed or paid."));
+                    return expiredClassified;
                 }
 
                 return Result.Failure(Error.Conflict(
@@ -431,5 +408,23 @@ public class StripePaymentGateway : IStripePaymentGateway
                 "Payment.GatewayUnavailable",
                 "Stripe payment gateway is temporarily unavailable. Please retry."));
         }
+    }
+
+    private static Result? ClassifySessionState(Session session)
+    {
+        if (string.Equals(session.Status, "complete", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(session.PaymentStatus, "paid", StringComparison.OrdinalIgnoreCase))
+        {
+            return Result.Failure(Error.Conflict(
+                "Payment.CannotExpireCompletedSession",
+                "Stripe checkout session has already been completed or paid."));
+        }
+
+        if (string.Equals(session.Status, "expired", StringComparison.OrdinalIgnoreCase))
+        {
+            return Result.Success();
+        }
+
+        return null;
     }
 }

@@ -848,7 +848,8 @@ public class StripePaymentGatewayUnitTests
             .ReturnsAsync(new Session
             {
                 Id = sessionId,
-                Status = "expired"
+                Status = "expired",
+                PaymentStatus = "unpaid"
             });
 
         var gateway = new StripePaymentGateway(settings, NullLogger<StripePaymentGateway>.Instance, mockClient.Object);
@@ -856,6 +857,44 @@ public class StripePaymentGatewayUnitTests
         var result = await gateway.ExpireCheckoutSessionAsync(sessionId);
 
         result.IsSuccess.Should().BeTrue();
+        mockClient.Verify(c => c.RequestAsync<Session>(
+            HttpMethod.Post,
+            $"/v1/checkout/sessions/{sessionId}/expire",
+            It.IsAny<BaseOptions>(),
+            It.IsAny<RequestOptions>(),
+            It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task ExpireCheckoutSessionAsync_WhenInitialGetSessionExpiredAndPaid_ReturnsConflictAndNeverCallsExpire()
+    {
+        var settings = Options.Create(new StripeSettings
+        {
+            Enabled = true,
+            SecretKey = "sk_test_mock_123"
+        });
+        var sessionId = "cs_expired_but_paid";
+        var mockClient = new Mock<IStripeClient>();
+        mockClient.Setup(c => c.RequestAsync<Session>(
+            HttpMethod.Get,
+            $"/v1/checkout/sessions/{sessionId}",
+            It.IsAny<BaseOptions>(),
+            It.IsAny<RequestOptions>(),
+            It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new Session
+            {
+                Id = sessionId,
+                Status = "expired",
+                PaymentStatus = "paid"
+            });
+
+        var gateway = new StripePaymentGateway(settings, NullLogger<StripePaymentGateway>.Instance, mockClient.Object);
+
+        var result = await gateway.ExpireCheckoutSessionAsync(sessionId);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Type.Should().Be(ErrorType.Conflict);
+        result.Error.Code.Should().Be("Payment.CannotExpireCompletedSession");
         mockClient.Verify(c => c.RequestAsync<Session>(
             HttpMethod.Post,
             $"/v1/checkout/sessions/{sessionId}/expire",
@@ -1014,6 +1053,87 @@ public class StripePaymentGatewayUnitTests
         var result = await gateway.ExpireCheckoutSessionAsync(sessionId);
 
         result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be("Payment.CannotExpireCompletedSession");
+    }
+
+    [Fact]
+    public async Task ExpireCheckoutSessionAsync_WhenRecheckAfterExpireFailureReturnsExpiredAndPaid_ReturnsConflict()
+    {
+        var settings = Options.Create(new StripeSettings
+        {
+            Enabled = true,
+            SecretKey = "sk_test_mock_123"
+        });
+        var sessionId = "cs_race_expired_paid";
+        var mockClient = new Mock<IStripeClient>();
+        mockClient.SetupSequence(c => c.RequestAsync<Session>(
+            HttpMethod.Get,
+            $"/v1/checkout/sessions/{sessionId}",
+            It.IsAny<BaseOptions>(),
+            It.IsAny<RequestOptions>(),
+            It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new Session { Id = sessionId, Status = "open", PaymentStatus = "unpaid" })
+            .ReturnsAsync(new Session { Id = sessionId, Status = "expired", PaymentStatus = "paid" });
+
+        mockClient.Setup(c => c.RequestAsync<Session>(
+            HttpMethod.Post,
+            $"/v1/checkout/sessions/{sessionId}/expire",
+            It.IsAny<BaseOptions>(),
+            It.IsAny<RequestOptions>(),
+            It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new StripeException("Session already paid"));
+
+        var gateway = new StripePaymentGateway(settings, NullLogger<StripePaymentGateway>.Instance, mockClient.Object);
+
+        var result = await gateway.ExpireCheckoutSessionAsync(sessionId);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Type.Should().Be(ErrorType.Conflict);
+        result.Error.Code.Should().Be("Payment.CannotExpireCompletedSession");
+    }
+
+    [Fact]
+    public async Task ExpireCheckoutSessionAsync_WhenExpireApiResponseReturnsExpiredAndPaid_ReturnsConflict()
+    {
+        var settings = Options.Create(new StripeSettings
+        {
+            Enabled = true,
+            SecretKey = "sk_test_mock_123"
+        });
+        var sessionId = "cs_expire_res_paid";
+        var mockClient = new Mock<IStripeClient>();
+        mockClient.Setup(c => c.RequestAsync<Session>(
+            HttpMethod.Get,
+            $"/v1/checkout/sessions/{sessionId}",
+            It.IsAny<BaseOptions>(),
+            It.IsAny<RequestOptions>(),
+            It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new Session
+            {
+                Id = sessionId,
+                Status = "open",
+                PaymentStatus = "unpaid"
+            });
+
+        mockClient.Setup(c => c.RequestAsync<Session>(
+            HttpMethod.Post,
+            $"/v1/checkout/sessions/{sessionId}/expire",
+            It.IsAny<BaseOptions>(),
+            It.IsAny<RequestOptions>(),
+            It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new Session
+            {
+                Id = sessionId,
+                Status = "expired",
+                PaymentStatus = "paid"
+            });
+
+        var gateway = new StripePaymentGateway(settings, NullLogger<StripePaymentGateway>.Instance, mockClient.Object);
+
+        var result = await gateway.ExpireCheckoutSessionAsync(sessionId);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Type.Should().Be(ErrorType.Conflict);
         result.Error.Code.Should().Be("Payment.CannotExpireCompletedSession");
     }
 
