@@ -507,10 +507,14 @@ public class SelectedCheckoutTests
 
     #endregion
 
-    #region B8: Concurrent Checkouts with Different Keys Against Same Cart Version
+    #region B8: Sequential Requests with Stale Cart Version (Unit Check)
 
+    /// <summary>
+    /// Demonstrates sequential checkout requests where the second request passes a stale ExpectedCartVersion.
+    /// Real deterministic concurrent race on PostgreSQL is verified via integration tests (Scenario C1).
+    /// </summary>
     [Fact]
-    public async Task B8_TwoCheckoutsDifferentKeys_SameCartVersion_OneSucceeds_OneConflicts()
+    public async Task B8_SequentialCheckoutsWithStaleCartVersion_FirstSucceeds_SecondFailsWithCartChanged()
     {
         await using var context = TestDbContextFactory.CreateInMemoryDbContext();
         var (user, address, productA, _, productC, cart) = await SeedMultiProductCartAsync(context);
@@ -546,10 +550,14 @@ public class SelectedCheckoutTests
 
     #endregion
 
-    #region B9: Concurrency Conflict During SaveChanges Rolls Back Completely
+    #region B9: Simulated Concurrency Exception Handling (Unit Check)
 
+    /// <summary>
+    /// Demonstrates exception handling when SaveChanges throws DbUpdateConcurrencyException in-memory.
+    /// Actual database transaction rollback and atomicity are verified on PostgreSQL via integration tests (Scenario C2).
+    /// </summary>
     [Fact]
-    public async Task B9_ConcurrencyConflictDuringSaveChanges_RollsBackAllMutations_PreservesUnselectedRows()
+    public async Task B9_SimulatedConcurrencyExceptionHandling_ReturnsInventoryChanged_PreservesInMemoryState()
     {
         await using var context = TestDbContextFactory.CreateInMemoryDbContext();
         var (user, address, productA, productB, productC, cart) = await SeedMultiProductCartAsync(context);

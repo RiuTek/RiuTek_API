@@ -221,6 +221,67 @@ public class OrderCheckoutIntegrationTests : IAsyncLifetime
         return (user, address, cart);
     }
 
+    private async Task<(User User, UserAddress Address, Cart Cart)> SeedUserWithAddressAndMultiProductCartAsync(
+        params (Guid ProductId, int Quantity)[] items)
+    {
+        using var scope = _fixture.Factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var user = new User(
+            email: $"seed_multi_{suffix}@riutek.test",
+            passwordHash: "dummy_hashed_password",
+            fullName: $"Seed Multi User {suffix}",
+            role: UserRole.Customer,
+            phoneNumber: "0901234567"
+        );
+        db.Users.Add(user);
+
+        var address = new UserAddress(
+            userId: user.Id,
+            receiverName: $"Receiver {suffix}",
+            phoneNumber: "0908888888",
+            addressLine: "789 Tran Hung Dao",
+            ward: "Ward 5",
+            district: "District 5",
+            city: "TP Ho Chi Minh",
+            isDefault: true
+        );
+        db.UserAddresses.Add(address);
+
+        var cart = new Cart(user.Id);
+        foreach (var item in items)
+        {
+            cart.AddItem(item.ProductId, item.Quantity);
+        }
+        db.Carts.Add(cart);
+
+        await db.SaveChangesAsync();
+        return (user, address, cart);
+    }
+
+    private (HttpClient Client, FakeStripePaymentGateway FakeGateway) CreateClientWithFakeGateway(
+        Action<FakeStripePaymentGateway>? configure = null)
+    {
+        var fakeGateway = new FakeStripePaymentGateway();
+        configure?.Invoke(fakeGateway);
+
+        var customFactory = _fixture.Factory.WithWebHostBuilder(builder =>
+        {
+            builder.ConfigureServices(services =>
+            {
+                var descriptor = services.SingleOrDefault(d => d.ServiceType == typeof(IStripePaymentGateway));
+                if (descriptor != null)
+                {
+                    services.Remove(descriptor);
+                }
+                services.AddSingleton<IStripePaymentGateway>(fakeGateway);
+            });
+        });
+
+        return (customFactory.CreateClient(), fakeGateway);
+    }
+
     private async Task<(Category Category, Product Product)> SeedProductAsync(
         decimal price = 200_000m,
         int stockQuantity = 50,
@@ -1273,5 +1334,423 @@ public class OrderCheckoutIntegrationTests : IAsyncLifetime
         checkoutReq.Headers.Add("Idempotency-Key", Guid.NewGuid().ToString("N"));
         var checkoutResp = await client.SendAsync(checkoutReq);
         checkoutResp.StatusCode.Should().Be(HttpStatusCode.Conflict);
+    }
+
+    // 20. (C1) Deterministic concurrent partial checkouts on same cart:
+    // Worker 1 selects [A], Worker 2 selects [C]. Both start at cart version V.
+    // Barrier coordinates both workers reaching pre-save hook before any commit.
+    // Worker 1 commits successfully. Worker 2 conflicts with Checkout.InventoryChanged.
+    // Transaction of Worker 2 rolls back cleanly. Fresh DB assertions verify exactly 1 order (A),
+    // stock decremented only for A, cart retains B and C, CartItem A is deleted from DB.
+    // Replay with Worker 1 key succeeds without duplicate mutation.
+    [Fact]
+    public async Task Scenario20_DeterministicConcurrentPartialCheckouts_SameCartVersion_OneSucceeds_OneInventoryChanged_RollsBack()
+    {
+        var (_, productA) = await SeedProductAsync(price: 100_000m, stockQuantity: 10);
+        var (_, productB) = await SeedProductAsync(price: 200_000m, stockQuantity: 10);
+        var (_, productC) = await SeedProductAsync(price: 300_000m, stockQuantity: 10);
+
+        var (user, address, cart) = await SeedUserWithAddressAndMultiProductCartAsync(
+            (productA.Id, 2),
+            (productB.Id, 3),
+            (productC.Id, 1)
+        );
+
+        var initialCartVersion = cart.Version;
+
+        using var scope1 = _fixture.Factory.Services.CreateScope();
+        var db1 = scope1.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        using var scope2 = _fixture.Factory.Services.CreateScope();
+        var db2 = scope2.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        var tcs1ReachedHook = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tcs2ReachedHook = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tcsAllowDb1ToSave = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tcsAllowDb2ToSave = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var hookDb1 = new TestHookApplicationDbContext(db1, async ct =>
+        {
+            tcs1ReachedHook.TrySetResult(true);
+            await tcsAllowDb1ToSave.Task.WaitAsync(TimeSpan.FromSeconds(15), ct);
+        });
+
+        var hookDb2 = new TestHookApplicationDbContext(db2, async ct =>
+        {
+            tcs2ReachedHook.TrySetResult(true);
+            await tcsAllowDb2ToSave.Task.WaitAsync(TimeSpan.FromSeconds(15), ct);
+        });
+
+        var userSvc = new TestCurrentUserService(user.Id);
+        var handler1 = new CheckoutCartCommandHandler(hookDb1, userSvc);
+        var handler2 = new CheckoutCartCommandHandler(hookDb2, userSvc);
+
+        var key1 = "concurrent-c1-k1-" + Guid.NewGuid().ToString("N");
+        var key2 = "concurrent-c1-k2-" + Guid.NewGuid().ToString("N");
+
+        try
+        {
+            var task1 = handler1.Handle(new CheckoutCartCommand(
+                address.Id,
+                initialCartVersion,
+                PaymentMethod.COD,
+                null,
+                key1,
+                [productA.Id]
+            ), CancellationToken.None);
+            await tcs1ReachedHook.Task.WaitAsync(TimeSpan.FromSeconds(15));
+
+            var task2 = handler2.Handle(new CheckoutCartCommand(
+                address.Id,
+                initialCartVersion,
+                PaymentMethod.COD,
+                null,
+                key2,
+                [productC.Id]
+            ), CancellationToken.None);
+            await tcs2ReachedHook.Task.WaitAsync(TimeSpan.FromSeconds(15));
+
+            // Release worker 1 (winner) and wait for commit
+            tcsAllowDb1ToSave.TrySetResult(true);
+            var result1 = await task1;
+
+            // Release worker 2 (loser) and wait for conflict
+            tcsAllowDb2ToSave.TrySetResult(true);
+            var result2 = await task2;
+
+            result1.IsSuccess.Should().BeTrue("Worker 1 must succeed");
+            result2.IsFailure.Should().BeTrue("Worker 2 must fail due to concurrent cart version change");
+            result2.Error.Type.Should().Be(ErrorType.Conflict);
+            result2.Error.Code.Should().Be("Checkout.InventoryChanged");
+
+            // Fresh context for DB assertions
+            using var verifyScope = _fixture.Factory.Services.CreateScope();
+            var verifyDb = verifyScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+            // 1. Exactly 1 order in DB (Worker 1's order)
+            var orders = await verifyDb.Orders.AsNoTracking().Include(o => o.Items).ToListAsync();
+            orders.Should().ContainSingle("Only worker 1's order should have been persisted");
+            var savedOrder = orders.Single();
+            savedOrder.CheckoutIdempotencyKey.Should().Be(key1);
+            savedOrder.Items.Should().ContainSingle();
+            savedOrder.Items.Single().ProductId.Should().Be(productA.Id);
+            savedOrder.Items.Single().Quantity.Should().Be(2);
+
+            // 2. Stock assertions: A decremented by 2 (10 -> 8), B (10) and C (10) untouched
+            var freshProductA = await verifyDb.Products.AsNoTracking().FirstAsync(p => p.Id == productA.Id);
+            freshProductA.StockQuantity.Should().Be(8);
+            var freshProductB = await verifyDb.Products.AsNoTracking().FirstAsync(p => p.Id == productB.Id);
+            freshProductB.StockQuantity.Should().Be(10);
+            var freshProductC = await verifyDb.Products.AsNoTracking().FirstAsync(p => p.Id == productC.Id);
+            freshProductC.StockQuantity.Should().Be(10);
+
+            // 3. Stock movements: only 1 entry for product A (-2)
+            var movements = await verifyDb.StockMovements.AsNoTracking().ToListAsync();
+            movements.Should().ContainSingle(m => m.ProductId == productA.Id && m.QuantityDelta == -2);
+
+            // 4. Cart verification: B (qty 3) and C (qty 1) remain; CartItem A is permanently deleted from DB
+            var freshCart = await verifyDb.Carts.AsNoTracking().Include(c => c.Items).FirstAsync(c => c.Id == cart.Id);
+            freshCart.Items.Should().HaveCount(2);
+            freshCart.Items.Should().Contain(i => i.ProductId == productB.Id && i.Quantity == 3);
+            freshCart.Items.Should().Contain(i => i.ProductId == productC.Id && i.Quantity == 1);
+            freshCart.Items.Should().NotContain(i => i.ProductId == productA.Id);
+            freshCart.Version.Should().BeGreaterThan(initialCartVersion);
+
+            // 5. Zero residual data for K2
+            var k2Order = await verifyDb.Orders.AsNoTracking().FirstOrDefaultAsync(o => o.CheckoutIdempotencyKey == key2);
+            k2Order.Should().BeNull();
+            var attempts = await verifyDb.PaymentAttempts.AsNoTracking().ToListAsync();
+            attempts.Should().BeEmpty();
+
+            // 6. Idempotent replay of K1 succeeds even after A was removed from cart
+            var replayHandler = new CheckoutCartCommandHandler(verifyDb, userSvc);
+            var replayResult = await replayHandler.Handle(new CheckoutCartCommand(
+                address.Id,
+                9999, // Stale version in replay
+                PaymentMethod.COD,
+                null,
+                key1,
+                [productA.Id]
+            ), CancellationToken.None);
+
+            replayResult.IsSuccess.Should().BeTrue();
+            replayResult.Value.Id.Should().Be(savedOrder.Id);
+
+            // Verify stock and cart were not mutated a second time
+            var pAAfterReplay = await verifyDb.Products.AsNoTracking().FirstAsync(p => p.Id == productA.Id);
+            pAAfterReplay.StockQuantity.Should().Be(8);
+            var freshCartAfterReplay = await verifyDb.Carts.AsNoTracking().Include(c => c.Items).FirstAsync(c => c.Id == cart.Id);
+            freshCartAfterReplay.Items.Should().HaveCount(2);
+        }
+        finally
+        {
+            tcsAllowDb1ToSave.TrySetResult(true);
+            tcsAllowDb2ToSave.TrySetResult(true);
+        }
+    }
+
+    // 21. (C2) Deterministic concurrent unselected cart mutation with partial checkout:
+    // Seed cart A qty 2, B qty 3, C qty 1. Checkout selects [A, C].
+    // Checkout stops at pre-save hook. Separate context mutates unselected B qty 3 -> 4, commits to DB.
+    // Release checkout SaveChangesAsync: PostgreSQL detects concurrency token conflict on Cart.
+    // Transaction rolls back completely: 0 orders, stock untouched, cart preserves mutation of B,
+    // and items A and C are NOT deleted.
+    [Fact]
+    public async Task Scenario21_DeterministicConcurrentUnselectedCartMutation_RollsBackPartialCheckoutTransaction()
+    {
+        var (_, productA) = await SeedProductAsync(price: 100_000m, stockQuantity: 10);
+        var (_, productB) = await SeedProductAsync(price: 200_000m, stockQuantity: 10);
+        var (_, productC) = await SeedProductAsync(price: 300_000m, stockQuantity: 10);
+
+        var (user, address, cart) = await SeedUserWithAddressAndMultiProductCartAsync(
+            (productA.Id, 2),
+            (productB.Id, 3),
+            (productC.Id, 1)
+        );
+
+        var initialCartVersion = cart.Version;
+
+        using var checkoutScope = _fixture.Factory.Services.CreateScope();
+        var checkoutDb = checkoutScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        var tcsReachedHook = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tcsAllowCheckoutToSave = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var hookDb = new TestHookApplicationDbContext(checkoutDb, async ct =>
+        {
+            tcsReachedHook.TrySetResult(true);
+            await tcsAllowCheckoutToSave.Task.WaitAsync(TimeSpan.FromSeconds(15), ct);
+        });
+
+        var userSvc = new TestCurrentUserService(user.Id);
+        var handler = new CheckoutCartCommandHandler(hookDb, userSvc);
+        var key = "concurrent-c2-key-" + Guid.NewGuid().ToString("N");
+
+        try
+        {
+            var checkoutTask = handler.Handle(new CheckoutCartCommand(
+                address.Id,
+                initialCartVersion,
+                PaymentMethod.COD,
+                null,
+                key,
+                [productA.Id, productC.Id]
+            ), CancellationToken.None);
+
+            await tcsReachedHook.Task.WaitAsync(TimeSpan.FromSeconds(15));
+
+            // While checkout is paused right before SaveChangesAsync, another transaction
+            // updates unselected line B: qty 3 -> 4 via domain aggregate and commits to PostgreSQL.
+            using (var bgScope = _fixture.Factory.Services.CreateScope())
+            {
+                var bgDb = bgScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+                var bgCart = await bgDb.Carts.Include(c => c.Items).FirstAsync(c => c.Id == cart.Id);
+                bgCart.AddItem(productB.Id, 1);
+                await bgDb.SaveChangesAsync();
+            }
+
+            // Release checkout SaveChangesAsync -> PostgreSQL detects concurrent update on Cart
+            tcsAllowCheckoutToSave.TrySetResult(true);
+            var checkoutResult = await checkoutTask;
+
+            checkoutResult.IsFailure.Should().BeTrue("Checkout transaction must fail when cart was concurrently updated");
+            checkoutResult.Error.Type.Should().Be(ErrorType.Conflict);
+            checkoutResult.Error.Code.Should().Be("Checkout.InventoryChanged");
+
+            // Fresh context for DB assertions
+            using var verifyScope = _fixture.Factory.Services.CreateScope();
+            var verifyDb = verifyScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+            // Zero orders created
+            (await verifyDb.Orders.AsNoTracking().CountAsync()).Should().Be(0);
+            (await verifyDb.OrderItems.AsNoTracking().CountAsync()).Should().Be(0);
+            (await verifyDb.StockMovements.AsNoTracking().CountAsync()).Should().Be(0);
+            (await verifyDb.PaymentAttempts.AsNoTracking().CountAsync()).Should().Be(0);
+
+            // Stock of A, B, C untouched
+            var freshProductA = await verifyDb.Products.AsNoTracking().FirstAsync(p => p.Id == productA.Id);
+            freshProductA.StockQuantity.Should().Be(10);
+            var freshProductB = await verifyDb.Products.AsNoTracking().FirstAsync(p => p.Id == productB.Id);
+            freshProductB.StockQuantity.Should().Be(10);
+            var freshProductC = await verifyDb.Products.AsNoTracking().FirstAsync(p => p.Id == productC.Id);
+            freshProductC.StockQuantity.Should().Be(10);
+
+            // Cart in DB: mutation of B preserved (qty 4), A (qty 2) and C (qty 1) NOT deleted!
+            var freshCart = await verifyDb.Carts.AsNoTracking().Include(c => c.Items).FirstAsync(c => c.Id == cart.Id);
+            freshCart.Items.Should().HaveCount(3);
+            freshCart.Items.Single(i => i.ProductId == productA.Id).Quantity.Should().Be(2);
+            freshCart.Items.Single(i => i.ProductId == productB.Id).Quantity.Should().Be(4);
+            freshCart.Items.Single(i => i.ProductId == productC.Id).Quantity.Should().Be(1);
+            freshCart.Version.Should().BeGreaterThan(initialCartVersion);
+        }
+        finally
+        {
+            tcsAllowCheckoutToSave.TrySetResult(true);
+        }
+    }
+
+    // 22. Unselected inactive or out-of-stock product does not block selected checkout on PostgreSQL.
+    [Fact]
+    public async Task Scenario22_UnselectedInactiveOrOutOfStockProduct_DoesNotBlockSelectedCheckout()
+    {
+        var (_, productA) = await SeedProductAsync(price: 150_000m, stockQuantity: 10, isActive: true);
+        var (_, productB) = await SeedProductAsync(price: 250_000m, stockQuantity: 0, isActive: false); // Inactive + out of stock!
+
+        var (client, user, address, cart) = await CreateUserWithAddressAndMultiProductCartAsync(
+            (productA.Id, 2),
+            (productB.Id, 3)
+        );
+
+        // 1. Quote only for product A
+        var quoteReq = new CheckoutQuoteRequest(
+            AddressId: address.Id,
+            SelectedProductIds: [productA.Id]
+        );
+        var quoteResp = await client.PostAsJsonAsync("/api/v1/orders/checkout/quote", quoteReq);
+        quoteResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var quoteDto = (await quoteResp.Content.ReadFromJsonAsync<CheckoutQuoteDto>(JsonOptions))!;
+        quoteDto.CanCheckout.Should().BeTrue();
+        quoteDto.Items.Should().ContainSingle(i => i.ProductId == productA.Id);
+        quoteDto.Issues.Should().BeEmpty();
+
+        // 2. Checkout only for product A
+        using var checkoutReq = new HttpRequestMessage(HttpMethod.Post, "/api/v1/orders/checkout")
+        {
+            Content = JsonContent.Create(new CheckoutCartRequest(
+                AddressId: address.Id,
+                ExpectedCartVersion: cart.Version,
+                PaymentMethod: PaymentMethod.COD,
+                Notes: "Only buy active product A",
+                SelectedProductIds: [productA.Id]
+            ))
+        };
+        checkoutReq.Headers.Add("Idempotency-Key", "idemp-unselected-inactive-" + Guid.NewGuid().ToString("N"));
+        var checkoutResp = await client.SendAsync(checkoutReq);
+        checkoutResp.StatusCode.Should().Be(HttpStatusCode.Created);
+
+        var orderDto = (await checkoutResp.Content.ReadFromJsonAsync<CheckoutOrderDto>(JsonOptions))!;
+        orderDto.Items.Should().ContainSingle(i => i.ProductId == productA.Id && i.Quantity == 2);
+
+        // 3. Verify in DB
+        using var verifyScope = _fixture.Factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        var pA = await verifyDb.Products.FindAsync(productA.Id);
+        pA!.StockQuantity.Should().Be(8);
+        var pB = await verifyDb.Products.FindAsync(productB.Id);
+        pB!.StockQuantity.Should().Be(0);
+
+        var freshCart = await verifyDb.Carts.Include(c => c.Items).FirstAsync(c => c.Id == cart.Id);
+        freshCart.Items.Should().ContainSingle(i => i.ProductId == productB.Id && i.Quantity == 3);
+    }
+
+    // 23. Selected Stripe checkout retains unselected items, idempotent replay retains unselected items,
+    // and cancellation restores selected stock once on PostgreSQL.
+    [Fact]
+    public async Task Scenario23_SelectedStripeCheckout_RetainsUnselectedItems_CancelRestoresStockOnce()
+    {
+        string? expiredReference = null;
+        var (client, fakeGateway) = CreateClientWithFakeGateway(gw =>
+        {
+            gw.OnExpireSession = pref =>
+            {
+                expiredReference = pref;
+                return Result.Success();
+            };
+        });
+
+        var (_, productA) = await SeedProductAsync(price: 100_000m, stockQuantity: 10);
+        var (_, productB) = await SeedProductAsync(price: 200_000m, stockQuantity: 10);
+
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var (user, address, cart) = await SeedUserWithAddressAndMultiProductCartAsync(
+            (productA.Id, 2),
+            (productB.Id, 3)
+        );
+
+        using (var authScope = _fixture.Factory.Services.CreateScope())
+        {
+            var jwtGenerator = authScope.ServiceProvider.GetRequiredService<IJwtTokenGenerator>();
+            var token = jwtGenerator.GenerateAccessToken(user);
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        }
+
+        var key = "idemp-stripe-selected-" + Guid.NewGuid().ToString("N");
+        using var checkoutReq = new HttpRequestMessage(HttpMethod.Post, "/api/v1/orders/checkout")
+        {
+            Content = JsonContent.Create(new CheckoutCartRequest(
+                AddressId: address.Id,
+                ExpectedCartVersion: cart.Version,
+                PaymentMethod: PaymentMethod.Stripe,
+                Notes: "Stripe partial checkout",
+                SelectedProductIds: [productA.Id]
+            ))
+        };
+        checkoutReq.Headers.Add("Idempotency-Key", key);
+
+        var checkoutResp = await client.SendAsync(checkoutReq);
+        checkoutResp.StatusCode.Should().Be(HttpStatusCode.Created);
+        var orderDto = (await checkoutResp.Content.ReadFromJsonAsync<CheckoutOrderDto>(JsonOptions))!;
+        orderDto.Status.Should().Be(OrderStatus.PendingPayment);
+        orderDto.PaymentAction.Should().NotBeNull();
+        orderDto.PaymentAction!.Type.Should().Be("Redirect");
+
+        // DB check right after checkout: A stock is 8, cart only has B (qty 3)
+        using (var verifyScope1 = _fixture.Factory.Services.CreateScope())
+        {
+            var db1 = verifyScope1.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var pA = await db1.Products.FindAsync(productA.Id);
+            pA!.StockQuantity.Should().Be(8);
+            var cart1 = await db1.Carts.Include(c => c.Items).FirstAsync(c => c.Id == cart.Id);
+            cart1.Items.Should().ContainSingle(i => i.ProductId == productB.Id && i.Quantity == 3);
+        }
+
+        // Idempotent retry with same key returns same order and cart still has B
+        using var retryReq = new HttpRequestMessage(HttpMethod.Post, "/api/v1/orders/checkout")
+        {
+            Content = JsonContent.Create(new CheckoutCartRequest(
+                AddressId: address.Id,
+                ExpectedCartVersion: 9999, // Stale version in retry
+                PaymentMethod: PaymentMethod.Stripe,
+                Notes: null,
+                SelectedProductIds: [productA.Id]
+            ))
+        };
+        retryReq.Headers.Add("Idempotency-Key", key);
+        var retryResp = await client.SendAsync(retryReq);
+        retryResp.StatusCode.Should().Be(HttpStatusCode.Created);
+        var retryDto = (await retryResp.Content.ReadFromJsonAsync<CheckoutOrderDto>(JsonOptions))!;
+        retryDto.Id.Should().Be(orderDto.Id);
+
+        // Cancel order via POST /api/v1/orders/{orderId}/cancel
+        var cancelResp = await client.PostAsync($"/api/v1/orders/{orderDto.Id}/cancel", null);
+        cancelResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var detailDto = (await cancelResp.Content.ReadFromJsonAsync<OrderDetailDto>(JsonOptions))!;
+        detailDto.Status.Should().Be(OrderStatus.Cancelled);
+
+        // DB check after cancel: Stock A is restored to 10 (+2), Stock B remains 10
+        // Cart STILL has only B (qty 3); A is not re-added to cart!
+        using (var verifyScope2 = _fixture.Factory.Services.CreateScope())
+        {
+            var db2 = verifyScope2.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var pA = await db2.Products.FindAsync(productA.Id);
+            pA!.StockQuantity.Should().Be(10, "Stock of selected item must be restored on cancellation");
+            var pB = await db2.Products.FindAsync(productB.Id);
+            pB!.StockQuantity.Should().Be(10);
+
+            var cart2 = await db2.Carts.Include(c => c.Items).FirstAsync(c => c.Id == cart.Id);
+            cart2.Items.Should().ContainSingle(i => i.ProductId == productB.Id && i.Quantity == 3,
+                "Cancelled items must NOT be re-added to cart");
+        }
+
+        // Second cancel is idempotent: returns 200 OK without double-restoring stock
+        var secondCancelResp = await client.PostAsync($"/api/v1/orders/{orderDto.Id}/cancel", null);
+        secondCancelResp.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        using (var verifyScope3 = _fixture.Factory.Services.CreateScope())
+        {
+            var db3 = verifyScope3.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var pA = await db3.Products.FindAsync(productA.Id);
+            pA!.StockQuantity.Should().Be(10, "Stock must NOT be restored a second time");
+        }
     }
 }
