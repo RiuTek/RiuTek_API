@@ -120,7 +120,7 @@ public class BuyNowProductCommandHandler : IRequestHandler<BuyNowProductCommand,
                 $"Product {request.ProductId} was not found."));
         }
 
-        // 7. Create single line (PCBuildId = null) and delegate to processor with CartToClear = null
+        // 7. Create single line (PCBuildId = null) and delegate to processor with SourceCart = null
         var line = new CheckoutOrderLine(product, request.Quantity, PCBuildId: null);
         var input = new PlaceCheckoutOrderInput(
             User: user,
@@ -129,7 +129,7 @@ public class BuyNowProductCommandHandler : IRequestHandler<BuyNowProductCommand,
             Notes: request.Notes,
             IdempotencyKey: normalizedKey,
             Lines: [line],
-            CartToClear: null
+            SourceCart: null
         );
 
         return await _orderProcessor.PlaceOrderAsync(input, cancellationToken);

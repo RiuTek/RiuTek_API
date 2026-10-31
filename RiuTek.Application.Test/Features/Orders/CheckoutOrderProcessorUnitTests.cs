@@ -90,7 +90,7 @@ public class CheckoutOrderProcessorUnitTests
             Notes: null,
             IdempotencyKey: "test-idempotency-key",
             Lines: [],
-            CartToClear: null
+            SourceCart: null
         );
 
         var result = await processor.PlaceOrderAsync(input);
@@ -117,7 +117,7 @@ public class CheckoutOrderProcessorUnitTests
                 new CheckoutOrderLine(product, 1),
                 new CheckoutOrderLine(product, 2)
             ],
-            CartToClear: null
+            SourceCart: null
         );
 
         var result = await processor.PlaceOrderAsync(input);
@@ -140,7 +140,7 @@ public class CheckoutOrderProcessorUnitTests
             Notes: null,
             IdempotencyKey: "test-idempotency-key",
             Lines: [new CheckoutOrderLine(product, 1)],
-            CartToClear: null
+            SourceCart: null
         );
 
         var result = await processor.PlaceOrderAsync(input);
@@ -163,7 +163,7 @@ public class CheckoutOrderProcessorUnitTests
             Notes: null,
             IdempotencyKey: "test-idempotency-key",
             Lines: [new CheckoutOrderLine(product, 1)],
-            CartToClear: null
+            SourceCart: null
         );
 
         var result = await processor.PlaceOrderAsync(input);
@@ -186,7 +186,7 @@ public class CheckoutOrderProcessorUnitTests
             Notes: null,
             IdempotencyKey: "test-idempotency-key",
             Lines: [new CheckoutOrderLine(product, 5)],
-            CartToClear: null
+            SourceCart: null
         );
 
         var result = await processor.PlaceOrderAsync(input);
@@ -212,7 +212,7 @@ public class CheckoutOrderProcessorUnitTests
             Notes: null,
             IdempotencyKey: "test-idempotency-key",
             Lines: [new CheckoutOrderLine(product, 1)],
-            CartToClear: null
+            SourceCart: null
         );
 
         var result = await processor.PlaceOrderAsync(input);
@@ -235,7 +235,7 @@ public class CheckoutOrderProcessorUnitTests
             Notes: "Leave at door",
             IdempotencyKey: "test-cod-key-12345",
             Lines: [new CheckoutOrderLine(product, 3, PCBuildId: null)],
-            CartToClear: cart
+            SourceCart: cart
         );
 
         var result = await processor.PlaceOrderAsync(input);
@@ -270,7 +270,7 @@ public class CheckoutOrderProcessorUnitTests
     }
 
     [Fact]
-    public async Task PlaceOrderAsync_WhenCartToClearIsNull_SucceedsWithoutError()
+    public async Task PlaceOrderAsync_WhenSourceCartIsNull_SucceedsWithoutError()
     {
         await using var context = TestDbContextFactory.CreateInMemoryDbContext();
         var (user, address, product, _) = await SeedPrerequisitesAsync(context);
@@ -283,7 +283,7 @@ public class CheckoutOrderProcessorUnitTests
             Notes: null,
             IdempotencyKey: "test-nocart-key-12345",
             Lines: [new CheckoutOrderLine(product, 1)],
-            CartToClear: null
+            SourceCart: null
         );
 
         var result = await processor.PlaceOrderAsync(input);
@@ -307,7 +307,7 @@ public class CheckoutOrderProcessorUnitTests
             Notes: null,
             IdempotencyKey: "test-build-key-12345",
             Lines: [new CheckoutOrderLine(product, 1, PCBuildId: pcBuildId)],
-            CartToClear: null
+            SourceCart: null
         );
 
         var result = await processor.PlaceOrderAsync(input);
@@ -344,7 +344,7 @@ public class CheckoutOrderProcessorUnitTests
             Notes: null,
             IdempotencyKey: "test-stripe-key-12345",
             Lines: [new CheckoutOrderLine(product, 1)],
-            CartToClear: null
+            SourceCart: null
         );
 
         var result = await processor.PlaceOrderAsync(input);
@@ -385,7 +385,7 @@ public class CheckoutOrderProcessorUnitTests
             Notes: null,
             IdempotencyKey: "test-stripe-timeout-key",
             Lines: [new CheckoutOrderLine(product, 1)],
-            CartToClear: null
+            SourceCart: null
         );
 
         var result = await processor.PlaceOrderAsync(input, CancellationToken.None);
@@ -420,7 +420,7 @@ public class CheckoutOrderProcessorUnitTests
             Notes: null,
             IdempotencyKey: "test-caller-cancel-key",
             Lines: [new CheckoutOrderLine(product, 1)],
-            CartToClear: null
+            SourceCart: null
         );
 
         Func<Task> act = async () => await processor.PlaceOrderAsync(input, cts.Token);

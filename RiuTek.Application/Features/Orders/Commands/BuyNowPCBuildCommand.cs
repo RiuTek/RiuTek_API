@@ -152,7 +152,7 @@ public class BuyNowPCBuildCommandHandler : IRequestHandler<BuyNowPCBuildCommand,
             PCBuildId: pcBuild.Id
         )).ToList();
 
-        // 10. Delegate to CheckoutOrderProcessor with CartToClear: null
+        // 10. Delegate to CheckoutOrderProcessor with SourceCart: null
         var input = new PlaceCheckoutOrderInput(
             User: customer,
             Address: address,
@@ -160,7 +160,7 @@ public class BuyNowPCBuildCommandHandler : IRequestHandler<BuyNowPCBuildCommand,
             Notes: request.Notes,
             IdempotencyKey: normalizedKey,
             Lines: lines,
-            CartToClear: null
+            SourceCart: null
         );
 
         return await _orderProcessor.PlaceOrderAsync(input, cancellationToken);

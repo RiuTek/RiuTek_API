@@ -20,7 +20,7 @@ public sealed record PlaceCheckoutOrderInput(
     string? Notes,
     string IdempotencyKey,
     IReadOnlyList<CheckoutOrderLine> Lines,
-    Cart? CartToClear = null);
+    Cart? SourceCart = null);
 
 public class CheckoutOrderProcessor
 {
@@ -173,8 +173,18 @@ public class CheckoutOrderProcessor
             }
         }
 
-        // 5. Optional clear source Cart
-        input.CartToClear?.Clear();
+        // 5. Remove checked-out lines from SourceCart
+        if (input.SourceCart is not null)
+        {
+            foreach (var line in input.Lines)
+            {
+                var existingItem = input.SourceCart.Items.FirstOrDefault(i => i.ProductId == line.Product.Id);
+                if (existingItem is not null)
+                {
+                    input.SourceCart.RemoveItem(line.Product.Id);
+                }
+            }
+        }
 
         // 6. Create PaymentAttempt for online payment (Stripe) within initial DB transaction
         PaymentAttempt? stripeAttempt = null;

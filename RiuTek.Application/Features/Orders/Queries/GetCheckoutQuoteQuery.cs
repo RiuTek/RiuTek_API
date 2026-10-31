@@ -8,7 +8,10 @@ using RiuTek.Core.Common;
 
 namespace RiuTek.Application.Features.Orders.Queries;
 
-public record GetCheckoutQuoteQuery(Guid AddressId) : IRequest<Result<CheckoutQuoteDto>>;
+public record GetCheckoutQuoteQuery(
+    Guid AddressId,
+    IReadOnlyList<Guid>? SelectedProductIds = null
+) : IRequest<Result<CheckoutQuoteDto>>;
 
 public class GetCheckoutQuoteQueryValidator : AbstractValidator<GetCheckoutQuoteQuery>
 {
@@ -17,6 +20,19 @@ public class GetCheckoutQuoteQueryValidator : AbstractValidator<GetCheckoutQuote
         RuleFor(x => x.AddressId)
             .NotEmpty()
             .WithMessage("AddressId is required.");
+
+        When(x => x.SelectedProductIds != null, () =>
+        {
+            RuleFor(x => x.SelectedProductIds!)
+                .Must(ids => ids.Count > 0)
+                .WithMessage("SelectedProductIds cannot be empty.")
+                .Must(ids => ids.Count <= 50)
+                .WithMessage("SelectedProductIds cannot contain more than 50 items.")
+                .Must(ids => ids.All(id => id != Guid.Empty))
+                .WithMessage("SelectedProductIds cannot contain empty GUID.")
+                .Must(ids => ids.Distinct().Count() == ids.Count)
+                .WithMessage("SelectedProductIds cannot contain duplicate product IDs.");
+        });
     }
 }
 
@@ -61,7 +77,7 @@ public class GetCheckoutQuoteQueryHandler : IRequestHandler<GetCheckoutQuoteQuer
 
         var formattedShippingAddress = CheckoutMappingExtensions.FormatShippingAddress(address);
 
-        if (cart is null || cart.Items.Count == 0)
+        if (request.SelectedProductIds is null && (cart is null || cart.Items.Count == 0))
         {
             return Result.Success(new CheckoutQuoteDto(
                 CartVersion: cart?.Version ?? 0,
@@ -78,16 +94,24 @@ public class GetCheckoutQuoteQueryHandler : IRequestHandler<GetCheckoutQuoteQuer
             ));
         }
 
-        var productIds = cart.Items.Select(i => i.ProductId).Distinct().ToList();
+        var selectionResult = CheckoutSelectionHelper.ResolveSelectedItems(cart, request.SelectedProductIds);
+        if (selectionResult.IsFailure)
+        {
+            return Result.Failure<CheckoutQuoteDto>(selectionResult.Error);
+        }
+
+        var targetItems = selectionResult.Value;
+
+        var productIds = targetItems.Select(i => i.ProductId).Distinct().ToList();
         var products = await _context.Products
             .AsNoTracking()
             .Where(p => productIds.Contains(p.Id))
             .ToDictionaryAsync(p => p.Id, cancellationToken);
 
-        var quoteItems = new List<CheckoutQuoteItemDto>(cart.Items.Count);
+        var quoteItems = new List<CheckoutQuoteItemDto>(targetItems.Count);
         var issues = new List<string>();
 
-        foreach (var item in cart.Items)
+        foreach (var item in targetItems)
         {
             if (products.TryGetValue(item.ProductId, out var product))
             {
@@ -165,7 +189,7 @@ public class GetCheckoutQuoteQueryHandler : IRequestHandler<GetCheckoutQuoteQuer
         var canCheckout = sortedItems.Count > 0 && sortedItems.All(i => i.CanPurchase);
 
         return Result.Success(new CheckoutQuoteDto(
-            CartVersion: cart.Version,
+            CartVersion: cart?.Version ?? 0,
             AddressId: address.Id,
             ReceiverName: address.ReceiverName,
             PhoneNumber: address.PhoneNumber,

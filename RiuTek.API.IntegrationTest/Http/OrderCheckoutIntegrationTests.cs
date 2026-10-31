@@ -1138,4 +1138,140 @@ public class OrderCheckoutIntegrationTests : IAsyncLifetime
             .ToListAsync();
         movements.Should().BeEmpty("Failed checkout must leave 0 checkout stock movements");
     }
+
+    // 17. Selected items checkout (A and C selected from A, B, C):
+    // Order contains only A and C, cart retains B, version increments, A and C removed from DB.
+    [Fact]
+    public async Task Scenario17_SelectedItemsCheckout_OnlySelectedItemsOrdered_UnselectedRemainInCart()
+    {
+        var (_, productA) = await SeedProductAsync(price: 100_000m, stockQuantity: 10);
+        var (_, productB) = await SeedProductAsync(price: 200_000m, stockQuantity: 10);
+        var (_, productC) = await SeedProductAsync(price: 300_000m, stockQuantity: 10);
+
+        var (client, user, address, cart) = await CreateUserWithAddressAndCartAsync(productA.Id, quantity: 2);
+
+        // Add B and C to cart
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var cartDb = await db.Carts.Include(c => c.Items).FirstAsync(c => c.Id == cart.Id);
+            cartDb.AddItem(productB.Id, 3);
+            cartDb.AddItem(productC.Id, 1);
+            await db.SaveChangesAsync();
+            cart = cartDb;
+        }
+
+        // 1. Quote endpoint with selectedProductIds: [A, C]
+        var quoteReq = new CheckoutQuoteRequest(
+            AddressId: address.Id,
+            SelectedProductIds: [productA.Id, productC.Id]
+        );
+        var quoteResp = await client.PostAsJsonAsync("/api/v1/orders/checkout/quote", quoteReq);
+        quoteResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var quoteDto = (await quoteResp.Content.ReadFromJsonAsync<CheckoutQuoteDto>(JsonOptions))!;
+        quoteDto.Items.Should().HaveCount(2);
+        quoteDto.Items.Select(i => i.ProductId).Should().BeEquivalentTo([productA.Id, productC.Id]);
+        quoteDto.Subtotal.Should().Be(500_000m); // 2*100k + 1*300k
+        quoteDto.CanCheckout.Should().BeTrue();
+
+        // 2. Checkout endpoint with selectedProductIds: [A, C]
+        using var checkoutReq = new HttpRequestMessage(HttpMethod.Post, "/api/v1/orders/checkout")
+        {
+            Content = JsonContent.Create(new CheckoutCartRequest(
+                AddressId: address.Id,
+                ExpectedCartVersion: cart.Version,
+                PaymentMethod: PaymentMethod.COD,
+                Notes: "Partial checkout",
+                SelectedProductIds: [productA.Id, productC.Id]
+            ))
+        };
+        var idempotencyKey = Guid.NewGuid().ToString("N");
+        checkoutReq.Headers.Add("Idempotency-Key", idempotencyKey);
+
+        var checkoutResp = await client.SendAsync(checkoutReq);
+        checkoutResp.StatusCode.Should().Be(HttpStatusCode.Created);
+        var orderDto = (await checkoutResp.Content.ReadFromJsonAsync<CheckoutOrderDto>(JsonOptions))!;
+        orderDto.Items.Should().HaveCount(2);
+        orderDto.Items.Select(i => i.ProductId).Should().BeEquivalentTo([productA.Id, productC.Id]);
+
+        // 3. Verify Database
+        using var verifyScope = _fixture.Factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        // Product stock
+        var pADb = await verifyDb.Products.FindAsync(productA.Id);
+        pADb!.StockQuantity.Should().Be(8); // 10 - 2
+        var pBDb = await verifyDb.Products.FindAsync(productB.Id);
+        pBDb!.StockQuantity.Should().Be(10); // Untouched
+        var pCDb = await verifyDb.Products.FindAsync(productC.Id);
+        pCDb!.StockQuantity.Should().Be(9); // 10 - 1
+
+        // Cart items: B is retained, A and C deleted
+        var cartInDb = await verifyDb.Carts.Include(c => c.Items).FirstAsync(c => c.Id == cart.Id);
+        cartInDb.Items.Should().HaveCount(1);
+        cartInDb.Items.Single().ProductId.Should().Be(productB.Id);
+        cartInDb.Items.Single().Quantity.Should().Be(3);
+        cartInDb.Version.Should().BeGreaterThan(cart.Version);
+    }
+
+    // 18. Empty array [] in selectedProductIds returns 400 Bad Request.
+    [Fact]
+    public async Task Scenario18_EmptySelectedProductIds_Returns400BadRequest()
+    {
+        var (_, product) = await SeedProductAsync();
+        var (client, _, address, cart) = await CreateUserWithAddressAndCartAsync(product.Id, 2);
+
+        // Quote
+        var quoteResp = await client.PostAsJsonAsync("/api/v1/orders/checkout/quote", new CheckoutQuoteRequest(
+            AddressId: address.Id,
+            SelectedProductIds: []
+        ));
+        quoteResp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+
+        // Checkout
+        using var checkoutReq = new HttpRequestMessage(HttpMethod.Post, "/api/v1/orders/checkout")
+        {
+            Content = JsonContent.Create(new CheckoutCartRequest(
+                AddressId: address.Id,
+                ExpectedCartVersion: cart.Version,
+                PaymentMethod: PaymentMethod.COD,
+                Notes: null,
+                SelectedProductIds: []
+            ))
+        };
+        checkoutReq.Headers.Add("Idempotency-Key", Guid.NewGuid().ToString("N"));
+        var checkoutResp = await client.SendAsync(checkoutReq);
+        checkoutResp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+    }
+
+    // 19. Item in selectedProductIds not present in cart returns 409 Conflict (Checkout.SelectionChanged).
+    [Fact]
+    public async Task Scenario19_SelectedProductIdNotInCart_Returns409SelectionChanged()
+    {
+        var (_, product) = await SeedProductAsync();
+        var (client, _, address, cart) = await CreateUserWithAddressAndCartAsync(product.Id, 2);
+        var missingProductId = Guid.NewGuid();
+
+        // Quote
+        var quoteResp = await client.PostAsJsonAsync("/api/v1/orders/checkout/quote", new CheckoutQuoteRequest(
+            AddressId: address.Id,
+            SelectedProductIds: [product.Id, missingProductId]
+        ));
+        quoteResp.StatusCode.Should().Be(HttpStatusCode.Conflict);
+
+        // Checkout
+        using var checkoutReq = new HttpRequestMessage(HttpMethod.Post, "/api/v1/orders/checkout")
+        {
+            Content = JsonContent.Create(new CheckoutCartRequest(
+                AddressId: address.Id,
+                ExpectedCartVersion: cart.Version,
+                PaymentMethod: PaymentMethod.COD,
+                Notes: null,
+                SelectedProductIds: [product.Id, missingProductId]
+            ))
+        };
+        checkoutReq.Headers.Add("Idempotency-Key", Guid.NewGuid().ToString("N"));
+        var checkoutResp = await client.SendAsync(checkoutReq);
+        checkoutResp.StatusCode.Should().Be(HttpStatusCode.Conflict);
+    }
 }

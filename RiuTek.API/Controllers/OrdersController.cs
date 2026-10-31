@@ -131,7 +131,9 @@ public class OrdersController : ApiControllerBase
         [FromBody] CheckoutQuoteRequest request,
         CancellationToken cancellationToken = default)
     {
-        var result = await Mediator.Send(new GetCheckoutQuoteQuery(request.AddressId), cancellationToken);
+        var result = await Mediator.Send(new GetCheckoutQuoteQuery(
+            request.AddressId,
+            request.SelectedProductIds), cancellationToken);
         return HandleResult(result);
     }
 
@@ -153,7 +155,8 @@ public class OrdersController : ApiControllerBase
             ExpectedCartVersion: request.ExpectedCartVersion,
             PaymentMethod: request.PaymentMethod,
             Notes: request.Notes,
-            IdempotencyKey: idempotencyKey ?? string.Empty
+            IdempotencyKey: idempotencyKey ?? string.Empty,
+            SelectedProductIds: request.SelectedProductIds
         ), cancellationToken);
 
         return HandleCreatedResult(result);

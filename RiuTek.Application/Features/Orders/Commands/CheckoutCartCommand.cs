@@ -16,7 +16,8 @@ public record CheckoutCartCommand(
     int ExpectedCartVersion,
     PaymentMethod PaymentMethod,
     string? Notes,
-    string IdempotencyKey
+    string IdempotencyKey,
+    IReadOnlyList<Guid>? SelectedProductIds = null
 ) : IRequest<Result<CheckoutOrderDto>>;
 
 public class CheckoutCartCommandValidator : AbstractValidator<CheckoutCartCommand>
@@ -41,6 +42,19 @@ public class CheckoutCartCommandValidator : AbstractValidator<CheckoutCartComman
         RuleFor(x => x.Notes)
             .Must(n => n == null || n.Trim().Length <= 1000)
             .WithMessage("Notes cannot exceed 1000 characters.");
+
+        When(x => x.SelectedProductIds != null, () =>
+        {
+            RuleFor(x => x.SelectedProductIds!)
+                .Must(ids => ids.Count > 0)
+                .WithMessage("SelectedProductIds cannot be empty.")
+                .Must(ids => ids.Count <= 50)
+                .WithMessage("SelectedProductIds cannot contain more than 50 items.")
+                .Must(ids => ids.All(id => id != Guid.Empty))
+                .WithMessage("SelectedProductIds cannot contain empty GUID.")
+                .Must(ids => ids.Distinct().Count() == ids.Count)
+                .WithMessage("SelectedProductIds cannot contain duplicate product IDs.");
+        });
     }
 }
 
@@ -130,6 +144,13 @@ public class CheckoutCartCommandHandler : IRequestHandler<CheckoutCartCommand, R
 
         if (cart is null || cart.Items.Count == 0)
         {
+            if (request.SelectedProductIds is not null)
+            {
+                return Result.Failure<CheckoutOrderDto>(Error.Conflict(
+                    "Checkout.SelectionChanged",
+                    "One or more selected products are no longer in the cart."));
+            }
+
             return Result.Failure<CheckoutOrderDto>(Error.Conflict(
                 "Checkout.EmptyCart",
                 "Cart is empty."));
@@ -142,8 +163,23 @@ public class CheckoutCartCommandHandler : IRequestHandler<CheckoutCartCommand, R
                 "Cart has been modified. Please refresh and try again."));
         }
 
-        // 7. Load all products of cart as tracked entities
-        var productIds = cart.Items.Select(i => i.ProductId).Distinct().ToList();
+        // 7. Resolve selection
+        var selectionResult = CheckoutSelectionHelper.ResolveSelectedItems(cart, request.SelectedProductIds);
+        if (selectionResult.IsFailure)
+        {
+            return Result.Failure<CheckoutOrderDto>(selectionResult.Error);
+        }
+
+        var selectedItems = selectionResult.Value;
+        if (selectedItems.Count == 0)
+        {
+            return Result.Failure<CheckoutOrderDto>(Error.Conflict(
+                "Checkout.EmptyCart",
+                "Cart is empty."));
+        }
+
+        // 8. Load products of selected items as tracked entities
+        var productIds = selectedItems.Select(i => i.ProductId).Distinct().ToList();
         var products = await _context.Products
             .Where(p => productIds.Contains(p.Id))
             .ToListAsync(cancellationToken);
@@ -157,19 +193,19 @@ public class CheckoutCartCommandHandler : IRequestHandler<CheckoutCartCommand, R
 
         var productMap = products.ToDictionary(p => p.Id);
 
-        // 8. Validate all items before any mutation
-        var validationResult = ValidateCartItems(cart, productMap);
+        // 9. Validate selected items before any mutation
+        var validationResult = ValidateCartItems(selectedItems, productMap);
         if (validationResult.IsFailure)
         {
             return Result.Failure<CheckoutOrderDto>(validationResult.Error);
         }
 
-        // 9. Convert cart items to CheckoutOrderLine (PCBuildId = null for cart checkout)
-        var lines = cart.Items
+        // 10. Convert selected items to CheckoutOrderLine (PCBuildId = null for cart checkout)
+        var lines = selectedItems
             .Select(i => new CheckoutOrderLine(productMap[i.ProductId], i.Quantity, PCBuildId: null))
             .ToList();
 
-        // 10. Delegate order creation and execution to shared processor
+        // 11. Delegate order creation and execution to shared processor
         var input = new PlaceCheckoutOrderInput(
             User: user,
             Address: address,
@@ -177,15 +213,15 @@ public class CheckoutCartCommandHandler : IRequestHandler<CheckoutCartCommand, R
             Notes: request.Notes,
             IdempotencyKey: normalizedKey,
             Lines: lines,
-            CartToClear: cart
+            SourceCart: cart
         );
 
         return await _orderProcessor.PlaceOrderAsync(input, cancellationToken);
     }
 
-    private static Result ValidateCartItems(Cart cart, Dictionary<Guid, Product> productMap)
+    private static Result ValidateCartItems(IReadOnlyCollection<CartItem> items, Dictionary<Guid, Product> productMap)
     {
-        foreach (var cartItem in cart.Items)
+        foreach (var cartItem in items)
         {
             if (!productMap.TryGetValue(cartItem.ProductId, out var product))
             {
