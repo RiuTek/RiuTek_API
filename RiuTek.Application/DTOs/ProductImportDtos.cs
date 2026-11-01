@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using RiuTek.Core.Entities.Specifications;
 using RiuTek.Core.Enums;
 
@@ -19,6 +20,37 @@ public record ProductImportErrorDto(
     string? Sku,
     string Code,
     string Message);
+
+public record ProductImportInspectRowDto(
+    string Sheet,
+    int Row,
+    string Sku,
+    string Name,
+    [property: JsonConverter(typeof(JsonStringEnumConverter))]
+    ComponentType ComponentType,
+    string? PrimaryImageFile,
+    string? ImageUrl);
+
+public record ProductImportInspectResultDto(
+    string TemplateVersion,
+    bool IsValid,
+    IReadOnlyList<ProductImportInspectRowDto> Rows,
+    IReadOnlyList<ProductImportErrorDto> Errors,
+    bool ErrorsTruncated);
+
+public record ProductImportImageMappingDto(
+    string? Sku,
+    string? PrimaryObjectKey,
+    IReadOnlyList<string?>? AdditionalObjectKeys = null);
+
+public record ProductImportResolvedImageMapping(
+    string PrimaryImageUrl,
+    IReadOnlyList<string> AdditionalImageUrls);
+
+public record ProductImportWorkbookParseOptions(
+    bool AllowMissingImageUrl = false,
+    IReadOnlyDictionary<string, ProductImportResolvedImageMapping>? ImageOverrides = null,
+    IReadOnlySet<string>? SkusWithDeferredImageValidation = null);
 
 public record ProductImportTemplateDto(
     byte[] Content,
@@ -44,7 +76,8 @@ public record ProductImportRowDraft(
     string ImageUrl,
     ComponentSpecification? Specification,
     int? SpecRowNumber,
-    string? SpecSheetName);
+    string? SpecSheetName,
+    IReadOnlyList<string>? AdditionalImages = null);
 
 public record ProductImportParsedWorkbook(
     string TemplateVersion,

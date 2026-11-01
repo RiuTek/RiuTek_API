@@ -73,6 +73,73 @@ public class ProductImportWorkbookServiceTests
         var lookupsWs = workbook.Worksheet("_Lookups");
         lookupsWs.Cell("L2").GetString().Should().Be("cpu");
         lookupsWs.Cell("M2").GetString().Should().Be("Vi xử lý");
+
+        // Verify Instructions sheet contains both URL-only and local folder + imageMappings guidance
+        var instructionsText = string.Join(
+            "\n",
+            workbook.Worksheet("Instructions").CellsUsed().Select(c => c.GetString()));
+        instructionsText.Should().Contain("imageMappings");
+        instructionsText.Should().Contain("PrimaryImageFile");
+        instructionsText.Should().Contain("ImageUrl");
+        instructionsText.Should().Contain("create-only");
+        instructionsText.Should().Contain("không atomic");
+    }
+
+    [Fact]
+    public async Task ParseWorkbookAsync_WithInspectOptions_ShouldAllowMissingImageUrl_ButRejectInvalidHttpsImageUrl()
+    {
+        var template = await _service.GenerateTemplateAsync(SampleCategories);
+        using var ms = new MemoryStream(template.Content);
+        using var workbook = new XLWorkbook(ms);
+
+        var pWs = workbook.Worksheet("Products");
+        // Row 2: Missing ImageUrl, valid PrimaryImageFile -> allowed in inspect mode
+        pWs.Cell(2, 1).Value = "CPU-LOCAL-01";
+        pWs.Cell(2, 2).Value = "AMD Ryzen 5 7600";
+        pWs.Cell(2, 3).Value = "cpu";
+        pWs.Cell(2, 4).Value = "Cpu";
+        pWs.Cell(2, 5).Value = "AMD";
+        pWs.Cell(2, 6).Value = 5000000;
+        pWs.Cell(2, 8).Value = 10;
+        pWs.Cell(2, 9).Value = "CPU-LOCAL-01/main.jpg";
+        pWs.Cell(2, 10).Value = "";
+
+        // Row 3: Invalid non-HTTPS ImageUrl -> still rejected in inspect mode
+        pWs.Cell(3, 1).Value = "CPU-BAD-URL";
+        pWs.Cell(3, 2).Value = "AMD Ryzen 7 7700";
+        pWs.Cell(3, 3).Value = "cpu";
+        pWs.Cell(3, 4).Value = "Cpu";
+        pWs.Cell(3, 5).Value = "AMD";
+        pWs.Cell(3, 6).Value = 7000000;
+        pWs.Cell(3, 8).Value = 5;
+        pWs.Cell(3, 10).Value = "http://insecure.example.com/cpu.jpg";
+
+        var cpuWs = workbook.Worksheet("CPU");
+        cpuWs.Cell(2, 1).Value = "CPU-LOCAL-01";
+        cpuWs.Cell(2, 2).Value = "AM5"; cpuWs.Cell(2, 3).Value = 6; cpuWs.Cell(2, 4).Value = 12;
+        cpuWs.Cell(2, 5).Value = 3.8; cpuWs.Cell(2, 6).Value = 5.1; cpuWs.Cell(2, 7).Value = 65;
+        cpuWs.Cell(2, 8).Value = true; cpuWs.Cell(2, 9).Value = "DDR5"; cpuWs.Cell(2, 10).Value = 5200;
+
+        cpuWs.Cell(3, 1).Value = "CPU-BAD-URL";
+        cpuWs.Cell(3, 2).Value = "AM5"; cpuWs.Cell(3, 3).Value = 8; cpuWs.Cell(3, 4).Value = 16;
+        cpuWs.Cell(3, 5).Value = 3.8; cpuWs.Cell(3, 6).Value = 5.3; cpuWs.Cell(3, 7).Value = 65;
+        cpuWs.Cell(3, 8).Value = true; cpuWs.Cell(3, 9).Value = "DDR5"; cpuWs.Cell(3, 10).Value = 5200;
+
+        using var saveMs = new MemoryStream();
+        workbook.SaveAs(saveMs);
+        saveMs.Position = 0;
+
+        var result = await _service.ParseWorkbookAsync(
+            saveMs,
+            new ProductImportWorkbookParseOptions(AllowMissingImageUrl: true));
+
+        result.IsSuccess.Should().BeTrue();
+        result.Value.Rows.Should().HaveCount(2);
+        result.Value.ParseErrors.Should().NotContain(e => e.Sku == "CPU-LOCAL-01");
+        result.Value.ParseErrors.Should().ContainSingle(e =>
+            e.Sku == "CPU-BAD-URL" &&
+            e.Column == "ImageUrl" &&
+            e.Code == "ProductImport.InvalidImageUrl");
     }
 
     [Fact]

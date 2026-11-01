@@ -37,7 +37,7 @@ public class ActualEndpointMetadataTests
 
             // Total controller actions: 6 Posts + 6 Comments + 7 Products + 5 Categories + 6 Carts + 4 Auth + 10 Orders + 1 Payments + 6 Users + 3 ProductMedia + 3 ProductImports + 9 Reviews + 6 PCBuilds = 72
             var controllerEndpoints = endpoints.Where(e => e.Metadata.GetMetadata<ControllerActionDescriptor>() != null).ToList();
-            controllerEndpoints.Should().HaveCount(72);
+            controllerEndpoints.Should().HaveCount(73);
 
             // Helper to get action descriptor
             ControllerActionDescriptor GetDescriptor(RouteEndpoint e) => e.Metadata.GetMetadata<ControllerActionDescriptor>()!;
@@ -468,7 +468,12 @@ public class ActualEndpointMetadataTests
                 e.Metadata.GetMetadata<ControllerActionDescriptor>()?.ControllerTypeInfo.AsType() == typeof(ProductImportsController))
                 .ToList();
 
-            importEndpoints.Should().HaveCount(3);
+            importEndpoints.Should().HaveCount(4);
+
+            var inspectImport = importEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(ProductImportsController.InspectImport) && GetHttpMethods(e).Contains("POST"));
+            inspectImport.Should().NotBeNull();
+            GetFullRoutePattern(inspectImport!).Should().BeEquivalentTo("api/v1/product-imports/inspect");
+            AssertAuthorizePolicy(inspectImport!, Policies.ContentManager);
 
             // 46. GET api/v1/product-imports/template (Policies.ContentManager) - Action: DownloadTemplate
             var downloadTemplate = importEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(ProductImportsController.DownloadTemplate) && GetHttpMethods(e).Contains("GET"));

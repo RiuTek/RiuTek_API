@@ -12,4 +12,10 @@ public interface IProductImportWorkbookService
     Task<Result<ProductImportParsedWorkbook>> ParseWorkbookAsync(
         Stream fileStream,
         CancellationToken cancellationToken = default);
+
+    Task<Result<ProductImportParsedWorkbook>> ParseWorkbookAsync(
+        Stream fileStream,
+        ProductImportWorkbookParseOptions? options,
+        CancellationToken cancellationToken = default) =>
+        ParseWorkbookAsync(fileStream, cancellationToken);
 }

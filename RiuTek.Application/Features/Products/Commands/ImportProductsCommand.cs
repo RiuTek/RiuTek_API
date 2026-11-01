@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using RiuTek.Application.Common.Interfaces;
 using RiuTek.Application.Common.Utils;
 using RiuTek.Application.DTOs;
+using RiuTek.Application.Features.Products.Common;
 using RiuTek.Core.Common;
 using RiuTek.Core.Entities;
 using RiuTek.Core.Enums;
@@ -12,7 +13,8 @@ namespace RiuTek.Application.Features.Products.Commands;
 public record ImportProductsCommand(
     Stream FileStream,
     string FileName,
-    long FileLength
+    long FileLength,
+    string? ImageMappingsJson = null
 ) : IRequest<Result<ProductImportCommitResultDto>>;
 
 public class ImportProductsCommandHandler : IRequestHandler<ImportProductsCommand, Result<ProductImportCommitResultDto>>
@@ -42,12 +44,13 @@ public class ImportProductsCommandHandler : IRequestHandler<ImportProductsComman
         await request.FileStream.CopyToAsync(bufferedStream, cancellationToken);
 
         bufferedStream.Position = 0;
-        var validationResult = await _sender.Send(
-            new ValidateProductImportCommand(
-                bufferedStream,
-                request.FileName,
-                request.FileLength),
-            cancellationToken);
+        var validateCommand = new ValidateProductImportCommand(
+            bufferedStream,
+            request.FileName,
+            request.FileLength,
+            request.ImageMappingsJson);
+
+        var validationResult = await _sender.Send(validateCommand, cancellationToken);
 
         if (!validationResult.IsSuccess)
         {
@@ -65,14 +68,22 @@ public class ImportProductsCommandHandler : IRequestHandler<ImportProductsComman
                 validation));
         }
 
-        bufferedStream.Position = 0;
-        var parseResult = await _workbookService.ParseWorkbookAsync(bufferedStream, cancellationToken);
-        if (!parseResult.IsSuccess)
+        ProductImportParsedWorkbook parsed;
+        if (validateCommand.ResolvedWorkbook is not null)
         {
-            return Result.Failure<ProductImportCommitResultDto>(parseResult.Error);
+            parsed = validateCommand.ResolvedWorkbook;
         }
+        else
+        {
+            bufferedStream.Position = 0;
+            var parseResult = await _workbookService.ParseWorkbookAsync(bufferedStream, cancellationToken);
+            if (!parseResult.IsSuccess)
+            {
+                return Result.Failure<ProductImportCommitResultDto>(parseResult.Error);
+            }
 
-        var parsed = parseResult.Value;
+            parsed = parseResult.Value;
+        }
         var categorySlugs = parsed.Rows
             .Select(row => row.CategorySlug.Trim().ToLowerInvariant())
             .Distinct()
@@ -99,6 +110,7 @@ public class ImportProductsCommandHandler : IRequestHandler<ImportProductsComman
             }
 
             var normalizedName = row.Name.Trim();
+            var normalizedPrimaryImage = row.ImageUrl.Trim();
             var product = new Product(
                 categoryId: category.Id,
                 name: normalizedName,
@@ -107,12 +119,14 @@ public class ImportProductsCommandHandler : IRequestHandler<ImportProductsComman
                 brand: row.Brand.Trim(),
                 price: row.Price,
                 stockQuantity: row.StockQuantity,
-                imageUrl: row.ImageUrl.Trim(),
+                imageUrl: normalizedPrimaryImage,
                 componentType: row.ComponentType,
                 specifications: row.Specification,
                 originalPrice: row.OriginalPrice)
             {
-                AdditionalImages = [],
+                AdditionalImages = ProductMediaHelper.NormalizeAdditionalImages(
+                    normalizedPrimaryImage,
+                    row.AdditionalImages),
                 Category = category,
                 Embedding = null,
                 IsActive = true

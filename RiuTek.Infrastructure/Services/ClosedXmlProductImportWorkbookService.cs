@@ -131,6 +131,12 @@ public class ClosedXmlProductImportWorkbookService : IProductImportWorkbookServi
 
     public Task<Result<ProductImportParsedWorkbook>> ParseWorkbookAsync(
         Stream fileStream,
+        CancellationToken cancellationToken = default) =>
+        ParseWorkbookAsync(fileStream, options: null, cancellationToken);
+
+    public Task<Result<ProductImportParsedWorkbook>> ParseWorkbookAsync(
+        Stream fileStream,
+        ProductImportWorkbookParseOptions? options,
         CancellationToken cancellationToken = default)
     {
         using var memoryStream = new MemoryStream();
@@ -268,7 +274,7 @@ public class ClosedXmlProductImportWorkbookService : IProductImportWorkbookServi
             CheckFormulasAcrossSheets(workbook, parseErrors);
 
             // 8. Parse Products Sheet data
-            var parsedProductManifest = ParseProductsSheet(nonBlankProductRows, parseErrors);
+            var parsedProductManifest = ParseProductsSheet(nonBlankProductRows, parseErrors, options);
 
             // 9. Parse Specification Sheets data
             var parsedSpecs = ParseSpecificationSheets(workbook, sheetsWithInvalidHeaders, parseErrors);
@@ -365,12 +371,14 @@ public class ClosedXmlProductImportWorkbookService : IProductImportWorkbookServi
             "1. Sheet 'Products' là manifest chính. Mỗi dòng mô tả 1 sản phẩm.",
             "2. SKU là mã duy nhất và là khóa liên kết giữa sheet 'Products' và các sheet thông số kỹ thuật (CPU, GPU, RAM, ...).",
             "3. Mỗi sản phẩm trong 'Products' bắt buộc phải có đúng 1 dòng thông số tương ứng trong sheet khớp với 'ComponentType'.",
-            "4. Có thể nhập một phần (ví dụ chỉ nhập CPU) hoặc trộn nhiều loại linh kiện trong cùng 1 file.",
-            "5. Không xóa, đổi tên hoặc thay đổi thứ tự các cột đã định nghĩa sẵn.",
-            "6. Các trường danh sách (ví dụ: SupportedSockets, SupportedFormFactors) dùng ký tự gạch đứng '|' để ngăn cách, ví dụ: AM4|AM5|LGA1700.",
-            "7. ImageUrl bắt buộc là đường dẫn HTTPS hợp lệ. PrimaryImageFile là thông tin tham chiếu tương lai (có thể để trống).",
-            "8. Các ô dữ liệu không được chứa công thức (formula).",
-            "9. Các dòng hoàn toàn trống sẽ được tự động bỏ qua."
+            "4. Chỉ cần điền các dòng và loại linh kiện (subset) muốn nhập, không bắt buộc điền đủ cả 9 loại linh kiện. Các dòng hoàn toàn trống sẽ được tự động bỏ qua.",
+            "5. CategorySlug lấy từ danh sách lookup ('_Lookups' / dropdown). Các trường số/enum điền đúng định dạng theo hướng dẫn và không được chứa công thức (formula).",
+            "6. Các trường danh sách (ví dụ: SupportedSockets, SupportedFormFactors) dùng ký tự gạch đứng '|' để ngăn cách (ví dụ mẫu: AM4|AM5|LGA1700).",
+            "7. Không xóa, đổi tên hoặc thay đổi thứ tự các cột/sheet đã định nghĩa sẵn (schema v1.0).",
+            "8. Chế độ URL-only (không cần chọn thư mục ảnh): Điền trực tiếp đường dẫn HTTPS hợp lệ vào cột 'ImageUrl' (ví dụ mẫu: https://example.com/sample-product.jpg), sau đó Validate và Import trực tiếp.",
+            "9. Chế độ Excel + Thư mục ảnh local (imageMappings): Không nhúng ảnh vào file Excel. Có thể để trống 'ImageUrl' và ghi tên file gợi ý vào 'PrimaryImageFile' (ví dụ mẫu: main.jpg hoặc CPU-001/main.jpg). Trên trang Admin: Chọn file Excel (Inspect) + chọn thư mục ảnh (<SKU>/main.jpg, 02.jpg, ...) -> Xem bảng ghép ảnh theo SKU -> Upload ảnh lên R2 -> Validate (kèm imageMappings) -> Xác nhận Import (kèm imageMappings).",
+            "10. Import chỉ tạo mới (create-only), không cập nhật (upsert); nếu SKU hoặc Slug đã tồn tại trong hệ thống sẽ báo lỗi.",
+            "11. Lưu ý: Upload ảnh lên R2 và Import vào DB là hai bước độc lập (không atomic): nếu hủy hoặc import lỗi thì ảnh đã upload có thể còn lại trên R2 và không tự động xóa. Nếu request import bị timeout, không tự động gửi lại ngay mà hãy kiểm tra danh sách sản phẩm theo SKU trước khi gửi lại."
         };
 
         for (int i = 0; i < instructions.Length; i++)
@@ -695,11 +703,13 @@ public class ClosedXmlProductImportWorkbookService : IProductImportWorkbookServi
         int StockQuantity,
         string? PrimaryImageFile,
         string ImageUrl,
-        bool HasFatalParseError);
+        bool HasFatalParseError,
+        IReadOnlyList<string>? AdditionalImages = null);
 
     private static List<ParsedProductRowRaw> ParseProductsSheet(
         IEnumerable<IXLRow> rows,
-        List<ProductImportErrorDto> errors)
+        List<ProductImportErrorDto> errors,
+        ProductImportWorkbookParseOptions? options = null)
     {
         var list = new List<ParsedProductRowRaw>();
 
@@ -846,15 +856,34 @@ public class ClosedXmlProductImportWorkbookService : IProductImportWorkbookServi
 
             // 10. ImageUrl
             var imageUrl = row.Cell(10).GetString()?.Trim() ?? string.Empty;
-            if (string.IsNullOrWhiteSpace(imageUrl))
+            IReadOnlyList<string>? additionalImages = null;
+
+            var normalizedSku = sku.Trim().ToUpperInvariant();
+            if (!string.IsNullOrEmpty(normalizedSku) &&
+                options?.ImageOverrides != null &&
+                options.ImageOverrides.TryGetValue(normalizedSku, out var resolvedImage))
             {
-                errors.Add(new ProductImportErrorDto("Products", r, "ImageUrl", sku, "ProductImport.MissingColumn", "Đường dẫn ảnh chính (ImageUrl) không được để trống."));
-                fatal = true;
+                imageUrl = resolvedImage.PrimaryImageUrl;
+                additionalImages = resolvedImage.AdditionalImageUrls;
             }
-            else if (!ProductMediaHelper.IsValidHttpsUrl(imageUrl))
+
+            var deferImageCheck = (options?.AllowMissingImageUrl == true && string.IsNullOrWhiteSpace(imageUrl)) ||
+                                  (!string.IsNullOrEmpty(normalizedSku) &&
+                                   options?.SkusWithDeferredImageValidation != null &&
+                                   options.SkusWithDeferredImageValidation.Contains(normalizedSku));
+
+            if (!deferImageCheck)
             {
-                errors.Add(new ProductImportErrorDto("Products", r, "ImageUrl", sku, "ProductImport.InvalidImageUrl", "Ảnh sản phẩm chính phải là đường dẫn HTTPS hợp lệ."));
-                fatal = true;
+                if (string.IsNullOrWhiteSpace(imageUrl))
+                {
+                    errors.Add(new ProductImportErrorDto("Products", r, "ImageUrl", sku, "ProductImport.MissingColumn", "Đường dẫn ảnh chính (ImageUrl) không được để trống."));
+                    fatal = true;
+                }
+                else if (!ProductMediaHelper.IsValidHttpsUrl(imageUrl))
+                {
+                    errors.Add(new ProductImportErrorDto("Products", r, "ImageUrl", sku, "ProductImport.InvalidImageUrl", "Ảnh sản phẩm chính phải là đường dẫn HTTPS hợp lệ."));
+                    fatal = true;
+                }
             }
 
             list.Add(new ParsedProductRowRaw(
@@ -869,7 +898,8 @@ public class ClosedXmlProductImportWorkbookService : IProductImportWorkbookServi
                 stock,
                 primaryImageFile,
                 imageUrl,
-                fatal));
+                fatal,
+                additionalImages));
         }
 
         return list;
@@ -1547,6 +1577,23 @@ public class ClosedXmlProductImportWorkbookService : IProductImportWorkbookServi
                     prod.Sku,
                     "ProductImport.MissingSpecification",
                     $"Sản phẩm có SKU '{prod.Sku}' thiếu thông số kỹ thuật trong sheet '{expectedSheet}'."));
+
+                drafts.Add(new ProductImportRowDraft(
+                    prod.RowNumber,
+                    prod.Sku,
+                    prod.Name,
+                    prod.CategorySlug,
+                    prod.ComponentType.Value,
+                    prod.Brand,
+                    prod.Price,
+                    prod.OriginalPrice,
+                    prod.StockQuantity,
+                    prod.PrimaryImageFile,
+                    prod.ImageUrl,
+                    null,
+                    null,
+                    null,
+                    prod.AdditionalImages));
             }
             else
             {
@@ -1564,7 +1611,8 @@ public class ClosedXmlProductImportWorkbookService : IProductImportWorkbookServi
                     prod.ImageUrl,
                     matchedSpec.Specification,
                     matchedSpec.RowNumber,
-                    matchedSpec.SheetName));
+                    matchedSpec.SheetName,
+                    prod.AdditionalImages));
             }
         }
 

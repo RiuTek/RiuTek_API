@@ -432,4 +432,211 @@ public class ValidateProductImportCommandHandlerTests
             .Select(e => e.Row)
             .Should().BeEquivalentTo([2, 3]);
     }
+
+    [Fact]
+    public async Task Inspect_MissingImageUrlWithValidSpecAndCategory_ShouldReturnIsValidTrue()
+    {
+        var (db, user) = CreateTestDbWithAdmin();
+        db.Categories.Add(new Category("Vi xử lý", "cpu", ComponentType.Cpu));
+        db.SaveChanges();
+
+        var template = await _workbookService.GenerateTemplateAsync([new("cpu", "Vi xử lý", ComponentType.Cpu)]);
+        using var ms = new MemoryStream(template.Content);
+        using var wb = new XLWorkbook(ms);
+
+        var pWs = wb.Worksheet("Products");
+        pWs.Cell(2, 1).Value = "CPU-INSPECT-01";
+        pWs.Cell(2, 2).Value = "AMD Ryzen 5 7600";
+        pWs.Cell(2, 3).Value = "cpu";
+        pWs.Cell(2, 4).Value = "Cpu";
+        pWs.Cell(2, 5).Value = "AMD";
+        pWs.Cell(2, 6).Value = 5000000;
+        pWs.Cell(2, 8).Value = 10;
+        pWs.Cell(2, 9).Value = "CPU-INSPECT-01/main.webp";
+        pWs.Cell(2, 10).Value = "";
+
+        var cpuWs = wb.Worksheet("CPU");
+        cpuWs.Cell(2, 1).Value = "CPU-INSPECT-01";
+        cpuWs.Cell(2, 2).Value = "AM5"; cpuWs.Cell(2, 3).Value = 6; cpuWs.Cell(2, 4).Value = 12;
+        cpuWs.Cell(2, 5).Value = 3.8; cpuWs.Cell(2, 6).Value = 5.1; cpuWs.Cell(2, 7).Value = 65;
+        cpuWs.Cell(2, 8).Value = true; cpuWs.Cell(2, 9).Value = "DDR5"; cpuWs.Cell(2, 10).Value = 5200;
+
+        using var saveMs = new MemoryStream();
+        wb.SaveAs(saveMs);
+        saveMs.Position = 0;
+
+        var inspectHandler = new InspectProductImportCommandHandler(
+            db,
+            CreateMockUserService(user).Object,
+            _workbookService);
+
+        var inspectResult = await inspectHandler.Handle(
+            new InspectProductImportCommand(saveMs, "inspect.xlsx", saveMs.Length),
+            CancellationToken.None);
+
+        inspectResult.IsSuccess.Should().BeTrue();
+        inspectResult.Value.IsValid.Should().BeTrue();
+        inspectResult.Value.Errors.Should().BeEmpty();
+        inspectResult.Value.Rows.Should().ContainSingle(r =>
+            r.Sheet == "Products" &&
+            r.Row == 2 &&
+            r.Sku == "CPU-INSPECT-01" &&
+            r.ComponentType == ComponentType.Cpu &&
+            r.PrimaryImageFile == "CPU-INSPECT-01/main.webp" &&
+            r.ImageUrl == null);
+
+        // Calling Validate without imageMappings on the same workbook must still reject missing ImageUrl
+        saveMs.Position = 0;
+        var validateHandler = new ValidateProductImportCommandHandler(
+            db,
+            CreateMockUserService(user).Object,
+            _workbookService);
+
+        var validateResult = await validateHandler.Handle(
+            new ValidateProductImportCommand(saveMs, "inspect.xlsx", saveMs.Length),
+            CancellationToken.None);
+
+        validateResult.IsSuccess.Should().BeTrue();
+        validateResult.Value.IsValid.Should().BeFalse();
+        validateResult.Value.Errors.Should().Contain(e =>
+            e.Sku == "CPU-INSPECT-01" && e.Column == "ImageUrl");
+    }
+
+    [Fact]
+    public async Task Handle_WithValidImageMappings_ResolvesCanonicalUrlsAndCachesMetadataLookups()
+    {
+        var (db, user) = CreateTestDbWithAdmin();
+        db.Categories.Add(new Category("Vi xử lý", "cpu", ComponentType.Cpu));
+        db.SaveChanges();
+
+        var template = await _workbookService.GenerateTemplateAsync([new("cpu", "Vi xử lý", ComponentType.Cpu)]);
+        using var ms = new MemoryStream(template.Content);
+        using var wb = new XLWorkbook(ms);
+
+        var pWs = wb.Worksheet("Products");
+        pWs.Cell(2, 1).Value = "CPU-MAP-01";
+        pWs.Cell(2, 2).Value = "AMD Ryzen 5 7600";
+        pWs.Cell(2, 3).Value = "cpu";
+        pWs.Cell(2, 4).Value = "Cpu";
+        pWs.Cell(2, 5).Value = "AMD";
+        pWs.Cell(2, 6).Value = 5000000;
+        pWs.Cell(2, 8).Value = 10;
+        pWs.Cell(2, 10).Value = ""; // Empty in Excel, supplied by imageMappings
+
+        var cpuWs = wb.Worksheet("CPU");
+        cpuWs.Cell(2, 1).Value = "CPU-MAP-01";
+        cpuWs.Cell(2, 2).Value = "AM5"; cpuWs.Cell(2, 3).Value = 6; cpuWs.Cell(2, 4).Value = 12;
+        cpuWs.Cell(2, 5).Value = 3.8; cpuWs.Cell(2, 6).Value = 5.1; cpuWs.Cell(2, 7).Value = 65;
+        cpuWs.Cell(2, 8).Value = true; cpuWs.Cell(2, 9).Value = "DDR5"; cpuWs.Cell(2, 10).Value = 5200;
+
+        using var saveMs = new MemoryStream();
+        wb.SaveAs(saveMs);
+        saveMs.Position = 0;
+
+        var primaryKey = "products/2026/04/11111111-1111-1111-1111-111111111111.jpg";
+        var galleryKey1 = "products/2026/04/22222222-2222-2222-2222-222222222222.png";
+        var galleryKey2 = "products/2026/04/33333333-3333-3333-3333-333333333333.webp";
+
+        var mockStorage = new Mock<IProductMediaStorage>();
+        mockStorage.SetupGet(x => x.IsEnabled).Returns(true);
+        mockStorage.SetupGet(x => x.MaxFileSizeBytes).Returns(5 * 1024 * 1024);
+        mockStorage.Setup(x => x.GetPublicUrl(It.IsAny<string>()))
+            .Returns((string k) => $"https://media.riutek.test/{k}");
+        mockStorage.Setup(x => x.GetObjectMetadataAsync(primaryKey, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Result.Success(new ProductMediaMetadata(primaryKey, "image/jpeg", 2048, "etag1")));
+        mockStorage.Setup(x => x.GetObjectMetadataAsync(galleryKey1, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Result.Success(new ProductMediaMetadata(galleryKey1, "image/png", 4096, "etag2")));
+        mockStorage.Setup(x => x.GetObjectMetadataAsync(galleryKey2, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Result.Success(new ProductMediaMetadata(galleryKey2, "image/webp", 3072, "etag3")));
+
+        var mappingsJson = $$"""
+        [
+          {
+            "sku": " cpu-map-01 ",
+            "primaryObjectKey": "{{primaryKey}}",
+            "additionalObjectKeys": ["{{galleryKey1}}", "{{galleryKey2}}"]
+          }
+        ]
+        """;
+
+        var handler = new ValidateProductImportCommandHandler(
+            db,
+            CreateMockUserService(user).Object,
+            _workbookService,
+            mockStorage.Object);
+
+        var cmd = new ValidateProductImportCommand(saveMs, "map.xlsx", saveMs.Length, mappingsJson);
+        var result = await handler.Handle(cmd, CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Value.IsValid.Should().BeTrue();
+        result.Value.Errors.Should().BeEmpty();
+        cmd.ResolvedWorkbook.Should().NotBeNull();
+        var resolvedRow = cmd.ResolvedWorkbook!.Rows.Single();
+        resolvedRow.ImageUrl.Should().Be($"https://media.riutek.test/{primaryKey}");
+        resolvedRow.AdditionalImages.Should().Equal(
+            $"https://media.riutek.test/{galleryKey1}",
+            $"https://media.riutek.test/{galleryKey2}");
+
+        mockStorage.Verify(x => x.DeleteObjectAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task Handle_WhenMediaMetadataInvalid_RejectsWithoutCallingDeleteObject()
+    {
+        var (db, user) = CreateTestDbWithAdmin();
+        db.Categories.Add(new Category("Vi xử lý", "cpu", ComponentType.Cpu));
+        db.SaveChanges();
+
+        var template = await _workbookService.GenerateTemplateAsync([new("cpu", "Vi xử lý", ComponentType.Cpu)]);
+        using var ms = new MemoryStream(template.Content);
+        using var wb = new XLWorkbook(ms);
+
+        var pWs = wb.Worksheet("Products");
+        pWs.Cell(2, 1).Value = "CPU-BAD-META";
+        pWs.Cell(2, 2).Value = "AMD Ryzen 5 7600";
+        pWs.Cell(2, 3).Value = "cpu";
+        pWs.Cell(2, 4).Value = "Cpu";
+        pWs.Cell(2, 5).Value = "AMD";
+        pWs.Cell(2, 6).Value = 5000000;
+        pWs.Cell(2, 8).Value = 10;
+
+        var cpuWs = wb.Worksheet("CPU");
+        cpuWs.Cell(2, 1).Value = "CPU-BAD-META";
+        cpuWs.Cell(2, 2).Value = "AM5"; cpuWs.Cell(2, 3).Value = 6; cpuWs.Cell(2, 4).Value = 12;
+        cpuWs.Cell(2, 5).Value = 3.8; cpuWs.Cell(2, 6).Value = 5.1; cpuWs.Cell(2, 7).Value = 65;
+        cpuWs.Cell(2, 8).Value = true; cpuWs.Cell(2, 9).Value = "DDR5"; cpuWs.Cell(2, 10).Value = 5200;
+
+        using var saveMs = new MemoryStream();
+        wb.SaveAs(saveMs);
+        saveMs.Position = 0;
+
+        var badKey = "products/2026/04/11111111-1111-1111-1111-111111111111.jpg";
+        var mockStorage = new Mock<IProductMediaStorage>();
+        mockStorage.SetupGet(x => x.IsEnabled).Returns(true);
+        mockStorage.SetupGet(x => x.MaxFileSizeBytes).Returns(5 * 1024 * 1024);
+        // Wrong MIME type (image/png on a .jpg key)
+        mockStorage.Setup(x => x.GetObjectMetadataAsync(badKey, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Result.Success(new ProductMediaMetadata(badKey, "image/png", 2048, "etag1")));
+
+        var mappingsJson = $$"""[{"sku":"CPU-BAD-META","primaryObjectKey":"{{badKey}}"}]""";
+
+        var handler = new ValidateProductImportCommandHandler(
+            db,
+            CreateMockUserService(user).Object,
+            _workbookService,
+            mockStorage.Object);
+
+        var result = await handler.Handle(
+            new ValidateProductImportCommand(saveMs, "map.xlsx", saveMs.Length, mappingsJson),
+            CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Value.IsValid.Should().BeFalse();
+        result.Value.Errors.Should().ContainSingle(e =>
+            e.Code == "ProductImport.InvalidMediaMetadata" &&
+            e.Sku == "CPU-BAD-META");
+
+        mockStorage.Verify(x => x.DeleteObjectAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
 }

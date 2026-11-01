@@ -30,15 +30,15 @@ public class ProductImportsController : ApiControllerBase
         return File(result.Value.Content, result.Value.ContentType, result.Value.FileName);
     }
 
-    [HttpPost("validate")]
+    [HttpPost("inspect")]
     [Consumes("multipart/form-data")]
-    [RequestSizeLimit(10 * 1024 * 1024)] // 10 MiB to accommodate multipart headers
-    [ProducesResponseType(typeof(ProductImportValidationResultDto), StatusCodes.Status200OK)]
+    [RequestSizeLimit(10 * 1024 * 1024)]
+    [ProducesResponseType(typeof(ProductImportInspectResultDto), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status403Forbidden)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> ValidateImport(
+    public async Task<IActionResult> InspectImport(
         IFormFile? file,
         CancellationToken cancellationToken = default)
     {
@@ -50,7 +50,35 @@ public class ProductImportsController : ApiControllerBase
 
         await using var stream = file!.OpenReadStream();
         var result = await Mediator.Send(
-            new ValidateProductImportCommand(stream, file.FileName, file.Length),
+            new InspectProductImportCommand(stream, file.FileName, file.Length),
+            cancellationToken);
+
+        return HandleResult(result);
+    }
+
+    [HttpPost("validate")]
+    [Consumes("multipart/form-data")]
+    [RequestSizeLimit(10 * 1024 * 1024)] // 10 MiB to accommodate multipart headers
+    [ProducesResponseType(typeof(ProductImportValidationResultDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
+    public async Task<IActionResult> ValidateImport(
+        IFormFile? file,
+        [FromForm] string? imageMappings = null,
+        CancellationToken cancellationToken = default)
+    {
+        var fileError = ValidateFile(file);
+        if (fileError is not null)
+        {
+            return fileError;
+        }
+
+        await using var stream = file!.OpenReadStream();
+        var result = await Mediator.Send(
+            new ValidateProductImportCommand(stream, file.FileName, file.Length, imageMappings),
             cancellationToken);
 
         return HandleResult(result);
@@ -66,8 +94,10 @@ public class ProductImportsController : ApiControllerBase
     [ProducesResponseType(StatusCodes.Status403Forbidden)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     [ProducesResponseType(StatusCodes.Status409Conflict)]
+    [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
     public async Task<IActionResult> Import(
         IFormFile? file,
+        [FromForm] string? imageMappings = null,
         CancellationToken cancellationToken = default)
     {
         var fileError = ValidateFile(file);
@@ -78,7 +108,7 @@ public class ProductImportsController : ApiControllerBase
 
         await using var stream = file!.OpenReadStream();
         var result = await Mediator.Send(
-            new ImportProductsCommand(stream, file.FileName, file.Length),
+            new ImportProductsCommand(stream, file.FileName, file.Length, imageMappings),
             cancellationToken);
 
         if (!result.IsSuccess)

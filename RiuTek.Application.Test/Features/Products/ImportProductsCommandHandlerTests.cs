@@ -165,4 +165,81 @@ public class ImportProductsCommandHandlerTests
         movements.Should().HaveCount(2);
         movements.All(m => m.Reason == StockMovementReason.BulkImport && m.ActorUserId == actorId).Should().BeTrue();
     }
+
+    [Fact]
+    public async Task Handle_WhenValidatePopulatesResolvedWorkbook_ReusesResolvedWorkbookAndPersistsGalleryOrder()
+    {
+        using var db = TestDbContextFactory.CreateInMemoryDbContext();
+        var cpuCategory = new Category("Vi xử lý", "cpu", ComponentType.Cpu);
+        db.Categories.Add(cpuCategory);
+        await db.SaveChangesAsync();
+
+        var resolvedRows = new ProductImportRowDraft[]
+        {
+            new(
+                2,
+                "CPU-7800X3D",
+                "AMD Ryzen 7 7800X3D",
+                "cpu",
+                ComponentType.Cpu,
+                "AMD",
+                10_500_000,
+                11_000_000,
+                5,
+                "CPU-7800X3D/main.jpg",
+                "https://media.riutek.test/products/2026/04/main.jpg",
+                new CpuSpecification
+                {
+                    Socket = CpuSocket.AM5,
+                    CoreCount = 8,
+                    ThreadCount = 16,
+                    BaseClockGhz = 4.2,
+                    BoostClockGhz = 5.0,
+                    TdpWattage = 120,
+                    HasIntegratedGpu = true,
+                    SupportedMemoryType = RamType.DDR5,
+                    MaxMemorySpeedMhz = 5200
+                },
+                2,
+                "CPU",
+                [
+                    "https://media.riutek.test/products/2026/04/02.jpg",
+                    "https://media.riutek.test/products/2026/04/03.jpg"
+                ])
+        };
+
+        var validation = new ProductImportValidationResultDto("1.0", true, 1, 1, 0, false, []);
+        var resolvedWorkbook = new ProductImportParsedWorkbook("1.0", 1, resolvedRows, []);
+
+        var sender = new Mock<ISender>();
+        sender.Setup(x => x.Send(It.IsAny<ValidateProductImportCommand>(), It.IsAny<CancellationToken>()))
+            .Callback<IRequest<Result<ProductImportValidationResultDto>>, CancellationToken>((req, _) =>
+            {
+                ((ValidateProductImportCommand)req).ResolvedWorkbook = resolvedWorkbook;
+            })
+            .ReturnsAsync(Result.Success(validation));
+
+        var workbookService = new Mock<IProductImportWorkbookService>();
+        var currentUserService = new Mock<ICurrentUserService>();
+        currentUserService.Setup(x => x.UserId).Returns(Guid.NewGuid());
+
+        var handler = new ImportProductsCommandHandler(db, workbookService.Object, sender.Object, currentUserService.Object);
+        using var stream = new MemoryStream([1, 2, 3]);
+
+        var result = await handler.Handle(
+            new ImportProductsCommand(stream, "products.xlsx", stream.Length, """[{"sku":"CPU-7800X3D"}]"""),
+            CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Value.IsCommitted.Should().BeTrue();
+        workbookService.Verify(
+            x => x.ParseWorkbookAsync(It.IsAny<Stream>(), It.IsAny<CancellationToken>()),
+            Times.Never);
+
+        var product = await db.Products.SingleAsync();
+        product.ImageUrl.Should().Be("https://media.riutek.test/products/2026/04/main.jpg");
+        product.AdditionalImages.Should().Equal(
+            "https://media.riutek.test/products/2026/04/02.jpg",
+            "https://media.riutek.test/products/2026/04/03.jpg");
+    }
 }

@@ -25,6 +25,10 @@ public class FakeProductMediaStorage : IProductMediaStorage
     public long MaxFileSizeBytes { get; set; } = 5242880L;
     public string PublicBaseUrl { get; set; } = "https://media.riutek.com";
     public HashSet<string> ExistingKeys { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, ProductMediaMetadata> CustomMetadata { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public bool SimulateUnavailableOnMetadata { get; set; }
+    public int DeleteCallCount { get; private set; }
+    public int GetMetadataCallCount { get; private set; }
 
     public Task<Result<ProductMediaUploadDto>> CreatePresignedUploadUrlAsync(
         string objectKey,
@@ -55,10 +59,18 @@ public class FakeProductMediaStorage : IProductMediaStorage
         string objectKey,
         CancellationToken cancellationToken = default)
     {
-        if (!IsEnabled)
+        cancellationToken.ThrowIfCancellationRequested();
+        GetMetadataCallCount++;
+
+        if (!IsEnabled || SimulateUnavailableOnMetadata)
         {
             return Task.FromResult(Result.Failure<ProductMediaMetadata>(
-                Error.Unavailable("ProductMedia.StorageDisabled", "Storage is disabled.")));
+                Error.Unavailable("ProductMedia.StorageUnavailable", "Storage is unavailable.")));
+        }
+
+        if (CustomMetadata.TryGetValue(objectKey, out var customMeta))
+        {
+            return Task.FromResult(Result.Success(customMeta));
         }
 
         if (!ExistingKeys.Contains(objectKey))
@@ -81,6 +93,7 @@ public class FakeProductMediaStorage : IProductMediaStorage
         string objectKey,
         CancellationToken cancellationToken = default)
     {
+        DeleteCallCount++;
         if (!IsEnabled)
         {
             return Task.FromResult(Result.Failure(

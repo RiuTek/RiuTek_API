@@ -125,14 +125,65 @@ public class ProductImportIntegrationTests : IAsyncLifetime
         return output.ToArray();
     }
 
-    private static MultipartFormDataContent CreateWorkbookContent(byte[] bytes)
+    private static MultipartFormDataContent CreateWorkbookContent(byte[] bytes, string? imageMappingsJson = null)
     {
         var content = new MultipartFormDataContent();
         var fileContent = new ByteArrayContent(bytes);
         fileContent.Headers.ContentType = new MediaTypeHeaderValue(
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
         content.Add(fileContent, "file", "products.xlsx");
+
+        if (imageMappingsJson is not null)
+        {
+            content.Add(new StringContent(imageMappingsJson), "imageMappings");
+        }
+
         return content;
+    }
+
+    private async Task<(HttpClient Client, FakeProductMediaStorage FakeStorage)> CreateClientWithFakeStorageAsync(
+        UserRole? role = UserRole.Admin,
+        bool isActive = true,
+        Action<FakeProductMediaStorage>? configure = null)
+    {
+        var fakeStorage = new FakeProductMediaStorage();
+        configure?.Invoke(fakeStorage);
+
+        var customFactory = _fixture.Factory.WithWebHostBuilder(builder =>
+        {
+            builder.ConfigureServices(services =>
+            {
+                var descriptor = services.SingleOrDefault(d => d.ServiceType == typeof(IProductMediaStorage));
+                if (descriptor != null)
+                {
+                    services.Remove(descriptor);
+                }
+                services.AddSingleton<IProductMediaStorage>(fakeStorage);
+            });
+        });
+
+        var client = customFactory.CreateClient();
+        if (role.HasValue)
+        {
+            using var scope = _fixture.Factory.Services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var jwtGenerator = scope.ServiceProvider.GetRequiredService<IJwtTokenGenerator>();
+
+            var user = new User(
+                email: $"import_{role.Value.ToString().ToLowerInvariant()}_{Guid.NewGuid():N}@riutek.test",
+                passwordHash: "dummy_hashed_password",
+                fullName: $"{role.Value} Import User",
+                role: role.Value
+            ) { IsActive = isActive };
+
+            db.Users.Add(user);
+            await db.SaveChangesAsync();
+
+            var token = jwtGenerator.GenerateAccessToken(user);
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        }
+
+        return (client, fakeStorage);
     }
 
     [Fact]
@@ -693,5 +744,423 @@ public class ProductImportIntegrationTests : IAsyncLifetime
 
         var allMovements = await assertDb.StockMovements.ToListAsync();
         allMovements.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task InspectImport_AuthAndRoleGuards_EnforcesActiveContentManager()
+    {
+        var bytes = await CreateCpuWorkbookAsync("CPU-AUTH-01", "AMD Ryzen 5 7600");
+
+        // 1. Anonymous -> 401
+        var anonClient = await CreateClientForRoleAsync(null);
+        using (var c1 = CreateWorkbookContent(bytes))
+        {
+            var r1 = await anonClient.PostAsync("/api/v1/product-imports/inspect", c1);
+            r1.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+        }
+
+        // 2. Customer -> 403
+        var custClient = await CreateClientForRoleAsync(UserRole.Customer);
+        using (var c2 = CreateWorkbookContent(bytes))
+        {
+            var r2 = await custClient.PostAsync("/api/v1/product-imports/inspect", c2);
+            r2.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        }
+
+        // 3. Inactive Admin -> 403
+        var (inactiveClient, _) = await CreateClientWithFakeStorageAsync(UserRole.Admin, isActive: false);
+        using (var c3 = CreateWorkbookContent(bytes))
+        {
+            var r3 = await inactiveClient.PostAsync("/api/v1/product-imports/inspect", c3);
+            r3.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        }
+    }
+
+    [Fact]
+    public async Task InspectImport_DefersMissingImageUrl_ButKeepsNonImageAndInvalidHttpsUrlErrors()
+    {
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            db.Categories.Add(new Category("Vi xử lý", "cpu", ComponentType.Cpu));
+            await db.SaveChangesAsync();
+        }
+
+        using var scopeServices = _fixture.Factory.Services.CreateScope();
+        var workbookService = scopeServices.ServiceProvider.GetRequiredService<IProductImportWorkbookService>();
+        var template = await workbookService.GenerateTemplateAsync([new("cpu", "Vi xử lý", ComponentType.Cpu)]);
+
+        byte[] validInspectBytes;
+        using (var ms = new MemoryStream(template.Content))
+        using (var wb = new XLWorkbook(ms))
+        {
+            var pWs = wb.Worksheet("Products");
+            pWs.Cell(2, 1).Value = "CPU-LOCAL-01";
+            pWs.Cell(2, 2).Value = "AMD Ryzen 5 7600";
+            pWs.Cell(2, 3).Value = "cpu";
+            pWs.Cell(2, 4).Value = "Cpu";
+            pWs.Cell(2, 5).Value = "AMD";
+            pWs.Cell(2, 6).Value = 5000000;
+            pWs.Cell(2, 8).Value = 10;
+            pWs.Cell(2, 9).Value = "CPU-LOCAL-01/main.jpg";
+            pWs.Cell(2, 10).Value = ""; // Missing ImageUrl deferred in inspect
+
+            var cpuWs = wb.Worksheet("CPU");
+            cpuWs.Cell(2, 1).Value = "CPU-LOCAL-01";
+            cpuWs.Cell(2, 2).Value = "AM5"; cpuWs.Cell(2, 3).Value = 6; cpuWs.Cell(2, 4).Value = 12;
+            cpuWs.Cell(2, 5).Value = 3.8; cpuWs.Cell(2, 6).Value = 5.1; cpuWs.Cell(2, 7).Value = 65;
+            cpuWs.Cell(2, 8).Value = true; cpuWs.Cell(2, 9).Value = "DDR5"; cpuWs.Cell(2, 10).Value = 5200;
+
+            using var outMs = new MemoryStream();
+            wb.SaveAs(outMs);
+            validInspectBytes = outMs.ToArray();
+        }
+
+        var client = await CreateClientForRoleAsync(UserRole.Staff);
+
+        // 1. Inspect passes when only ImageUrl is missing
+        using (var inspectContent = CreateWorkbookContent(validInspectBytes))
+        {
+            var inspectRes = await client.PostAsync("/api/v1/product-imports/inspect", inspectContent);
+            inspectRes.StatusCode.Should().Be(HttpStatusCode.OK);
+            var inspectDto = await inspectRes.Content.ReadFromJsonAsync<ProductImportInspectResultDto>(JsonOptions);
+            inspectDto.Should().NotBeNull();
+            inspectDto!.TemplateVersion.Should().Be("1.0");
+            inspectDto.IsValid.Should().BeTrue();
+            inspectDto.Errors.Should().BeEmpty();
+            inspectDto.Rows.Should().ContainSingle(r =>
+                r.Sheet == "Products" &&
+                r.Row == 2 &&
+                r.Sku == "CPU-LOCAL-01" &&
+                r.ComponentType == ComponentType.Cpu &&
+                r.PrimaryImageFile == "CPU-LOCAL-01/main.jpg" &&
+                r.ImageUrl == null);
+        }
+
+        // 2. Validate & Import without imageMappings on the same file still reject missing ImageUrl
+        using (var valContent = CreateWorkbookContent(validInspectBytes))
+        {
+            var valRes = await client.PostAsync("/api/v1/product-imports/validate", valContent);
+            valRes.StatusCode.Should().Be(HttpStatusCode.OK);
+            var valDto = await valRes.Content.ReadFromJsonAsync<ProductImportValidationResultDto>(JsonOptions);
+            valDto!.IsValid.Should().BeFalse();
+            valDto.Errors.Should().Contain(e => e.Sku == "CPU-LOCAL-01" && e.Column == "ImageUrl");
+        }
+
+        using (var impContent = CreateWorkbookContent(validInspectBytes))
+        {
+            var impRes = await client.PostAsync("/api/v1/product-imports/import", impContent);
+            impRes.StatusCode.Should().Be(HttpStatusCode.OK);
+            var impDto = await impRes.Content.ReadFromJsonAsync<ProductImportCommitResultDto>(JsonOptions);
+            impDto!.IsCommitted.Should().BeFalse();
+        }
+    }
+
+    [Fact]
+    public async Task ValidateAndImport_WithValidImageMappings_OverridesOnlyMappedSkuAndPreservesGalleryOrder()
+    {
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            db.Categories.Add(new Category("Vi xử lý", "cpu", ComponentType.Cpu));
+            db.Categories.Add(new Category("Card đồ họa", "vga", ComponentType.Gpu));
+            await db.SaveChangesAsync();
+        }
+
+        using var scopeServices = _fixture.Factory.Services.CreateScope();
+        var workbookService = scopeServices.ServiceProvider.GetRequiredService<IProductImportWorkbookService>();
+        var template = await workbookService.GenerateTemplateAsync([
+            new("cpu", "Vi xử lý", ComponentType.Cpu),
+            new("vga", "Card đồ họa", ComponentType.Gpu)
+        ]);
+
+        byte[] workbookBytes;
+        using (var ms = new MemoryStream(template.Content))
+        using (var wb = new XLWorkbook(ms))
+        {
+            var pWs = wb.Worksheet("Products");
+            // Row 2: Mapped SKU (has old URL in Excel that should be overridden by mapping)
+            pWs.Cell(2, 1).Value = "CPU-MAPPED-01";
+            pWs.Cell(2, 2).Value = "AMD Ryzen 7 7800X3D";
+            pWs.Cell(2, 3).Value = "cpu";
+            pWs.Cell(2, 4).Value = "Cpu";
+            pWs.Cell(2, 5).Value = "AMD";
+            pWs.Cell(2, 6).Value = 10500000;
+            pWs.Cell(2, 7).Value = 11500000;
+            pWs.Cell(2, 8).Value = 12;
+            pWs.Cell(2, 9).Value = "CPU-MAPPED-01/main.jpg";
+            pWs.Cell(2, 10).Value = "https://old.example.com/should-be-overridden.jpg";
+
+            // Row 3: Unmapped SKU (keeps its workbook ImageUrl)
+            pWs.Cell(3, 1).Value = "GPU-UNMAPPED-02";
+            pWs.Cell(3, 2).Value = "NVIDIA RTX 4070 Super";
+            pWs.Cell(3, 3).Value = "vga";
+            pWs.Cell(3, 4).Value = "Gpu";
+            pWs.Cell(3, 5).Value = "NVIDIA";
+            pWs.Cell(3, 6).Value = 16500000;
+            pWs.Cell(3, 8).Value = 7;
+            pWs.Cell(3, 10).Value = "https://media.riutek.com/existing-gpu.webp";
+
+            var cpuWs = wb.Worksheet("CPU");
+            cpuWs.Cell(2, 1).Value = "CPU-MAPPED-01";
+            cpuWs.Cell(2, 2).Value = "AM5"; cpuWs.Cell(2, 3).Value = 8; cpuWs.Cell(2, 4).Value = 16;
+            cpuWs.Cell(2, 5).Value = 4.2; cpuWs.Cell(2, 6).Value = 5.0; cpuWs.Cell(2, 7).Value = 120;
+            cpuWs.Cell(2, 8).Value = true; cpuWs.Cell(2, 9).Value = "DDR5"; cpuWs.Cell(2, 10).Value = 5200;
+
+            var gpuWs = wb.Worksheet("GPU");
+            gpuWs.Cell(2, 1).Value = "GPU-UNMAPPED-02";
+            gpuWs.Cell(2, 2).Value = "AD104"; gpuWs.Cell(2, 3).Value = 12; gpuWs.Cell(2, 4).Value = "GDDR6X";
+            gpuWs.Cell(2, 5).Value = 267; gpuWs.Cell(2, 6).Value = 2.5; gpuWs.Cell(2, 7).Value = 220;
+            gpuWs.Cell(2, 8).Value = 650; gpuWs.Cell(2, 9).Value = true; gpuWs.Cell(2, 10).Value = "1x 16-pin";
+
+            using var outMs = new MemoryStream();
+            wb.SaveAs(outMs);
+            workbookBytes = outMs.ToArray();
+        }
+
+        var primaryKey = "products/2026/04/01925b30-c9a7-7e61-a8d9-6012e1a3bc01.jpg";
+        var galleryKey1 = "products/2026/04/01925b30-c9a7-7e61-a8d9-6012e1a3bc02.png";
+        var galleryKey2 = "products/2026/04/01925b30-c9a7-7e61-a8d9-6012e1a3bc03.webp";
+
+        var (client, fakeStorage) = await CreateClientWithFakeStorageAsync(UserRole.Admin, configure: s =>
+        {
+            s.ExistingKeys.Add(primaryKey);
+            s.ExistingKeys.Add(galleryKey1);
+            s.ExistingKeys.Add(galleryKey2);
+        });
+
+        var imageMappingsJson = $$"""
+        [
+          {
+            "sku": " cpu-mapped-01 ",
+            "primaryObjectKey": "{{primaryKey}}",
+            "additionalObjectKeys": ["{{galleryKey1}}", "{{galleryKey2}}"]
+          }
+        ]
+        """;
+
+        // 1. Validate with imageMappings (dry-run, zero DB writes)
+        using (var valContent = CreateWorkbookContent(workbookBytes, imageMappingsJson))
+        {
+            var valRes = await client.PostAsync("/api/v1/product-imports/validate", valContent);
+            valRes.StatusCode.Should().Be(HttpStatusCode.OK);
+            var valDto = await valRes.Content.ReadFromJsonAsync<ProductImportValidationResultDto>(JsonOptions);
+            valDto!.IsValid.Should().BeTrue();
+            valDto.ValidRows.Should().Be(2);
+        }
+
+        // 2. Import with imageMappings
+        var metadataCallsBeforeImport = fakeStorage.GetMetadataCallCount;
+        using (var impContent = CreateWorkbookContent(workbookBytes, imageMappingsJson))
+        {
+            var impRes = await client.PostAsync("/api/v1/product-imports/import", impContent);
+            impRes.StatusCode.Should().Be(HttpStatusCode.Created);
+            var impDto = await impRes.Content.ReadFromJsonAsync<ProductImportCommitResultDto>(JsonOptions);
+            impDto!.IsCommitted.Should().BeTrue();
+            impDto.CreatedCount.Should().Be(2);
+        }
+
+        // Verify /import only called GetObjectMetadataAsync once per distinct key (3 keys total, not 6)
+        (fakeStorage.GetMetadataCallCount - metadataCallsBeforeImport).Should().Be(3);
+        fakeStorage.DeleteCallCount.Should().Be(0);
+
+        using var assertScope = _fixture.Factory.Services.CreateScope();
+        var assertDb = assertScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var products = await assertDb.Products.AsNoTracking().OrderBy(p => p.Sku).ToListAsync();
+        products.Should().HaveCount(2);
+
+        var mappedCpu = products.Single(p => p.Sku == "CPU-MAPPED-01");
+        mappedCpu.ImageUrl.Should().Be($"https://media.riutek.com/{primaryKey}");
+        mappedCpu.AdditionalImages.Should().Equal(
+            $"https://media.riutek.com/{galleryKey1}",
+            $"https://media.riutek.com/{galleryKey2}");
+        mappedCpu.Price.Should().Be(10500000);
+        mappedCpu.OriginalPrice.Should().Be(11500000);
+        mappedCpu.StockQuantity.Should().Be(12);
+
+        var unmappedGpu = products.Single(p => p.Sku == "GPU-UNMAPPED-02");
+        unmappedGpu.ImageUrl.Should().Be("https://media.riutek.com/existing-gpu.webp");
+        unmappedGpu.AdditionalImages.Should().BeEmpty();
+        unmappedGpu.StockQuantity.Should().Be(7);
+    }
+
+    [Fact]
+    public async Task Import_WithInvalidImageMappingsCases_RejectsWithZeroDatabaseWrites()
+    {
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            db.Categories.Add(new Category("Vi xử lý", "cpu", ComponentType.Cpu));
+            await db.SaveChangesAsync();
+        }
+
+        var bytes = await CreateCpuWorkbookAsync("CPU-ERR-01", "AMD Ryzen 5 7600");
+        var validKey1 = "products/2026/04/01925b30-c9a7-7e61-a8d9-6012e1a3bc11.jpg";
+        var validKey2 = "products/2026/04/01925b30-c9a7-7e61-a8d9-6012e1a3bc12.jpg";
+
+        var (client, fakeStorage) = await CreateClientWithFakeStorageAsync(UserRole.Admin, configure: s =>
+        {
+            s.ExistingKeys.Add(validKey1);
+            s.ExistingKeys.Add(validKey2);
+        });
+
+        // Case A: Malformed JSON -> 400 Bad Request
+        using (var cMalformed = CreateWorkbookContent(bytes, "{not-valid-json"))
+        {
+            var rMalformed = await client.PostAsync("/api/v1/product-imports/import", cMalformed);
+            rMalformed.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        }
+
+        // Case B: Duplicate normalized SKU in imageMappings
+        var dupSkuJson = $$"""
+        [
+          { "sku": "CPU-ERR-01", "primaryObjectKey": "{{validKey1}}" },
+          { "sku": "cpu-err-01", "primaryObjectKey": "{{validKey2}}" }
+        ]
+        """;
+        using (var cDupSku = CreateWorkbookContent(bytes, dupSkuJson))
+        {
+            var rDupSku = await client.PostAsync("/api/v1/product-imports/import", cDupSku);
+            rDupSku.StatusCode.Should().Be(HttpStatusCode.OK);
+            var dto = await rDupSku.Content.ReadFromJsonAsync<ProductImportCommitResultDto>(JsonOptions);
+            dto!.IsCommitted.Should().BeFalse();
+            dto.Validation.Errors.Should().Contain(e => e.Code == "ProductImport.DuplicateImageMappingSku");
+        }
+
+        // Case C: Unknown SKU not in workbook
+        var unknownSkuJson = $$"""[{ "sku": "SKU-DOES-NOT-EXIST", "primaryObjectKey": "{{validKey1}}" }]""";
+        using (var cUnknown = CreateWorkbookContent(bytes, unknownSkuJson))
+        {
+            var rUnknown = await client.PostAsync("/api/v1/product-imports/import", cUnknown);
+            rUnknown.StatusCode.Should().Be(HttpStatusCode.OK);
+            var dto = await rUnknown.Content.ReadFromJsonAsync<ProductImportCommitResultDto>(JsonOptions);
+            dto!.IsCommitted.Should().BeFalse();
+            dto.Validation.Errors.Should().Contain(e => e.Code == "ProductImport.UnknownImageMappingSku");
+        }
+
+        // Case D: Empty primaryObjectKey (gallery-only attempt)
+        var emptyPrimaryJson = $$"""[{ "sku": "CPU-ERR-01", "primaryObjectKey": "", "additionalObjectKeys": ["{{validKey1}}"] }]""";
+        using (var cEmptyPrimary = CreateWorkbookContent(bytes, emptyPrimaryJson))
+        {
+            var rEmptyPrimary = await client.PostAsync("/api/v1/product-imports/import", cEmptyPrimary);
+            rEmptyPrimary.StatusCode.Should().Be(HttpStatusCode.OK);
+            var dto = await rEmptyPrimary.Content.ReadFromJsonAsync<ProductImportCommitResultDto>(JsonOptions);
+            dto!.IsCommitted.Should().BeFalse();
+            dto.Validation.Errors.Should().Contain(e => e.Code == "ProductImport.MissingPrimaryObjectKey");
+        }
+
+        // Case E: > 10 additionalObjectKeys
+        var elevenKeys = Enumerable.Range(1, 11)
+            .Select(i => $"\"products/2026/04/01925b30-c9a7-7e61-a8d9-6012e1a3b{i:D3}.jpg\"")
+            .ToArray();
+        var tooManyGalleryJson = $$"""[{ "sku": "CPU-ERR-01", "primaryObjectKey": "{{validKey1}}", "additionalObjectKeys": [{{string.Join(",", elevenKeys)}}] }]""";
+        using (var cTooMany = CreateWorkbookContent(bytes, tooManyGalleryJson))
+        {
+            var rTooMany = await client.PostAsync("/api/v1/product-imports/import", cTooMany);
+            rTooMany.StatusCode.Should().Be(HttpStatusCode.OK);
+            var dto = await rTooMany.Content.ReadFromJsonAsync<ProductImportCommitResultDto>(JsonOptions);
+            dto!.IsCommitted.Should().BeFalse();
+            dto.Validation.Errors.Should().Contain(e => e.Code == "ProductImport.TooManyAdditionalImages");
+        }
+
+        // Case F: Duplicate key in gallery / matching primary key & invalid managed key prefix
+        var dupAndInvalidKeyJson = $$"""
+        [
+          {
+            "sku": "CPU-ERR-01",
+            "primaryObjectKey": "{{validKey1}}",
+            "additionalObjectKeys": ["{{validKey1}}", "unmanaged/folder/evil.jpg"]
+          }
+        ]
+        """;
+        using (var cDupKey = CreateWorkbookContent(bytes, dupAndInvalidKeyJson))
+        {
+            var rDupKey = await client.PostAsync("/api/v1/product-imports/import", cDupKey);
+            rDupKey.StatusCode.Should().Be(HttpStatusCode.OK);
+            var dto = await rDupKey.Content.ReadFromJsonAsync<ProductImportCommitResultDto>(JsonOptions);
+            dto!.IsCommitted.Should().BeFalse();
+            dto.Validation.Errors.Should().Contain(e => e.Code == "ProductImport.DuplicateObjectKey");
+            dto.Validation.Errors.Should().Contain(e => e.Code == "ProductImport.InvalidObjectKey");
+        }
+
+        using var assertScope = _fixture.Factory.Services.CreateScope();
+        var assertDb = assertScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        (await assertDb.Products.CountAsync()).Should().Be(0);
+        (await assertDb.StockMovements.CountAsync()).Should().Be(0);
+        fakeStorage.DeleteCallCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Import_WhenStorageMetadataMissingOrInvalidOrUnavailable_NeverCommitsAndNeverDeletesObjects()
+    {
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            db.Categories.Add(new Category("Vi xử lý", "cpu", ComponentType.Cpu));
+            await db.SaveChangesAsync();
+        }
+
+        var bytes = await CreateCpuWorkbookAsync("CPU-META-01", "AMD Ryzen 5 7600");
+        var missingKey = "products/2026/04/01925b30-c9a7-7e61-a8d9-6012e1a3bc91.jpg";
+        var wrongMimeKey = "products/2026/04/01925b30-c9a7-7e61-a8d9-6012e1a3bc92.jpg";
+        var oversizedKey = "products/2026/04/01925b30-c9a7-7e61-a8d9-6012e1a3bc93.jpg";
+
+        var (client, fakeStorage) = await CreateClientWithFakeStorageAsync(UserRole.Admin, configure: s =>
+        {
+            s.CustomMetadata[wrongMimeKey] = new ProductMediaMetadata(wrongMimeKey, "image/png", 1024, "etag");
+            s.CustomMetadata[oversizedKey] = new ProductMediaMetadata(oversizedKey, "image/jpeg", 10 * 1024 * 1024, "etag");
+        });
+
+        // 1. Missing object in R2 (NotFound)
+        using (var cMissing = CreateWorkbookContent(bytes, $$"""[{"sku":"CPU-META-01","primaryObjectKey":"{{missingKey}}"}]"""))
+        {
+            var rMissing = await client.PostAsync("/api/v1/product-imports/import", cMissing);
+            rMissing.StatusCode.Should().Be(HttpStatusCode.OK);
+            var dto = await rMissing.Content.ReadFromJsonAsync<ProductImportCommitResultDto>(JsonOptions);
+            dto!.IsCommitted.Should().BeFalse();
+            dto.Validation.Errors.Should().Contain(e => e.Code == "ProductImport.MediaNotFound");
+        }
+
+        // 2. Wrong MIME for extension
+        using (var cMime = CreateWorkbookContent(bytes, $$"""[{"sku":"CPU-META-01","primaryObjectKey":"{{wrongMimeKey}}"}]"""))
+        {
+            var rMime = await client.PostAsync("/api/v1/product-imports/import", cMime);
+            rMime.StatusCode.Should().Be(HttpStatusCode.OK);
+            var dto = await rMime.Content.ReadFromJsonAsync<ProductImportCommitResultDto>(JsonOptions);
+            dto!.IsCommitted.Should().BeFalse();
+            dto.Validation.Errors.Should().Contain(e => e.Code == "ProductImport.InvalidMediaMetadata");
+        }
+
+        // 3. Oversized object in R2
+        using (var cSize = CreateWorkbookContent(bytes, $$"""[{"sku":"CPU-META-01","primaryObjectKey":"{{oversizedKey}}"}]"""))
+        {
+            var rSize = await client.PostAsync("/api/v1/product-imports/import", cSize);
+            rSize.StatusCode.Should().Be(HttpStatusCode.OK);
+            var dto = await rSize.Content.ReadFromJsonAsync<ProductImportCommitResultDto>(JsonOptions);
+            dto!.IsCommitted.Should().BeFalse();
+            dto.Validation.Errors.Should().Contain(e => e.Code == "ProductImport.InvalidMediaMetadata");
+        }
+
+        // 4. Storage disabled -> 503 Service Unavailable
+        fakeStorage.IsEnabled = false;
+        using (var cDisabled = CreateWorkbookContent(bytes, $$"""[{"sku":"CPU-META-01","primaryObjectKey":"{{missingKey}}"}]"""))
+        {
+            var rDisabled = await client.PostAsync("/api/v1/product-imports/import", cDisabled);
+            rDisabled.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+        }
+
+        // 5. Storage enabled but HEAD network unavailable -> 503 Service Unavailable
+        fakeStorage.IsEnabled = true;
+        fakeStorage.SimulateUnavailableOnMetadata = true;
+        using (var cUnavail = CreateWorkbookContent(bytes, $$"""[{"sku":"CPU-META-01","primaryObjectKey":"{{missingKey}}"}]"""))
+        {
+            var rUnavail = await client.PostAsync("/api/v1/product-imports/import", cUnavail);
+            rUnavail.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+        }
+
+        fakeStorage.DeleteCallCount.Should().Be(0);
+        using var assertScope = _fixture.Factory.Services.CreateScope();
+        var assertDb = assertScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        (await assertDb.Products.CountAsync()).Should().Be(0);
     }
 }
