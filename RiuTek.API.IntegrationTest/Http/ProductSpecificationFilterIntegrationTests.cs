@@ -6,6 +6,7 @@ using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
+using Npgsql;
 using RiuTek.API.IntegrationTest.Infrastructure;
 using RiuTek.Application.Common.Interfaces;
 using RiuTek.Application.Common.Models;
@@ -923,9 +924,12 @@ public class ProductSpecificationFilterIntegrationTests : CatalogIntegrationTest
         slugOptionsResp.StatusCode.Should().Be(HttpStatusCode.NotFound);
     }
 
+    internal sealed record CapturedDbCommand(string CommandText, IReadOnlyList<NpgsqlParameter> Parameters);
+
     internal sealed class TestQueryCaptureInterceptor : DbCommandInterceptor
     {
         public List<string> Commands { get; } = new();
+        public List<CapturedDbCommand> ExecutedCommands { get; } = new();
 
         public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(
             DbCommand command,
@@ -934,8 +938,39 @@ public class ProductSpecificationFilterIntegrationTests : CatalogIntegrationTest
             CancellationToken cancellationToken = default)
         {
             Commands.Add(command.CommandText);
+            var clonedParams = new List<NpgsqlParameter>();
+            foreach (DbParameter p in command.Parameters)
+            {
+                if (p is NpgsqlParameter np)
+                {
+                    clonedParams.Add(new NpgsqlParameter(np.ParameterName, np.NpgsqlDbType)
+                    {
+                        Value = np.Value
+                    });
+                }
+            }
+            ExecutedCommands.Add(new CapturedDbCommand(command.CommandText, clonedParams));
             return base.ReaderExecutingAsync(command, eventData, result, cancellationToken);
         }
+    }
+
+    private static async Task<int> CountReaderRowsAsync(string connectionString, CapturedDbCommand captured)
+    {
+        await using var conn = new NpgsqlConnection(connectionString);
+        await conn.OpenAsync();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = captured.CommandText;
+        foreach (var p in captured.Parameters)
+        {
+            cmd.Parameters.Add(new NpgsqlParameter(p.ParameterName, p.NpgsqlDbType) { Value = p.Value });
+        }
+        await using var reader = await cmd.ExecuteReaderAsync();
+        int count = 0;
+        while (await reader.ReadAsync())
+        {
+            count++;
+        }
+        return count;
     }
 
     private record NineSubtypesCatalog(
@@ -1547,5 +1582,389 @@ public class ProductSpecificationFilterIntegrationTests : CatalogIntegrationTest
         // 3. Values must be identical between small and large dataset
         optSmall.Brands.Should().BeEquivalentTo(optLarge.Brands);
         optSmall.Groups.Should().BeEquivalentTo(optLarge.Groups);
+    }
+
+    [Fact]
+    public async Task GetFilterOptions_CaseSingleGroup_ProvesPostgreSqlDistinctAndExactTwoRowsFromDatabase()
+    {
+        using var scope = Fixture.Factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        var catSmall = new Category("Case Small Dataset", $"case-sm-{Guid.NewGuid():N}", ComponentType.Case);
+        var catLarge = new Category("Case Large Dataset", $"case-lg-{Guid.NewGuid():N}", ComponentType.Case);
+        db.Categories.AddRange(catSmall, catLarge);
+        await db.SaveChangesAsync();
+
+        // 1. Small dataset: 2 Case products with same form factors [ATX (1), MicroATX (2)]
+        var pSm1 = new Product(catSmall.Id, "Case Small 1", $"case-sm1-{Guid.NewGuid():N}", $"SKU-CSM1-{Guid.NewGuid():N}", "NZXT", 1500000m, 10, "c1.jpg", ComponentType.Case,
+            new CaseSpecification { SupportedFormFactors = [MotherboardFormFactor.ATX, MotherboardFormFactor.MicroATX] });
+        var pSm2 = new Product(catSmall.Id, "Case Small 2", $"case-sm2-{Guid.NewGuid():N}", $"SKU-CSM2-{Guid.NewGuid():N}", "Corsair", 2000000m, 10, "c2.jpg", ComponentType.Case,
+            new CaseSpecification { SupportedFormFactors = [MotherboardFormFactor.ATX, MotherboardFormFactor.MicroATX] });
+        db.Products.AddRange(pSm1, pSm2);
+
+        // 2. Large dataset: 20 Case products with same form factors [ATX (1), MicroATX (2)], repeated brands,
+        // and one product with duplicate element inside its array [1, 2, 1] to test intra-product dedup as well
+        var lgCases = new List<Product>();
+        for (int i = 1; i <= 20; i++)
+        {
+            var brand = i % 2 == 0 ? "NZXT" : "Corsair";
+            var formFactors = i == 1
+                ? [MotherboardFormFactor.ATX, MotherboardFormFactor.MicroATX, MotherboardFormFactor.ATX]
+                : new List<MotherboardFormFactor> { MotherboardFormFactor.ATX, MotherboardFormFactor.MicroATX };
+            lgCases.Add(new Product(catLarge.Id, $"Case Large {i}", $"case-lg{i}-{Guid.NewGuid():N}", $"SKU-CLG-{i}-{Guid.NewGuid():N}", brand, 1500000m + i * 1000m, 10, $"c{i}.jpg", ComponentType.Case,
+                new CaseSpecification { SupportedFormFactors = formFactors }));
+        }
+        db.Products.AddRange(lgCases);
+        await db.SaveChangesAsync();
+
+        var interceptor = new TestQueryCaptureInterceptor();
+        using var customFactory = Fixture.Factory.WithWebHostBuilder(builder =>
+        {
+            builder.ConfigureServices(services =>
+            {
+                var descriptor = services.First(d => d.ServiceType == typeof(IProductSpecificationFilterService));
+                services.Remove(descriptor);
+
+                services.AddScoped<IProductSpecificationFilterService>(sp =>
+                {
+                    var optionsBuilder = new DbContextOptionsBuilder<ApplicationDbContext>();
+                    optionsBuilder.UseNpgsql(Fixture.ConnectionString, npgsqlOptions =>
+                    {
+                        npgsqlOptions.UseVector();
+                        npgsqlOptions.MigrationsAssembly(typeof(ApplicationDbContext).Assembly.FullName);
+                    });
+                    optionsBuilder.AddInterceptors(interceptor);
+                    var dbInstance = new ApplicationDbContext(optionsBuilder.Options);
+                    return new ProductSpecificationFilterService(dbInstance);
+                });
+            });
+        });
+        using var client = customFactory.CreateClient();
+
+        // 1. Query small dataset
+        interceptor.Commands.Clear();
+        interceptor.ExecutedCommands.Clear();
+        var respSmall = await client.GetAsync($"/api/v1/products/filter-options?categoryId={catSmall.Id}&componentType=7");
+        respSmall.StatusCode.Should().Be(HttpStatusCode.OK);
+        var optSmall = (await respSmall.Content.ReadFromJsonAsync<ProductFilterOptionsDto>(JsonOptions))!;
+
+        var smallGroupCmd = interceptor.ExecutedCommands.Single(c => c.CommandText.Contains("scoped_products", StringComparison.OrdinalIgnoreCase));
+        smallGroupCmd.CommandText.Should().Contain("DISTINCT", "Case single group query must execute DISTINCT at database level");
+        int smallDbRows = await CountReaderRowsAsync(Fixture.ConnectionString, smallGroupCmd);
+        smallDbRows.Should().Be(2, "PostgreSQL must return exactly 2 rows for 2 Case products");
+
+        // 2. Query large dataset
+        interceptor.Commands.Clear();
+        interceptor.ExecutedCommands.Clear();
+        var respLarge = await client.GetAsync($"/api/v1/products/filter-options?categoryId={catLarge.Id}&componentType=7");
+        respLarge.StatusCode.Should().Be(HttpStatusCode.OK);
+        var optLarge = (await respLarge.Content.ReadFromJsonAsync<ProductFilterOptionsDto>(JsonOptions))!;
+
+        var largeGroupCmd = interceptor.ExecutedCommands.Single(c => c.CommandText.Contains("scoped_products", StringComparison.OrdinalIgnoreCase));
+        largeGroupCmd.CommandText.Should().Contain("DISTINCT", "Case single group query must execute DISTINCT at database level");
+        int largeDbRows = await CountReaderRowsAsync(Fixture.ConnectionString, largeGroupCmd);
+        largeDbRows.Should().Be(2, "PostgreSQL must return exactly 2 rows for 20 Case products before C# in-memory distinct");
+
+        // 3. Groups and brands checks
+        optLarge.Brands.Should().Equal(["Corsair", "NZXT"]);
+        optLarge.Groups.Should().HaveCount(1);
+        optLarge.Groups[0].Key.Should().Be("motherboardFormFactors");
+        optLarge.Groups[0].Values.Should().Equal([1, 2]);
+
+        optSmall.Brands.Should().BeEquivalentTo(optLarge.Brands);
+        optSmall.Groups.Should().BeEquivalentTo(optLarge.Groups);
+        interceptor.Commands.Where(c => c.Contains("\"Products\"", StringComparison.OrdinalIgnoreCase)).Should().HaveCount(2, "Query count bounded to 2 queries");
+    }
+
+    [Fact]
+    public async Task GetFilterOptions_ScalarOverflow_Int32AndInt64And100Digits_Returns200WithoutCrashing()
+    {
+        using var scope = Fixture.Factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        var cat = new Category("CPU Scalar Overflow", $"cpu-of-{Guid.NewGuid():N}", ComponentType.Cpu);
+        db.Categories.Add(cat);
+        await db.SaveChangesAsync();
+
+        var validCpu = new Product(cat.Id, "Valid Ryzen 5", $"v-ryzen-{Guid.NewGuid():N}", $"SKU-VR-{Guid.NewGuid():N}", "AMD", 5000000m, 10, "v.jpg", ComponentType.Cpu,
+            new CpuSpecification { Socket = CpuSocket.AM5, SupportedMemoryType = RamType.DDR5, CoreCount = 6 });
+        db.Products.Add(validCpu);
+        await db.SaveChangesAsync();
+
+        var insertSql = """
+            INSERT INTO "Products" ("Id", "CategoryId", "Name", "Slug", "Sku", "Brand", "Price", "StockQuantity", "IsActive", "ImageUrl", "AdditionalImages", "ComponentType", "Specifications", "CreatedAt")
+            VALUES (@p0, @p1, @p2, @p3, @p4, 'AMD', 5000000, 10, true, 'https://example.com/c.jpg', ARRAY[]::text[], 1, @p5::jsonb, NOW());
+        """;
+
+        // 1. CoreCount = 2147483648 (int.MaxValue + 1)
+        var id1 = Guid.NewGuid();
+        await db.Database.ExecuteSqlRawAsync(insertSql, id1, cat.Id, "CPU 2147483648", $"slug-{id1:N}", $"SKU-{id1:N}",
+            "{\"CoreCount\": 2147483648, \"Socket\": 5, \"SupportedMemoryType\": 2}");
+
+        // 2. CoreCount = 9223372036854775808 (long.MaxValue + 1)
+        var id2 = Guid.NewGuid();
+        await db.Database.ExecuteSqlRawAsync(insertSql, id2, cat.Id, "CPU 9223372036854775808", $"slug-{id2:N}", $"SKU-{id2:N}",
+            "{\"CoreCount\": 9223372036854775808, \"Socket\": 5, \"SupportedMemoryType\": 2}");
+
+        // 3. CoreCount = 100 digits
+        var hundredDigits = new string('9', 100);
+        var id3 = Guid.NewGuid();
+        await db.Database.ExecuteSqlRawAsync(insertSql, id3, cat.Id, "CPU 100 digits", $"slug-{id3:N}", $"SKU-{id3:N}",
+            $"{{\"CoreCount\": {hundredDigits}, \"Socket\": 5, \"SupportedMemoryType\": 2}}");
+
+        using var client = CreatePublicClient();
+        var resp = await client.GetAsync($"/api/v1/products/filter-options?categoryId={cat.Id}&componentType=1");
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var options = (await resp.Content.ReadFromJsonAsync<ProductFilterOptionsDto>(JsonOptions))!;
+        var coreCounts = options.Groups.Single(g => g.Key == "coreCounts").Values;
+        coreCounts.Should().Equal([6], "Overflow values must be safely excluded and valid 6 preserved");
+    }
+
+    [Fact]
+    public async Task GetFilterOptions_ScalarBoundaryAndLeadingZeros_AcceptsIntMaxValueAndNormalizesLeadingZeros()
+    {
+        using var scope = Fixture.Factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        var cat = new Category("CPU Boundary & Leading Zeros", $"cpu-bnd-{Guid.NewGuid():N}", ComponentType.Cpu);
+        db.Categories.Add(cat);
+        await db.SaveChangesAsync();
+
+        var insertSql = """
+            INSERT INTO "Products" ("Id", "CategoryId", "Name", "Slug", "Sku", "Brand", "Price", "StockQuantity", "IsActive", "ImageUrl", "AdditionalImages", "ComponentType", "Specifications", "CreatedAt")
+            VALUES (@p0, @p1, @p2, @p3, @p4, 'Intel', 5000000, 10, true, 'https://example.com/c.jpg', ARRAY[]::text[], 1, @p5::jsonb, NOW());
+        """;
+
+        // 1. CoreCount = 2147483647 (int.MaxValue, valid integer)
+        var id1 = Guid.NewGuid();
+        await db.Database.ExecuteSqlRawAsync(insertSql, id1, cat.Id, "CPU MaxInt", $"slug-{id1:N}", $"SKU-{id1:N}",
+            "{\"CoreCount\": 2147483647, \"Socket\": 1, \"SupportedMemoryType\": 1}");
+
+        // 2. CoreCount with leading zeros: "0000000000000000000006" -> normalizes to 6
+        var id2 = Guid.NewGuid();
+        await db.Database.ExecuteSqlRawAsync(insertSql, id2, cat.Id, "CPU Leading Zeros", $"slug-{id2:N}", $"SKU-{id2:N}",
+            "{\"CoreCount\": \"0000000000000000000006\", \"Socket\": 1, \"SupportedMemoryType\": 1}");
+
+        // 3. Normal CoreCount = 6 -> merged with leading zeros into single 6
+        var id3 = Guid.NewGuid();
+        await db.Database.ExecuteSqlRawAsync(insertSql, id3, cat.Id, "CPU Normal 6", $"slug-{id3:N}", $"SKU-{id3:N}",
+            "{\"CoreCount\": 6, \"Socket\": 1, \"SupportedMemoryType\": 1}");
+
+        // 4. Invalid values: 0, negative (-8), all zeros (0000)
+        var id4 = Guid.NewGuid();
+        await db.Database.ExecuteSqlRawAsync(insertSql, id4, cat.Id, "CPU Invalids", $"slug-{id4:N}", $"SKU-{id4:N}",
+            "{\"CoreCount\": 0, \"Socket\": 1, \"SupportedMemoryType\": 1}");
+        var id5 = Guid.NewGuid();
+        await db.Database.ExecuteSqlRawAsync(insertSql, id5, cat.Id, "CPU Negative", $"slug-{id5:N}", $"SKU-{id5:N}",
+            "{\"CoreCount\": -8, \"Socket\": 1, \"SupportedMemoryType\": 1}");
+        var id6 = Guid.NewGuid();
+        await db.Database.ExecuteSqlRawAsync(insertSql, id6, cat.Id, "CPU All Zeros", $"slug-{id6:N}", $"SKU-{id6:N}",
+            "{\"CoreCount\": \"00000000\", \"Socket\": 1, \"SupportedMemoryType\": 1}");
+
+        using var client = CreatePublicClient();
+        var resp = await client.GetAsync($"/api/v1/products/filter-options?categoryId={cat.Id}&componentType=1");
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var options = (await resp.Content.ReadFromJsonAsync<ProductFilterOptionsDto>(JsonOptions))!;
+        var coreCounts = options.Groups.Single(g => g.Key == "coreCounts").Values;
+        coreCounts.Should().Equal([6, 2147483647], "2147483647 is accepted and 0000000000000000000006 normalizes to 6 without duplicates");
+    }
+
+    [Fact]
+    public async Task GetFilterOptions_ScalarEnumOverflow_HandlesIntOverflowAndExcludesNonDefinedIntMaxValue()
+    {
+        using var scope = Fixture.Factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        var cat = new Category("CPU Enum Overflow", $"cpu-enum-{Guid.NewGuid():N}", ComponentType.Cpu);
+        db.Categories.Add(cat);
+        await db.SaveChangesAsync();
+
+        var insertSql = """
+            INSERT INTO "Products" ("Id", "CategoryId", "Name", "Slug", "Sku", "Brand", "Price", "StockQuantity", "IsActive", "ImageUrl", "AdditionalImages", "ComponentType", "Specifications", "CreatedAt")
+            VALUES (@p0, @p1, @p2, @p3, @p4, 'AMD', 5000000, 10, true, 'https://example.com/c.jpg', ARRAY[]::text[], 1, @p5::jsonb, NOW());
+        """;
+
+        // 1. Valid Socket = AM5 (5)
+        var id1 = Guid.NewGuid();
+        await db.Database.ExecuteSqlRawAsync(insertSql, id1, cat.Id, "CPU Valid Socket", $"slug-{id1:N}", $"SKU-{id1:N}",
+            "{\"Socket\": 5, \"CoreCount\": 8, \"SupportedMemoryType\": 2}");
+
+        // 2. Socket = 2147483648 (int overflow, safely excluded at SQL)
+        var id2 = Guid.NewGuid();
+        await db.Database.ExecuteSqlRawAsync(insertSql, id2, cat.Id, "CPU Socket Overflow", $"slug-{id2:N}", $"SKU-{id2:N}",
+            "{\"Socket\": 2147483648, \"CoreCount\": 8, \"SupportedMemoryType\": 2}");
+
+        // 3. Socket = 2147483647 (valid int32 but not defined in CpuSocket enum, excluded by Enum.IsDefined)
+        var id3 = Guid.NewGuid();
+        await db.Database.ExecuteSqlRawAsync(insertSql, id3, cat.Id, "CPU Socket MaxInt NonEnum", $"slug-{id3:N}", $"SKU-{id3:N}",
+            "{\"Socket\": 2147483647, \"CoreCount\": 8, \"SupportedMemoryType\": 2}");
+
+        using var client = CreatePublicClient();
+        var resp = await client.GetAsync($"/api/v1/products/filter-options?categoryId={cat.Id}&componentType=1");
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var options = (await resp.Content.ReadFromJsonAsync<ProductFilterOptionsDto>(JsonOptions))!;
+        var sockets = options.Groups.Single(g => g.Key == "sockets").Values;
+        sockets.Should().Equal([5], "Valid enum 5 preserved, overflow and non-defined MaxInt safely excluded");
+    }
+
+    [Fact]
+    public async Task GetFilterOptions_ArrayOverflow_CaseSingleGroup_ReturnsValidFormFactorsWithoutCrashing()
+    {
+        using var scope = Fixture.Factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        var cat = new Category("Case Array Overflow", $"case-arr-{Guid.NewGuid():N}", ComponentType.Case);
+        db.Categories.Add(cat);
+        await db.SaveChangesAsync();
+
+        var insertSql = """
+            INSERT INTO "Products" ("Id", "CategoryId", "Name", "Slug", "Sku", "Brand", "Price", "StockQuantity", "IsActive", "ImageUrl", "AdditionalImages", "ComponentType", "Specifications", "CreatedAt")
+            VALUES (@p0, @p1, @p2, @p3, @p4, 'LianLi', 2500000, 10, true, 'https://example.com/c.jpg', ARRAY[]::text[], 7, @p5::jsonb, NOW());
+        """;
+
+        var hundredDigits = new string('9', 100);
+        // Case with valid [1, 2] mixed with 2147483648, >bigint, 100 digits, 0, -1, null, "invalid"
+        var id1 = Guid.NewGuid();
+        await db.Database.ExecuteSqlRawAsync(insertSql, id1, cat.Id, "Case Corrupted Array", $"slug-{id1:N}", $"SKU-{id1:N}",
+            $"{{\"SupportedFormFactors\": [1, 2147483648, 9223372036854775808, {hundredDigits}, 0, -1, null, \"invalid\", 2]}}");
+
+        var id2 = Guid.NewGuid();
+        await db.Database.ExecuteSqlRawAsync(insertSql, id2, cat.Id, "Case Valid Array", $"slug-{id2:N}", $"SKU-{id2:N}",
+            "{\"SupportedFormFactors\": [1, 2]}");
+
+        using var client = CreatePublicClient();
+        var resp = await client.GetAsync($"/api/v1/products/filter-options?categoryId={cat.Id}&componentType=7");
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var options = (await resp.Content.ReadFromJsonAsync<ProductFilterOptionsDto>(JsonOptions))!;
+        var formFactors = options.Groups.Single(g => g.Key == "motherboardFormFactors").Values;
+        formFactors.Should().Equal([1, 2]);
+    }
+
+    [Fact]
+    public async Task GetFilterOptions_ArrayOverflow_CoolerPreservesValidSocketAtEndOfArrayAndExcludesMaxInt()
+    {
+        using var scope = Fixture.Factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        var cat = new Category("Cooler Array Overflow", $"cooler-arr-{Guid.NewGuid():N}", ComponentType.Cooler);
+        db.Categories.Add(cat);
+        await db.SaveChangesAsync();
+
+        var insertSql = """
+            INSERT INTO "Products" ("Id", "CategoryId", "Name", "Slug", "Sku", "Brand", "Price", "StockQuantity", "IsActive", "ImageUrl", "AdditionalImages", "ComponentType", "Specifications", "CreatedAt")
+            VALUES (@p0, @p1, @p2, @p3, @p4, 'Noctua', 1800000, 10, true, 'https://example.com/c.jpg', ARRAY[]::text[], 8, @p5::jsonb, NOW());
+        """;
+
+        var hundredDigits = new string('9', 100);
+        // Cooler 1 has overflow values and int.MaxValue, with valid socket AM5 (5) at the very END
+        var id1 = Guid.NewGuid();
+        await db.Database.ExecuteSqlRawAsync(insertSql, id1, cat.Id, "Cooler 1", $"slug-{id1:N}", $"SKU-{id1:N}",
+            $"{{\"SupportedSockets\": [2147483648, 9223372036854775808, {hundredDigits}, 2147483647, 5]}}");
+
+        // Cooler 2 has valid LGA1700 (1)
+        var id2 = Guid.NewGuid();
+        await db.Database.ExecuteSqlRawAsync(insertSql, id2, cat.Id, "Cooler 2", $"slug-{id2:N}", $"SKU-{id2:N}",
+            "{\"SupportedSockets\": [1]}");
+
+        using var client = CreatePublicClient();
+        var resp = await client.GetAsync($"/api/v1/products/filter-options?categoryId={cat.Id}&componentType=8");
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var options = (await resp.Content.ReadFromJsonAsync<ProductFilterOptionsDto>(JsonOptions))!;
+        var sockets = options.Groups.Single(g => g.Key == "sockets").Values;
+        sockets.Should().Equal([1, 5], "2147483647 excluded as not in CpuSocket enum, socket at end of array preserved");
+    }
+
+    [Fact]
+    public async Task GetFilterOptions_ArrayTypeGuard_NonArrayLegacyFieldsNeverCrashSrf()
+    {
+        using var scope = Fixture.Factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        var cat = new Category("Legacy NonArray Guard", $"guard-{Guid.NewGuid():N}", ComponentType.Cooler);
+        db.Categories.Add(cat);
+        await db.SaveChangesAsync();
+
+        var insertSql = """
+            INSERT INTO "Products" ("Id", "CategoryId", "Name", "Slug", "Sku", "Brand", "Price", "StockQuantity", "IsActive", "ImageUrl", "AdditionalImages", "ComponentType", "Specifications", "CreatedAt")
+            VALUES (@p0, @p1, @p2, @p3, @p4, 'Deepcool', 1000000, 10, true, 'https://example.com/c.jpg', ARRAY[]::text[], 8, @p5::jsonb, NOW());
+        """;
+
+        // 1. Specifications is JSON null literal
+        var id1 = Guid.NewGuid();
+        await db.Database.ExecuteSqlRawAsync(insertSql, id1, cat.Id, "Cooler Null Specs", $"slug-{id1:N}", $"SKU-{id1:N}", "null");
+
+        // 2. Specifications is JSON string / scalar
+        var id2 = Guid.NewGuid();
+        await db.Database.ExecuteSqlRawAsync(insertSql, id2, cat.Id, "Cooler Scalar Specs", $"slug-{id2:N}", $"SKU-{id2:N}", "\"simple text\"");
+
+        // 3. SupportedSockets is missing
+        var id3 = Guid.NewGuid();
+        await db.Database.ExecuteSqlRawAsync(insertSql, id3, cat.Id, "Cooler Missing Prop", $"slug-{id3:N}", $"SKU-{id3:N}", "{\"FanRpm\": 1500}");
+
+        // 4. SupportedSockets is null
+        var id4 = Guid.NewGuid();
+        await db.Database.ExecuteSqlRawAsync(insertSql, id4, cat.Id, "Cooler Null Prop", $"slug-{id4:N}", $"SKU-{id4:N}", "{\"SupportedSockets\": null}");
+
+        // 5. SupportedSockets is string
+        var id5 = Guid.NewGuid();
+        await db.Database.ExecuteSqlRawAsync(insertSql, id5, cat.Id, "Cooler String Prop", $"slug-{id5:N}", $"SKU-{id5:N}", "{\"SupportedSockets\": \"LGA1700\"}");
+
+        // 6. SupportedSockets is number
+        var id6 = Guid.NewGuid();
+        await db.Database.ExecuteSqlRawAsync(insertSql, id6, cat.Id, "Cooler Number Prop", $"slug-{id6:N}", $"SKU-{id6:N}", "{\"SupportedSockets\": 1234}");
+
+        // 7. SupportedSockets is object
+        var id7 = Guid.NewGuid();
+        await db.Database.ExecuteSqlRawAsync(insertSql, id7, cat.Id, "Cooler Object Prop", $"slug-{id7:N}", $"SKU-{id7:N}", "{\"SupportedSockets\": {\"nested\": true}}");
+
+        // 8. Valid Cooler with SupportedSockets = [1] (LGA1700)
+        var id8 = Guid.NewGuid();
+        await db.Database.ExecuteSqlRawAsync(insertSql, id8, cat.Id, "Cooler Valid", $"slug-{id8:N}", $"SKU-{id8:N}", "{\"SupportedSockets\": [1]}");
+
+        using var client = CreatePublicClient();
+        var resp = await client.GetAsync($"/api/v1/products/filter-options?categoryId={cat.Id}&componentType=8");
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var options = (await resp.Content.ReadFromJsonAsync<ProductFilterOptionsDto>(JsonOptions))!;
+        var sockets = options.Groups.Single(g => g.Key == "sockets").Values;
+        sockets.Should().Equal([1]);
+    }
+
+    [Fact]
+    public async Task GetFilterOptions_RoundtripProducts_ValidFiltersRemainFunctional()
+    {
+        using var scope = Fixture.Factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        var cat = new Category("Roundtrip Category", $"rt-{Guid.NewGuid():N}", ComponentType.Cpu);
+        db.Categories.Add(cat);
+        await db.SaveChangesAsync();
+
+        var cpuAM5 = new Product(cat.Id, "Ryzen 5 7600", $"r5-7600-{Guid.NewGuid():N}", $"SKU-R5-{Guid.NewGuid():N}", "AMD", 5000000m, 10, "r5.jpg", ComponentType.Cpu,
+            new CpuSpecification { Socket = CpuSocket.AM5, CoreCount = 6, SupportedMemoryType = RamType.DDR5 });
+        var cpuLGA = new Product(cat.Id, "Core i5-12400", $"i5-12400-{Guid.NewGuid():N}", $"SKU-I5-{Guid.NewGuid():N}", "Intel", 4000000m, 10, "i5.jpg", ComponentType.Cpu,
+            new CpuSpecification { Socket = CpuSocket.LGA1700, CoreCount = 6, SupportedMemoryType = RamType.DDR4 });
+        db.Products.AddRange(cpuAM5, cpuLGA);
+        await db.SaveChangesAsync();
+
+        using var client = CreatePublicClient();
+        // 1. Options returns valid sockets 1 and 5
+        var optResp = await client.GetAsync($"/api/v1/products/filter-options?categoryId={cat.Id}&componentType=1");
+        optResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var options = (await optResp.Content.ReadFromJsonAsync<ProductFilterOptionsDto>(JsonOptions))!;
+        var sockets = options.Groups.Single(g => g.Key == "sockets").Values;
+        sockets.Should().Equal([1, 5]);
+
+        // 2. Querying products by Socket AM5 (5) returns only cpuAM5
+        var prodResp = await client.GetAsync($"/api/v1/products?categoryId={cat.Id}&componentType=1&sockets=5");
+        prodResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var pagedResult = (await prodResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        pagedResult.Items.Should().ContainSingle(p => p.Id == cpuAM5.Id);
+        pagedResult.Items.Should().NotContain(p => p.Id == cpuLGA.Id);
     }
 }

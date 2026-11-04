@@ -404,27 +404,37 @@ public class ProductSpecificationFilterService : IProductSpecificationFilterServ
             var def = groupDefs[i];
             if (def.IsArray)
             {
+                var safeExpr = BuildSafeIntegerExpression("elem");
                 sqlBuilder.AppendLine($"""
-                    SELECT '{def.Key}' AS "Key", elem::int AS "Value"
-                    FROM scoped_products s,
-                         jsonb_array_elements_text(s."Specifications"->'{def.JsonProperty}') AS elem
-                    WHERE s."Specifications" IS NOT NULL
-                      AND jsonb_typeof(s."Specifications") = 'object'
-                      AND s."Specifications" ? '{def.JsonProperty}'
-                      AND jsonb_typeof(s."Specifications"->'{def.JsonProperty}') = 'array'
-                      AND elem ~ '^[0-9]+$'
-                      AND elem::int > 0
+                    SELECT DISTINCT '{def.Key}' AS "Key", sub."Val" AS "Value"
+                    FROM (
+                        SELECT {safeExpr} AS "Val"
+                        FROM scoped_products s,
+                             jsonb_array_elements_text(
+                                 CASE
+                                     WHEN s."Specifications" IS NOT NULL
+                                      AND jsonb_typeof(s."Specifications") = 'object'
+                                      AND jsonb_typeof(s."Specifications"->'{def.JsonProperty}') = 'array'
+                                     THEN s."Specifications"->'{def.JsonProperty}'
+                                     ELSE '[]'::jsonb
+                                 END
+                             ) AS elem
+                    ) sub
+                    WHERE sub."Val" IS NOT NULL
                 """);
             }
             else
             {
+                var safeExpr = BuildSafeIntegerExpression($"(s.\"Specifications\"->>'{def.JsonProperty}')");
                 sqlBuilder.AppendLine($"""
-                    SELECT '{def.Key}' AS "Key", (s."Specifications"->>'{def.JsonProperty}')::int AS "Value"
-                    FROM scoped_products s
-                    WHERE s."Specifications" IS NOT NULL
-                      AND jsonb_typeof(s."Specifications") = 'object'
-                      AND (s."Specifications"->>'{def.JsonProperty}') ~ '^[0-9]+$'
-                      AND (s."Specifications"->>'{def.JsonProperty}')::int > 0
+                    SELECT DISTINCT '{def.Key}' AS "Key", sub."Val" AS "Value"
+                    FROM (
+                        SELECT {safeExpr} AS "Val"
+                        FROM scoped_products s
+                        WHERE s."Specifications" IS NOT NULL
+                          AND jsonb_typeof(s."Specifications") = 'object'
+                    ) sub
+                    WHERE sub."Val" IS NOT NULL
                 """);
             }
         }
@@ -457,6 +467,23 @@ public class ProductSpecificationFilterService : IProductSpecificationFilterServ
 
         return groups;
     }
+
+    private static string BuildSafeIntegerExpression(string textExpression) =>
+        $"""
+        (CASE
+            WHEN {textExpression} ~ '^[0-9]+$'
+             AND ltrim({textExpression}, '0') <> ''
+             AND (
+                 length(ltrim({textExpression}, '0')) < 10
+                 OR (
+                     length(ltrim({textExpression}, '0')) = 10
+                     AND (ltrim({textExpression}, '0') COLLATE "C") <= '2147483647'
+                 )
+             )
+            THEN (ltrim({textExpression}, '0'))::int
+            ELSE NULL
+        END)
+        """;
 
     private static void AppendScopeConditions(
         StringBuilder sqlBuilder,
