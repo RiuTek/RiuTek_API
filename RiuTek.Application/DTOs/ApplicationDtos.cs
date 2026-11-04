@@ -125,3 +125,11 @@ public record ProductFilterOptionsDto(
     IReadOnlyList<string> Brands,
     IReadOnlyList<ProductFilterGroupDto> Groups
 );
+
+
+public record ProductFilterScope(
+    ComponentType? ComponentType = null,
+    IReadOnlyCollection<Guid>? CategoryIds = null,
+    bool? IsActive = null,
+    bool? InStock = null
+);

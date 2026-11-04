@@ -1,17 +1,31 @@
 using System.Linq.Expressions;
+using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using RiuTek.Application.Common.Interfaces;
 using RiuTek.Application.DTOs;
 using RiuTek.Application.Features.Products.Queries;
 using RiuTek.Core.Entities;
 using RiuTek.Core.Entities.Specifications;
 using RiuTek.Core.Enums;
+using RiuTek.Infrastructure.Data;
 
 namespace RiuTek.Infrastructure.Services;
 
 public class ProductSpecificationFilterService : IProductSpecificationFilterService
 {
+    private readonly ApplicationDbContext? _context;
+
+    public ProductSpecificationFilterService(ApplicationDbContext context)
+    {
+        _context = context ?? throw new ArgumentNullException(nameof(context));
+    }
+
+    public ProductSpecificationFilterService()
+    {
+        _context = null;
+    }
     public IQueryable<Product> Apply(IQueryable<Product> query, ProductFilterOptions options)
     {
         if (!options.ComponentType.HasValue)
@@ -300,106 +314,248 @@ public class ProductSpecificationFilterService : IProductSpecificationFilterServ
         return query;
     }
 
+    private sealed record GroupDefinition(
+        string Key,
+        string JsonProperty,
+        bool IsArray,
+        Type? EnumType);
+
+    public sealed record FilterBrandRow(string Brand);
+    public sealed record FilterOptionGroupRow(string Key, int Value);
+
     public async Task<ProductFilterOptionsDto> GetFilterOptionsAsync(
-        IQueryable<Product> scopedQuery,
-        ComponentType? componentType,
+        ProductFilterScope scope,
         CancellationToken cancellationToken = default)
     {
-        var rawBrands = await scopedQuery
-            .Select(p => p.Brand)
-            .Distinct()
-            .ToListAsync(cancellationToken);
-
-        var brands = rawBrands
-            .Where(b => !string.IsNullOrWhiteSpace(b))
-            .Select(b => b.Trim())
-            .GroupBy(b => b.ToUpperInvariant())
-            .Select(g => g.First())
-            .OrderBy(b => b, StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
-        if (!componentType.HasValue)
-        {
-            return new ProductFilterOptionsDto(brands, []);
-        }
-
-        var specs = await scopedQuery
-            .Select(p => p.Specifications)
-            .ToListAsync(cancellationToken);
-
-        var groups = new List<ProductFilterGroupDto>();
-
-        switch (componentType.Value)
-        {
-            case ComponentType.Cpu:
-            {
-                var cpuSpecs = specs.OfType<CpuSpecification>().ToList();
-                groups.Add(new ProductFilterGroupDto("sockets", cpuSpecs.Select(s => (int)s.Socket).Distinct().OrderBy(x => x).ToList()));
-                groups.Add(new ProductFilterGroupDto("memoryTypes", cpuSpecs.Select(s => (int)s.SupportedMemoryType).Distinct().OrderBy(x => x).ToList()));
-                groups.Add(new ProductFilterGroupDto("coreCounts", cpuSpecs.Where(s => s.CoreCount > 0).Select(s => s.CoreCount).Distinct().OrderBy(x => x).ToList()));
-                break;
-            }
-            case ComponentType.Motherboard:
-            {
-                var mbSpecs = specs.OfType<MotherboardSpecification>().ToList();
-                groups.Add(new ProductFilterGroupDto("sockets", mbSpecs.Select(s => (int)s.Socket).Distinct().OrderBy(x => x).ToList()));
-                groups.Add(new ProductFilterGroupDto("memoryTypes", mbSpecs.Select(s => (int)s.MemoryType).Distinct().OrderBy(x => x).ToList()));
-                groups.Add(new ProductFilterGroupDto("motherboardFormFactors", mbSpecs.Select(s => (int)s.FormFactor).Distinct().OrderBy(x => x).ToList()));
-                break;
-            }
-            case ComponentType.Gpu:
-            {
-                var gpuSpecs = specs.OfType<GpuSpecification>().ToList();
-                groups.Add(new ProductFilterGroupDto("vramGbs", gpuSpecs.Where(s => s.VramGb > 0).Select(s => s.VramGb).Distinct().OrderBy(x => x).ToList()));
-                groups.Add(new ProductFilterGroupDto("gpuLengthsMm", gpuSpecs.Where(s => s.LengthMm > 0).Select(s => s.LengthMm).Distinct().OrderBy(x => x).ToList()));
-                break;
-            }
-            case ComponentType.Ram:
-            {
-                var ramSpecs = specs.OfType<RamSpecification>().ToList();
-                groups.Add(new ProductFilterGroupDto("memoryTypes", ramSpecs.Select(s => (int)s.MemoryType).Distinct().OrderBy(x => x).ToList()));
-                groups.Add(new ProductFilterGroupDto("ramFormFactors", ramSpecs.Select(s => (int)s.FormFactor).Distinct().OrderBy(x => x).ToList()));
-                groups.Add(new ProductFilterGroupDto("ramCapacitiesGb", ramSpecs.Where(s => s.CapacityGb > 0).Select(s => s.CapacityGb).Distinct().OrderBy(x => x).ToList()));
-                groups.Add(new ProductFilterGroupDto("ramSpeedsMhz", ramSpecs.Where(s => s.SpeedMhz > 0).Select(s => s.SpeedMhz).Distinct().OrderBy(x => x).ToList()));
-                break;
-            }
-            case ComponentType.Storage:
-            {
-                var storageSpecs = specs.OfType<StorageSpecification>().ToList();
-                groups.Add(new ProductFilterGroupDto("storageTypes", storageSpecs.Select(s => (int)s.StorageType).Distinct().OrderBy(x => x).ToList()));
-                groups.Add(new ProductFilterGroupDto("storageInterfaces", storageSpecs.Select(s => (int)s.Interface).Distinct().OrderBy(x => x).ToList()));
-                groups.Add(new ProductFilterGroupDto("storageCapacitiesGb", storageSpecs.Where(s => s.CapacityGb > 0).Select(s => s.CapacityGb).Distinct().OrderBy(x => x).ToList()));
-                break;
-            }
-            case ComponentType.Psu:
-            {
-                var psuSpecs = specs.OfType<PsuSpecification>().ToList();
-                groups.Add(new ProductFilterGroupDto("psuEfficiencies", psuSpecs.Select(s => (int)s.Efficiency).Distinct().OrderBy(x => x).ToList()));
-                groups.Add(new ProductFilterGroupDto("psuModularities", psuSpecs.Select(s => (int)s.Modularity).Distinct().OrderBy(x => x).ToList()));
-                groups.Add(new ProductFilterGroupDto("psuFormFactors", psuSpecs.Select(s => (int)s.FormFactor).Distinct().OrderBy(x => x).ToList()));
-                groups.Add(new ProductFilterGroupDto("psuWattages", psuSpecs.Where(s => s.Wattage > 0).Select(s => s.Wattage).Distinct().OrderBy(x => x).ToList()));
-                break;
-            }
-            case ComponentType.Case:
-            {
-                var caseSpecs = specs.OfType<CaseSpecification>().ToList();
-                groups.Add(new ProductFilterGroupDto("motherboardFormFactors", caseSpecs.SelectMany(s => s.SupportedFormFactors).Select(f => (int)f).Distinct().OrderBy(x => x).ToList()));
-                break;
-            }
-            case ComponentType.Cooler:
-            {
-                var coolerSpecs = specs.OfType<CoolerSpecification>().ToList();
-                groups.Add(new ProductFilterGroupDto("sockets", coolerSpecs.SelectMany(s => s.SupportedSockets).Select(s => (int)s).Distinct().OrderBy(x => x).ToList()));
-                groups.Add(new ProductFilterGroupDto("coolerTypes", coolerSpecs.Select(s => (int)s.CoolerType).Distinct().OrderBy(x => x).ToList()));
-                break;
-            }
-            case ComponentType.Accessory:
-            default:
-                break;
-        }
+        var brands = await QueryBrandsAsync(scope, cancellationToken);
+        var groups = await QueryGroupsAsync(scope, cancellationToken);
 
         return new ProductFilterOptionsDto(brands, groups);
     }
+
+    private async Task<IReadOnlyList<string>> QueryBrandsAsync(
+        ProductFilterScope scope,
+        CancellationToken cancellationToken)
+    {
+        if (_context == null)
+        {
+            throw new InvalidOperationException("ApplicationDbContext is required for GetFilterOptionsAsync.");
+        }
+
+        var sqlBuilder = new StringBuilder();
+        sqlBuilder.AppendLine("""
+            SELECT MIN(TRIM(p."Brand") COLLATE "C") AS "Brand"
+            FROM "Products" p
+            WHERE p."Brand" IS NOT NULL
+              AND TRIM(p."Brand") <> ''
+        """);
+
+        var parameters = new List<object>();
+        AppendScopeConditions(sqlBuilder, parameters, scope);
+
+        sqlBuilder.AppendLine("""
+            GROUP BY UPPER(TRIM(p."Brand"))
+            ORDER BY "Brand" ASC;
+        """);
+
+        var brandRows = await _context.Database
+            .SqlQueryRaw<FilterBrandRow>(sqlBuilder.ToString(), parameters.ToArray())
+            .ToListAsync(cancellationToken);
+
+        return brandRows
+            .Select(r => r.Brand)
+            .Where(b => !string.IsNullOrWhiteSpace(b))
+            .ToList();
+    }
+
+    private async Task<IReadOnlyList<ProductFilterGroupDto>> QueryGroupsAsync(
+        ProductFilterScope scope,
+        CancellationToken cancellationToken)
+    {
+        if (!scope.ComponentType.HasValue || _context == null)
+        {
+            return [];
+        }
+
+        var groupDefs = GetGroupDefinitions(scope.ComponentType.Value);
+        if (groupDefs.Count == 0)
+        {
+            return [];
+        }
+
+        var sqlBuilder = new StringBuilder();
+        sqlBuilder.AppendLine("WITH scoped_products AS (");
+        sqlBuilder.AppendLine("    SELECT p.\"Specifications\"");
+        sqlBuilder.AppendLine("    FROM \"Products\" p");
+        sqlBuilder.AppendLine("    WHERE 1=1");
+
+        var parameters = new List<object>();
+        AppendScopeConditions(sqlBuilder, parameters, scope);
+
+        sqlBuilder.AppendLine(")");
+
+        for (int i = 0; i < groupDefs.Count; i++)
+        {
+            if (i > 0)
+            {
+                sqlBuilder.AppendLine("UNION");
+            }
+
+            var def = groupDefs[i];
+            if (def.IsArray)
+            {
+                sqlBuilder.AppendLine($"""
+                    SELECT '{def.Key}' AS "Key", elem::int AS "Value"
+                    FROM scoped_products s,
+                         jsonb_array_elements_text(s."Specifications"->'{def.JsonProperty}') AS elem
+                    WHERE s."Specifications" IS NOT NULL
+                      AND jsonb_typeof(s."Specifications") = 'object'
+                      AND s."Specifications" ? '{def.JsonProperty}'
+                      AND jsonb_typeof(s."Specifications"->'{def.JsonProperty}') = 'array'
+                      AND elem ~ '^[0-9]+$'
+                      AND elem::int > 0
+                """);
+            }
+            else
+            {
+                sqlBuilder.AppendLine($"""
+                    SELECT '{def.Key}' AS "Key", (s."Specifications"->>'{def.JsonProperty}')::int AS "Value"
+                    FROM scoped_products s
+                    WHERE s."Specifications" IS NOT NULL
+                      AND jsonb_typeof(s."Specifications") = 'object'
+                      AND (s."Specifications"->>'{def.JsonProperty}') ~ '^[0-9]+$'
+                      AND (s."Specifications"->>'{def.JsonProperty}')::int > 0
+                """);
+            }
+        }
+
+        sqlBuilder.AppendLine("ORDER BY \"Key\", \"Value\";");
+
+        var groupRows = await _context.Database
+            .SqlQueryRaw<FilterOptionGroupRow>(sqlBuilder.ToString(), parameters.ToArray())
+            .ToListAsync(cancellationToken);
+
+        var groups = new List<ProductFilterGroupDto>();
+        foreach (var def in groupDefs)
+        {
+            var rawValues = groupRows
+                .Where(r => r.Key == def.Key)
+                .Select(r => r.Value);
+
+            if (def.EnumType != null)
+            {
+                rawValues = rawValues.Where(v => Enum.IsDefined(def.EnumType, v));
+            }
+            else
+            {
+                rawValues = rawValues.Where(v => v > 0);
+            }
+
+            var values = rawValues.Distinct().OrderBy(v => v).ToList();
+            groups.Add(new ProductFilterGroupDto(def.Key, values));
+        }
+
+        return groups;
+    }
+
+    private static void AppendScopeConditions(
+        StringBuilder sqlBuilder,
+        List<object> parameters,
+        ProductFilterScope scope)
+    {
+        if (scope.ComponentType.HasValue)
+        {
+            sqlBuilder.AppendLine(" AND p.\"ComponentType\" = @p_componentType");
+            parameters.Add(new NpgsqlParameter("p_componentType", (int)scope.ComponentType.Value));
+        }
+
+        if (scope.CategoryIds != null)
+        {
+            if (scope.CategoryIds.Count > 0)
+            {
+                sqlBuilder.AppendLine(" AND p.\"CategoryId\" = ANY(@p_categoryIds)");
+                var param = new NpgsqlParameter("p_categoryIds", NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Uuid)
+                {
+                    Value = scope.CategoryIds.ToArray()
+                };
+                parameters.Add(param);
+            }
+            else
+            {
+                sqlBuilder.AppendLine(" AND 1=0");
+            }
+        }
+
+        if (scope.IsActive.HasValue)
+        {
+            sqlBuilder.AppendLine(" AND p.\"IsActive\" = @p_isActive");
+            parameters.Add(new NpgsqlParameter("p_isActive", scope.IsActive.Value));
+        }
+
+        if (scope.InStock.HasValue)
+        {
+            if (scope.InStock.Value)
+            {
+                sqlBuilder.AppendLine(" AND p.\"StockQuantity\" > 0");
+            }
+            else
+            {
+                sqlBuilder.AppendLine(" AND p.\"StockQuantity\" = 0");
+            }
+        }
+    }
+
+    private static IReadOnlyList<GroupDefinition> GetGroupDefinitions(ComponentType componentType) =>
+        componentType switch
+        {
+            ComponentType.Cpu =>
+            [
+                new GroupDefinition("sockets", nameof(CpuSpecification.Socket), IsArray: false, typeof(CpuSocket)),
+                new GroupDefinition("memoryTypes", nameof(CpuSpecification.SupportedMemoryType), IsArray: false, typeof(RamType)),
+                new GroupDefinition("coreCounts", nameof(CpuSpecification.CoreCount), IsArray: false, null)
+            ],
+            ComponentType.Motherboard =>
+            [
+                new GroupDefinition("sockets", nameof(MotherboardSpecification.Socket), IsArray: false, typeof(CpuSocket)),
+                new GroupDefinition("memoryTypes", nameof(MotherboardSpecification.MemoryType), IsArray: false, typeof(RamType)),
+                new GroupDefinition("motherboardFormFactors", nameof(MotherboardSpecification.FormFactor), IsArray: false, typeof(MotherboardFormFactor))
+            ],
+            ComponentType.Gpu =>
+            [
+                new GroupDefinition("vramGbs", nameof(GpuSpecification.VramGb), IsArray: false, null),
+                new GroupDefinition("gpuLengthsMm", nameof(GpuSpecification.LengthMm), IsArray: false, null)
+            ],
+            ComponentType.Ram =>
+            [
+                new GroupDefinition("memoryTypes", nameof(RamSpecification.MemoryType), IsArray: false, typeof(RamType)),
+                new GroupDefinition("ramFormFactors", nameof(RamSpecification.FormFactor), IsArray: false, typeof(RamFormFactor)),
+                new GroupDefinition("ramCapacitiesGb", nameof(RamSpecification.CapacityGb), IsArray: false, null),
+                new GroupDefinition("ramSpeedsMhz", nameof(RamSpecification.SpeedMhz), IsArray: false, null)
+            ],
+            ComponentType.Storage =>
+            [
+                new GroupDefinition("storageTypes", nameof(StorageSpecification.StorageType), IsArray: false, typeof(StorageType)),
+                new GroupDefinition("storageInterfaces", nameof(StorageSpecification.Interface), IsArray: false, typeof(StorageInterface)),
+                new GroupDefinition("storageCapacitiesGb", nameof(StorageSpecification.CapacityGb), IsArray: false, null)
+            ],
+            ComponentType.Psu =>
+            [
+                new GroupDefinition("psuEfficiencies", nameof(PsuSpecification.Efficiency), IsArray: false, typeof(PsuEfficiency)),
+                new GroupDefinition("psuModularities", nameof(PsuSpecification.Modularity), IsArray: false, typeof(PsuModularity)),
+                new GroupDefinition("psuFormFactors", nameof(PsuSpecification.FormFactor), IsArray: false, typeof(PsuFormFactor)),
+                new GroupDefinition("psuWattages", nameof(PsuSpecification.Wattage), IsArray: false, null)
+            ],
+            ComponentType.Case =>
+            [
+                new GroupDefinition("motherboardFormFactors", nameof(CaseSpecification.SupportedFormFactors), IsArray: true, typeof(MotherboardFormFactor))
+            ],
+            ComponentType.Cooler =>
+            [
+                new GroupDefinition("sockets", nameof(CoolerSpecification.SupportedSockets), IsArray: true, typeof(CpuSocket)),
+                new GroupDefinition("coolerTypes", nameof(CoolerSpecification.CoolerType), IsArray: false, typeof(CoolerType))
+            ],
+            _ => []
+        };
 
     private static IQueryable<Product> ApplyOrJsonContains(
         IQueryable<Product> query,

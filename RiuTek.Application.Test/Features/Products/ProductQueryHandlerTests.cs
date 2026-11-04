@@ -34,8 +34,7 @@ public class ProductQueryHandlerTests
         public IQueryable<Product> Apply(IQueryable<Product> query, ProductFilterOptions options) => query;
 
         public Task<ProductFilterOptionsDto> GetFilterOptionsAsync(
-            IQueryable<Product> scopedQuery,
-            ComponentType? componentType,
+            ProductFilterScope scope,
             CancellationToken cancellationToken = default) =>
             Task.FromResult(new ProductFilterOptionsDto([], []));
     }
@@ -925,7 +924,7 @@ public class ProductQueryHandlerTests
 
         var mockService = new Mock<IProductSpecificationFilterService>();
         mockService
-            .Setup(s => s.GetFilterOptionsAsync(It.IsAny<IQueryable<Product>>(), ComponentType.Cpu, It.IsAny<CancellationToken>()))
+            .Setup(s => s.GetFilterOptionsAsync(It.Is<ProductFilterScope>(sc => sc.ComponentType == ComponentType.Cpu && sc.CategoryIds != null && sc.CategoryIds.Contains(parentCat.Id) && sc.CategoryIds.Contains(childCat.Id)), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new ProductFilterOptionsDto(["AMD", "Intel"], [new("sockets", [1, 2])]));
 
         var handler = new GetProductFilterOptionsQueryHandler(context, mockService.Object);

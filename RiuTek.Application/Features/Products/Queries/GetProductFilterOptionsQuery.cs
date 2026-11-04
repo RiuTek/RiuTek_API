@@ -65,13 +65,15 @@ public class GetProductFilterOptionsQueryHandler
             categoryIds = categoryResult.Value;
         }
 
-        var query = _context.Products
-            .AsNoTracking()
-            .ApplyScope(request.ComponentType, categoryIds, request.IsActive, request.InStock);
+        var scope = new ProductFilterScope(
+            ComponentType: request.ComponentType,
+            CategoryIds: categoryIds,
+            IsActive: request.IsActive,
+            InStock: request.InStock
+        );
 
         var result = await _specFilterService.GetFilterOptionsAsync(
-            query,
-            request.ComponentType,
+            scope,
             cancellationToken);
 
         return Result.Success(result);
