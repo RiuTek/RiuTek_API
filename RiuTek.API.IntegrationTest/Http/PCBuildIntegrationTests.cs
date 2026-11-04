@@ -573,4 +573,146 @@ public class PCBuildIntegrationTests : IAsyncLifetime
         result!.TotalCount.Should().Be(1);
         result.Items.Should().BeEmpty();
     }
+
+    [Fact]
+    public async Task Preview_WhenCpuWithoutIgpuAndNoDiscreteGpu_ReturnsComp12WarningAndMissingDiscreteGpu_UntilDiscreteGpuAdded()
+    {
+        var client = _fixture.Factory.CreateClient();
+        var (_, cpuNoIgpu) = await SeedProductAsync(
+            ComponentType.Cpu,
+            spec: new CpuSpecification
+            {
+                Socket = CpuSocket.LGA1700,
+                CoreCount = 14,
+                ThreadCount = 20,
+                TdpWattage = 65,
+                SupportedMemoryType = RamType.DDR5,
+                HasIntegratedGpu = false
+            });
+        var (_, mobo) = await SeedProductAsync(ComponentType.Motherboard);
+        var (_, ram) = await SeedProductAsync(ComponentType.Ram);
+        var (_, storage) = await SeedProductAsync(ComponentType.Storage);
+        var (_, psu) = await SeedProductAsync(ComponentType.Psu);
+        var (_, pcCase) = await SeedProductAsync(ComponentType.Case);
+        var (_, gpu) = await SeedProductAsync(
+            ComponentType.Gpu,
+            spec: new GpuSpecification { Chipset = "RTX 4070", VramGb = 12, TdpWattage = 150, RecommendedPsuWattage = 650, LengthMm = 242 });
+
+        // 1. Preview full system EXCEPT discrete GPU -> COMP-12 Warning + "Card đồ họa rời (GPU)" in MissingComponents + IsCompleteSystem = false + IsCompatible = true
+        var reqWithoutGpu = new PreviewPCBuildRequest(
+        [
+            new(cpuNoIgpu.Id, 1),
+            new(mobo.Id, 1),
+            new(ram.Id, 1),
+            new(storage.Id, 1),
+            new(psu.Id, 1),
+            new(pcCase.Id, 1)
+        ]);
+
+        var resWithoutGpu = await client.PostAsJsonAsync("/api/v1/pc-builds/preview", reqWithoutGpu);
+        resWithoutGpu.StatusCode.Should().Be(HttpStatusCode.OK);
+        var previewWithoutGpu = await resWithoutGpu.Content.ReadFromJsonAsync<PCBuildPreviewResultDto>(JsonOptions);
+        previewWithoutGpu.Should().NotBeNull();
+        previewWithoutGpu!.IsCompatible.Should().BeTrue();
+        previewWithoutGpu.IsCompleteSystem.Should().BeFalse();
+        previewWithoutGpu.CanPurchaseAll.Should().BeTrue();
+        previewWithoutGpu.MissingComponents.Should().ContainSingle().Which.Should().Be("Card đồ họa rời (GPU)");
+        previewWithoutGpu.Issues.Should().ContainSingle(i => i.RuleId == "COMP-12" && i.Severity == "Warning");
+
+        // 2. Preview adding discrete GPU -> clears COMP-12 and MissingComponents, IsCompleteSystem = true, RecommendedPsuWattage = 650
+        var reqWithGpu = new PreviewPCBuildRequest(
+        [
+            new(cpuNoIgpu.Id, 1),
+            new(mobo.Id, 1),
+            new(ram.Id, 1),
+            new(storage.Id, 1),
+            new(psu.Id, 1),
+            new(pcCase.Id, 1),
+            new(gpu.Id, 1)
+        ]);
+
+        var resWithGpu = await client.PostAsJsonAsync("/api/v1/pc-builds/preview", reqWithGpu);
+        resWithGpu.StatusCode.Should().Be(HttpStatusCode.OK);
+        var previewWithGpu = await resWithGpu.Content.ReadFromJsonAsync<PCBuildPreviewResultDto>(JsonOptions);
+        previewWithGpu.Should().NotBeNull();
+        previewWithGpu!.IsCompatible.Should().BeTrue();
+        previewWithGpu.IsCompleteSystem.Should().BeTrue();
+        previewWithGpu.RecommendedPsuWattage.Should().Be(650);
+        previewWithGpu.MissingComponents.Should().BeEmpty();
+        previewWithGpu.Issues.Should().NotContain(i => i.RuleId == "COMP-12");
+    }
+
+    [Fact]
+    public async Task PsuLengthExceedsCaseClearance_Comp13_PreviewCreateUpdateGetMine_SavesWithoutBlockAndComputesCanPurchaseAll()
+    {
+        var (client, _) = await CreateUserClientAsync(UserRole.Customer);
+        var (_, cpu) = await SeedProductAsync(
+            ComponentType.Cpu,
+            spec: new CpuSpecification { Socket = CpuSocket.LGA1700, TdpWattage = 65, SupportedMemoryType = RamType.DDR5, HasIntegratedGpu = true });
+        var (_, psuLong) = await SeedProductAsync(
+            ComponentType.Psu,
+            spec: new PsuSpecification { Wattage = 850, Efficiency = PsuEfficiency.Plus80Gold, LengthMm = 190 });
+        var (_, caseShort) = await SeedProductAsync(
+            ComponentType.Case,
+            spec: new CaseSpecification { SupportedFormFactors = [MotherboardFormFactor.ATX], MaxPsuLengthMm = 160, MaxGpuLengthMm = 350 });
+
+        // 1. Preview -> COMP-13 Error, IsCompatible = false, CanPurchaseAll = true
+        var previewRes = await client.PostAsJsonAsync("/api/v1/pc-builds/preview", new PreviewPCBuildRequest(
+        [
+            new(cpu.Id, 1),
+            new(psuLong.Id, 1),
+            new(caseShort.Id, 1)
+        ]));
+        previewRes.StatusCode.Should().Be(HttpStatusCode.OK);
+        var previewDto = await previewRes.Content.ReadFromJsonAsync<PCBuildPreviewResultDto>(JsonOptions);
+        previewDto.Should().NotBeNull();
+        previewDto!.IsCompatible.Should().BeFalse();
+        previewDto.CanPurchaseAll.Should().BeTrue();
+        previewDto.Issues.Should().ContainSingle(i => i.RuleId == "COMP-13" && i.Severity == "Error");
+
+        // 2. Create -> 201 Created without any force flag despite COMP-13 Error
+        var createRes = await client.PostAsJsonAsync("/api/v1/pc-builds", new CreatePCBuildRequest(
+            "Incompatible PSU Length Rig",
+            "Saved for later review",
+            [
+                new(cpu.Id, 1),
+                new(psuLong.Id, 1)
+            ]));
+        createRes.StatusCode.Should().Be(HttpStatusCode.Created);
+        var createdDto = await createRes.Content.ReadFromJsonAsync<MyPCBuildDto>(JsonOptions);
+        createdDto.Should().NotBeNull();
+        var buildId = createdDto!.Id;
+
+        // 3. Update adding incompatible case -> 200 OK without any force flag, returns live COMP-13 Error
+        var updateRes = await client.PutAsJsonAsync($"/api/v1/pc-builds/{buildId}", new UpdatePCBuildRequest(
+            "Incompatible PSU Length Rig V2",
+            "Added short case",
+            [
+                new(cpu.Id, 1),
+                new(psuLong.Id, 1),
+                new(caseShort.Id, 1)
+            ]));
+        updateRes.StatusCode.Should().Be(HttpStatusCode.OK);
+        var updatedDto = await updateRes.Content.ReadFromJsonAsync<MyPCBuildDto>(JsonOptions);
+        updatedDto.Should().NotBeNull();
+        updatedDto!.IsCompatible.Should().BeFalse();
+        updatedDto.CanPurchaseAll.Should().BeTrue();
+        updatedDto.Issues.Should().ContainSingle(i => i.RuleId == "COMP-13" && i.Severity == "Error");
+
+        // 4. GET /api/v1/pc-builds/{id} & GET /api/v1/pc-builds/mine reflect live COMP-13 Error and CanPurchaseAll = true
+        var getRes = await client.GetAsync($"/api/v1/pc-builds/{buildId}");
+        getRes.StatusCode.Should().Be(HttpStatusCode.OK);
+        var getDto = await getRes.Content.ReadFromJsonAsync<MyPCBuildDto>(JsonOptions);
+        getDto!.IsCompatible.Should().BeFalse();
+        getDto.CanPurchaseAll.Should().BeTrue();
+        getDto.Issues.Should().ContainSingle(i => i.RuleId == "COMP-13" && i.Severity == "Error");
+
+        var mineRes = await client.GetAsync("/api/v1/pc-builds/mine?pageIndex=1&pageSize=10");
+        mineRes.StatusCode.Should().Be(HttpStatusCode.OK);
+        var mineDto = await mineRes.Content.ReadFromJsonAsync<PagedResult<MyPCBuildSummaryDto>>(JsonOptions);
+        mineDto!.Items.Should().ContainSingle();
+        mineDto.Items[0].IsCompatible.Should().BeFalse();
+        mineDto.Items[0].CanPurchaseAll.Should().BeTrue();
+        mineDto.Items[0].ItemCount.Should().Be(3);
+    }
 }

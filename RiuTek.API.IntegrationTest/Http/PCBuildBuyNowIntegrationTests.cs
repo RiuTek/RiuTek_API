@@ -700,6 +700,147 @@ public class PCBuildBuyNowIntegrationTests : IAsyncLifetime
         (await db.Orders.CountAsync(o => o.UserId == user.Id)).Should().Be(2);
     }
 
+    // 12. Real hardware spec conflicts (COMP-01 + COMP-13): COD & Stripe Buy Now succeed, idempotency replay after spec mutation deducts stock once, and insufficient stock returns 409 Conflict.
+    [Fact]
+    public async Task BuyNowPCBuild_WhenBuildHasRealConflictingSpecs_CodAndStripeSucceed_ReplayAfterSpecMutationSafe_AndInsufficientStockReturns409()
+    {
+        var (_, user, address, _, _, _, initialCart) = await SeedCustomerWithBuildAndCartAsync();
+        var initialCartVersion = initialCart!.Version;
+
+        var (client, _) = CreateClientWithFakeGateway();
+        using (var scopeAuth = _fixture.Factory.Services.CreateScope())
+        {
+            var jwtGenerator = scopeAuth.ServiceProvider.GetRequiredService<IJwtTokenGenerator>();
+            var token = jwtGenerator.GenerateAccessToken(user);
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        }
+
+        Product cpuLga;
+        Product moboAm5;
+        Product psuLong;
+        Product caseShort;
+        using (var scopeSeed = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scopeSeed.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var suffix = Guid.NewGuid().ToString("N")[..8];
+            var catCpu = new Category($"Cat CPU {suffix}", $"cat-cpu-{suffix}", ComponentType.Cpu);
+            var catMobo = new Category($"Cat Mobo {suffix}", $"cat-mobo-{suffix}", ComponentType.Motherboard);
+            var catPsu = new Category($"Cat PSU {suffix}", $"cat-psu-{suffix}", ComponentType.Psu);
+            var catCase = new Category($"Cat Case {suffix}", $"cat-case-{suffix}", ComponentType.Case);
+            db.Categories.AddRange(catCpu, catMobo, catPsu, catCase);
+
+            // Stock = 2 for each product -> enough for 1 COD order + 1 Stripe order, then 0 left
+            cpuLga = new Product(catCpu.Id, $"i5-13600KF {suffix}", $"cpu-lga-{suffix}", $"SKU-CPU-{suffix}", "Intel", 6_000_000m, 2, "cpu.png", ComponentType.Cpu,
+                new CpuSpecification { Socket = CpuSocket.LGA1700, SupportedMemoryType = RamType.DDR5, HasIntegratedGpu = false });
+            moboAm5 = new Product(catMobo.Id, $"B650 {suffix}", $"mobo-am5-{suffix}", $"SKU-MOBO-{suffix}", "MSI", 4_000_000m, 2, "mobo.png", ComponentType.Motherboard,
+                new MotherboardSpecification { Socket = CpuSocket.AM5, MemoryType = RamType.DDR5, FormFactor = MotherboardFormFactor.ATX });
+            psuLong = new Product(catPsu.Id, $"PSU 190mm {suffix}", $"psu-190-{suffix}", $"SKU-PSU-{suffix}", "Corsair", 3_000_000m, 2, "psu.png", ComponentType.Psu,
+                new PsuSpecification { Wattage = 850, LengthMm = 190 });
+            caseShort = new Product(catCase.Id, $"Case 160mm {suffix}", $"case-160-{suffix}", $"SKU-CASE-{suffix}", "NZXT", 2_000_000m, 2, "case.png", ComponentType.Case,
+                new CaseSpecification { SupportedFormFactors = [MotherboardFormFactor.MicroATX], MaxPsuLengthMm = 160 });
+
+            db.Products.AddRange(cpuLga, moboAm5, psuLong, caseShort);
+            await db.SaveChangesAsync();
+        }
+
+        // Create saved build via HTTP API so real engine computes COMP-01, COMP-05, COMP-12, COMP-13
+        var createBuildRes = await client.PostAsJsonAsync("/api/v1/pc-builds", new CreatePCBuildRequest(
+            "Conflicting Specs Rig",
+            "Customer purchasing parts directly",
+            [
+                new(cpuLga.Id, 1),
+                new(moboAm5.Id, 1),
+                new(psuLong.Id, 1),
+                new(caseShort.Id, 1)
+            ]));
+        createBuildRes.StatusCode.Should().Be(HttpStatusCode.Created);
+        var createdBuild = await createBuildRes.Content.ReadFromJsonAsync<MyPCBuildDto>(JsonOptions);
+        createdBuild.Should().NotBeNull();
+        createdBuild!.IsCompatible.Should().BeFalse();
+        createdBuild.Issues.Should().Contain(i => i.RuleId == "COMP-01" && i.Severity == "Error");
+        createdBuild.Issues.Should().Contain(i => i.RuleId == "COMP-13" && i.Severity == "Error");
+
+        // 1. COD Buy Now on conflicting build -> 201 Created
+        var codKey = Guid.NewGuid().ToString("N");
+        using var codReq = new HttpRequestMessage(HttpMethod.Post, $"/api/v1/orders/buy-now/pc-build/{createdBuild.Id}")
+        {
+            Content = JsonContent.Create(new BuyNowPCBuildRequest(address.Id, PaymentMethod.COD, "COD conflicting build")),
+            Headers = { { "Idempotency-Key", codKey } }
+        };
+        var codRes = await client.SendAsync(codReq);
+        codRes.StatusCode.Should().Be(HttpStatusCode.Created);
+        var codOrder = await codRes.Content.ReadFromJsonAsync<CheckoutOrderDto>(JsonOptions);
+        codOrder.Should().NotBeNull();
+        codOrder!.Status.Should().Be(OrderStatus.Confirmed);
+        codOrder.TotalAmount.Should().Be(15_000_000m);
+
+        // 2. Stripe Buy Now on conflicting build -> 201 Created + checkout session URL
+        var stripeKey = Guid.NewGuid().ToString("N");
+        using var stripeReq = new HttpRequestMessage(HttpMethod.Post, $"/api/v1/orders/buy-now/pc-build/{createdBuild.Id}")
+        {
+            Content = JsonContent.Create(new BuyNowPCBuildRequest(address.Id, PaymentMethod.Stripe, "Stripe conflicting build")),
+            Headers = { { "Idempotency-Key", stripeKey } }
+        };
+        var stripeRes = await client.SendAsync(stripeReq);
+        stripeRes.StatusCode.Should().Be(HttpStatusCode.Created);
+        var stripeOrder = await stripeRes.Content.ReadFromJsonAsync<CheckoutOrderDto>(JsonOptions);
+        stripeOrder.Should().NotBeNull();
+        stripeOrder!.Status.Should().Be(OrderStatus.PendingPayment);
+        stripeOrder.PaymentAction.Should().NotBeNull();
+        stripeOrder.PaymentAction!.Url.Should().Contain("checkout.stripe.com");
+
+        // 3. Mutate product specifications in PostgreSQL, then replay both COD and Stripe idempotency keys -> returns same orders without deducting stock again
+        using (var scopeMutate = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scopeMutate.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var psuInDb = await db.Products.FirstAsync(p => p.Id == psuLong.Id);
+            psuInDb.Specifications = new PsuSpecification { Wattage = 300, LengthMm = 220 };
+            await db.SaveChangesAsync();
+        }
+
+        using var codReplayReq = new HttpRequestMessage(HttpMethod.Post, $"/api/v1/orders/buy-now/pc-build/{createdBuild.Id}")
+        {
+            Content = JsonContent.Create(new BuyNowPCBuildRequest(address.Id, PaymentMethod.COD, "COD conflicting build")),
+            Headers = { { "Idempotency-Key", codKey } }
+        };
+        var codReplayRes = await client.SendAsync(codReplayReq);
+        codReplayRes.StatusCode.Should().Be(HttpStatusCode.Created);
+        var codReplayOrder = await codReplayRes.Content.ReadFromJsonAsync<CheckoutOrderDto>(JsonOptions);
+        codReplayOrder!.Id.Should().Be(codOrder.Id);
+
+        using var stripeReplayReq = new HttpRequestMessage(HttpMethod.Post, $"/api/v1/orders/buy-now/pc-build/{createdBuild.Id}")
+        {
+            Content = JsonContent.Create(new BuyNowPCBuildRequest(address.Id, PaymentMethod.Stripe, "Stripe conflicting build")),
+            Headers = { { "Idempotency-Key", stripeKey } }
+        };
+        var stripeReplayRes = await client.SendAsync(stripeReplayReq);
+        stripeReplayRes.StatusCode.Should().Be(HttpStatusCode.Created);
+        var stripeReplayOrder = await stripeReplayRes.Content.ReadFromJsonAsync<CheckoutOrderDto>(JsonOptions);
+        stripeReplayOrder!.Id.Should().Be(stripeOrder.Id);
+
+        // 4. Now stock is 0 -> a new Buy Now request on the conflicting build fails with 409 Conflict (Checkout.InsufficientStock)
+        var outOfStockKey = Guid.NewGuid().ToString("N");
+        using var outOfStockReq = new HttpRequestMessage(HttpMethod.Post, $"/api/v1/orders/buy-now/pc-build/{createdBuild.Id}")
+        {
+            Content = JsonContent.Create(new BuyNowPCBuildRequest(address.Id, PaymentMethod.COD, "Out of stock")),
+            Headers = { { "Idempotency-Key", outOfStockKey } }
+        };
+        var outOfStockRes = await client.SendAsync(outOfStockReq);
+        outOfStockRes.StatusCode.Should().Be(HttpStatusCode.Conflict);
+
+        // Verify PostgreSQL state: 2 orders, 8 stock movements (4 per order), Cart untouched
+        using (var scopeVerify = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scopeVerify.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            (await db.Orders.CountAsync(o => o.UserId == user.Id)).Should().Be(2);
+            (await db.StockMovements.CountAsync()).Should().Be(8);
+            (await db.PaymentAttempts.CountAsync(a => a.OrderId == stripeOrder.Id)).Should().Be(1);
+
+            var dbCart = await db.Carts.Include(c => c.Items).FirstAsync(c => c.UserId == user.Id);
+            dbCart.Version.Should().Be(initialCartVersion);
+        }
+    }
+
     private async Task<(User User, UserAddress Address)> GetUserAndDefaultAddressAsync(HttpClient client)
     {
         using var scope = _fixture.Factory.Services.CreateScope();

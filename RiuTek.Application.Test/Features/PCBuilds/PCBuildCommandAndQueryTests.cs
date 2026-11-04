@@ -587,4 +587,167 @@ public class PCBuildCommandAndQueryTests
         item.CurrentPrice.Should().Be(newPrice);
         getResult.Value.TotalPrice.Should().Be(originalPrice * 2);
     }
+
+    [Fact]
+    public async Task AllHandlersAndBuilders_WhenComp12AndComp13AndRecommendedPsu_ShouldAllowSaveUpdateAndComputeCanPurchaseAllCorrectly()
+    {
+        using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var (owner, cpu, mobo, ram) = SeedStandardScenario(context);
+
+        var catPsu = new Category("PSU", "psu", ComponentType.Psu, "desc");
+        var catCase = new Category("Case", "case", ComponentType.Case, "desc");
+        var catGpu = new Category("GPU", "gpu", ComponentType.Gpu, "desc");
+        context.Categories.AddRange(catPsu, catCase, catGpu);
+
+        // CPU without iGPU
+        cpu.Specifications = new CpuSpecification
+        {
+            Socket = CpuSocket.LGA1700,
+            CoreCount = 14,
+            ThreadCount = 20,
+            TdpWattage = 65,
+            SupportedMemoryType = RamType.DDR5,
+            HasIntegratedGpu = false
+        };
+
+        // PSU length 190mm > Case max PSU length 160mm -> COMP-13 Error
+        var psu = new Product(
+            catPsu.Id,
+            "PSU 550W",
+            "psu-550w",
+            "SKU_PSU_550",
+            "Corsair",
+            2_000_000m,
+            10,
+            "psu.png",
+            ComponentType.Psu,
+            new PsuSpecification { Wattage = 550, LengthMm = 190 });
+
+        var pcCase = new Product(
+            catCase.Id,
+            "Compact Case",
+            "compact-case",
+            "SKU_CASE_160",
+            "NZXT",
+            1_800_000m,
+            10,
+            "case.png",
+            ComponentType.Case,
+            new CaseSpecification { SupportedFormFactors = [MotherboardFormFactor.ATX], MaxPsuLengthMm = 160, MaxGpuLengthMm = 320 });
+
+        var gpu = new Product(
+            catGpu.Id,
+            "RTX 4070",
+            "rtx-4070",
+            "SKU_GPU_4070",
+            "ASUS",
+            15_000_000m,
+            10,
+            "gpu.png",
+            ComponentType.Gpu,
+            new GpuSpecification { Chipset = "RTX 4070", TdpWattage = 150, RecommendedPsuWattage = 650, LengthMm = 260 });
+
+        context.Products.AddRange(psu, pcCase, gpu);
+        await context.SaveChangesAsync();
+
+        var userMock = MockUser(owner.Id);
+
+        // 1. Preview partial build without GPU -> COMP-12 Warning + COMP-13 Error -> IsCompatible = false, CanPurchaseAll = true
+        var previewHandler = new PreviewPCBuildCommandHandler(context, _compatibilityService);
+        var previewRes = await previewHandler.Handle(new PreviewPCBuildCommand(
+        [
+            new(cpu.Id, 1),
+            new(mobo.Id, 1),
+            new(ram.Id, 2),
+            new(psu.Id, 1),
+            new(pcCase.Id, 1)
+        ]), CancellationToken.None);
+
+        previewRes.IsSuccess.Should().BeTrue();
+        previewRes.Value.IsCompatible.Should().BeFalse();
+        previewRes.Value.IsCompleteSystem.Should().BeFalse();
+        previewRes.Value.CanPurchaseAll.Should().BeTrue("compatibility errors or warnings must not block CanPurchaseAll when stock/active are valid");
+        previewRes.Value.MissingComponents.Should().Contain("Card đồ họa rời (GPU)");
+        previewRes.Value.Issues.Should().Contain(i => i.RuleId == "COMP-12" && i.Severity == "Warning");
+        previewRes.Value.Issues.Should().Contain(i => i.RuleId == "COMP-13" && i.Severity == "Error");
+
+        // 2. CreatePCBuild with COMP-12 + COMP-13 -> succeeds and persists
+        var createHandler = new CreatePCBuildCommandHandler(context, userMock.Object, _compatibilityService);
+        var createRes = await createHandler.Handle(new CreatePCBuildCommand(
+            "Incompatible Draft",
+            "Saved despite COMP-13",
+            [
+                new(cpu.Id, 1),
+                new(mobo.Id, 1),
+                new(ram.Id, 2),
+                new(psu.Id, 1),
+                new(pcCase.Id, 1)
+            ]), CancellationToken.None);
+
+        createRes.IsSuccess.Should().BeTrue();
+        createRes.Value.IsCompatible.Should().BeFalse();
+        createRes.Value.CanPurchaseAll.Should().BeTrue();
+        createRes.Value.Issues.Should().Contain(i => i.RuleId == "COMP-12");
+        createRes.Value.Issues.Should().Contain(i => i.RuleId == "COMP-13");
+
+        // 3. UpdateMyPCBuild adding GPU (with RecommendedPsuWattage = 650) -> clears COMP-12, triggers COMP-10 Warning (550W < 650W), keeps COMP-13 Error
+        var updateHandler = new UpdateMyPCBuildCommandHandler(context, userMock.Object, _compatibilityService);
+        var updateRes = await updateHandler.Handle(new UpdateMyPCBuildCommand(
+            createRes.Value.Id,
+            "Updated With GPU",
+            "Still has PSU length error",
+            [
+                new(cpu.Id, 1),
+                new(mobo.Id, 1),
+                new(ram.Id, 2),
+                new(psu.Id, 1),
+                new(pcCase.Id, 1),
+                new(gpu.Id, 1)
+            ]), CancellationToken.None);
+
+        updateRes.IsSuccess.Should().BeTrue();
+        updateRes.Value.IsCompatible.Should().BeFalse();
+        updateRes.Value.CanPurchaseAll.Should().BeTrue();
+        updateRes.Value.RecommendedPsuWattage.Should().Be(650);
+        updateRes.Value.Issues.Should().NotContain(i => i.RuleId == "COMP-12");
+        updateRes.Value.Issues.Should().Contain(i => i.RuleId == "COMP-10" && i.Severity == "Warning");
+        updateRes.Value.Issues.Should().Contain(i => i.RuleId == "COMP-13" && i.Severity == "Error");
+
+        // 4. GetMyPCBuildById & GetMyPCBuilds reflect live compatibility & CanPurchaseAll across all 3 builders
+        var getByIdHandler = new GetMyPCBuildByIdQueryHandler(context, userMock.Object, _compatibilityService);
+        var getByIdRes = await getByIdHandler.Handle(new GetMyPCBuildByIdQuery(createRes.Value.Id), CancellationToken.None);
+        getByIdRes.IsSuccess.Should().BeTrue();
+        getByIdRes.Value.IsCompatible.Should().BeFalse();
+        getByIdRes.Value.CanPurchaseAll.Should().BeTrue();
+        getByIdRes.Value.RecommendedPsuWattage.Should().Be(650);
+
+        var getMineHandler = new GetMyPCBuildsQueryHandler(context, userMock.Object, _compatibilityService);
+        var getMineRes = await getMineHandler.Handle(new GetMyPCBuildsQuery(1, 10), CancellationToken.None);
+        getMineRes.IsSuccess.Should().BeTrue();
+        var summary = getMineRes.Value.Items.Single();
+        summary.IsCompatible.Should().BeFalse();
+        summary.CanPurchaseAll.Should().BeTrue();
+        summary.ItemCount.Should().Be(6);
+
+        // 5. When one product runs out of stock, CanPurchaseAll becomes false across all 3 builders while Issues/IsCompatible remain accurate
+        psu.StockQuantity = 0;
+        await context.SaveChangesAsync();
+
+        var previewOutRes = await previewHandler.Handle(new PreviewPCBuildCommand(
+        [
+            new(cpu.Id, 1),
+            new(psu.Id, 1),
+            new(pcCase.Id, 1)
+        ]), CancellationToken.None);
+        previewOutRes.Value.CanPurchaseAll.Should().BeFalse();
+        previewOutRes.Value.IsCompatible.Should().BeFalse();
+
+        var getByIdOutRes = await getByIdHandler.Handle(new GetMyPCBuildByIdQuery(createRes.Value.Id), CancellationToken.None);
+        getByIdOutRes.Value.CanPurchaseAll.Should().BeFalse();
+        getByIdOutRes.Value.IsCompatible.Should().BeFalse();
+
+        var getMineOutRes = await getMineHandler.Handle(new GetMyPCBuildsQuery(1, 10), CancellationToken.None);
+        getMineOutRes.Value.Items.Single().CanPurchaseAll.Should().BeFalse();
+        getMineOutRes.Value.Items.Single().IsCompatible.Should().BeFalse();
+    }
 }

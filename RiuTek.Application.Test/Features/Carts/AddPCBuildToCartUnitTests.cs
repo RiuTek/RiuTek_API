@@ -534,4 +534,54 @@ public class AddPCBuildToCartUnitTests
 
         (await context.StockMovements.CountAsync()).Should().Be(0);
     }
+
+    [Fact]
+    public async Task AddPCBuildToCart_WhenBuildHasRealHardwareConflictsAndCartAlreadyHasIncompatibleParts_MergesSuccessfully()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var customer = new User($"incomp_{suffix}@riutek.test", "hash", "Customer", UserRole.Customer);
+        context.Users.Add(customer);
+
+        var catCpu = new Category("CPU", $"cpu-{suffix}", ComponentType.Cpu);
+        var catMobo = new Category("Mobo", $"mobo-{suffix}", ComponentType.Motherboard);
+        var catPsu = new Category("PSU", $"psu-{suffix}", ComponentType.Psu);
+        var catCase = new Category("Case", $"case-{suffix}", ComponentType.Case);
+        context.Categories.AddRange(catCpu, catMobo, catPsu, catCase);
+
+        // Real hardware conflicts: LGA1700 CPU + AM5 Motherboard (COMP-01) + PSU 200mm in Case max 160mm (COMP-13)
+        var cpuLga = new Product(catCpu.Id, "i5-13600KF", $"cpu-lga-{suffix}", $"SKU-LGA-{suffix}", "Intel", 6_000_000m, 10, "cpu.png", ComponentType.Cpu,
+            new CpuSpecification { Socket = CpuSocket.LGA1700, SupportedMemoryType = RamType.DDR5, HasIntegratedGpu = false });
+        var moboAm5 = new Product(catMobo.Id, "B650M", $"mobo-am5-{suffix}", $"SKU-AM5-{suffix}", "MSI", 4_000_000m, 10, "mobo.png", ComponentType.Motherboard,
+            new MotherboardSpecification { Socket = CpuSocket.AM5, MemoryType = RamType.DDR5, FormFactor = MotherboardFormFactor.ATX });
+        var psuLong = new Product(catPsu.Id, "1200W Long PSU", $"psu-long-{suffix}", $"SKU-PSU-{suffix}", "Corsair", 5_000_000m, 10, "psu.png", ComponentType.Psu,
+            new PsuSpecification { Wattage = 1200, LengthMm = 200 });
+        var caseShort = new Product(catCase.Id, "Compact Case", $"case-short-{suffix}", $"SKU-CASE-{suffix}", "NZXT", 2_000_000m, 10, "case.png", ComponentType.Case,
+            new CaseSpecification { SupportedFormFactors = [MotherboardFormFactor.MicroATX], MaxPsuLengthMm = 160 });
+
+        context.Products.AddRange(cpuLga, moboAm5, psuLong, caseShort);
+
+        // Existing cart already has 1 of the AM5 mobo
+        var existingCart = new Cart(customer.Id);
+        existingCart.AddItem(moboAm5.Id, 1);
+        context.Carts.Add(existingCart);
+
+        var build = new PCBuild("Conflicting Build", customer.Id);
+        build.ApplyCompatibilitySnapshot(false, 500, ["COMP-01", "COMP-05", "COMP-12", "COMP-13"]);
+        build.AddItem(new PCBuildItem(build.Id, cpuLga.Id, ComponentType.Cpu, cpuLga.Price, 1));
+        build.AddItem(new PCBuildItem(build.Id, moboAm5.Id, ComponentType.Motherboard, moboAm5.Price, 1));
+        build.AddItem(new PCBuildItem(build.Id, psuLong.Id, ComponentType.Psu, psuLong.Price, 1));
+        build.AddItem(new PCBuildItem(build.Id, caseShort.Id, ComponentType.Case, caseShort.Price, 1));
+        context.PCBuilds.Add(build);
+
+        await context.SaveChangesAsync();
+
+        var authMock = MockUser(customer.Id);
+        var handler = new AddPCBuildToCartCommandHandler(context, authMock.Object);
+        var result = await handler.Handle(new AddPCBuildToCartCommand(build.Id), CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Value.Items.Should().HaveCount(4);
+        result.Value.Items.Single(i => i.ProductId == moboAm5.Id).Quantity.Should().Be(2);
+    }
 }

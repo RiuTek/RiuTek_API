@@ -506,5 +506,98 @@ public class BuyNowPCBuildUnitTests
         (await context.Orders.CountAsync()).Should().Be(0);
     }
 
+    [Fact]
+    public async Task Handle_WhenBuildHasRealHardwareConflicts_AllowsCodAndStripeCheckout_AndReplaysSafelyAfterSpecMutation()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var (user, address, _, _, _, initialCart) = await SeedPrerequisitesAsync(context);
+        var initialCartVersion = initialCart.Version;
+
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var catCpu = new Category($"CPU {suffix}", $"cpu-{suffix}", ComponentType.Cpu);
+        var catMobo = new Category($"Mobo {suffix}", $"mobo-{suffix}", ComponentType.Motherboard);
+        var catPsu = new Category($"PSU {suffix}", $"psu-{suffix}", ComponentType.Psu);
+        var catCase = new Category($"Case {suffix}", $"case-{suffix}", ComponentType.Case);
+        context.Categories.AddRange(catCpu, catMobo, catPsu, catCase);
+
+        // Real hardware conflicts: LGA1700 CPU + AM5 Motherboard + PSU 200mm > Case 160mm
+        var cpuLga = new Product(catCpu.Id, "i5-13600KF", $"cpu-lga-{suffix}", $"SKU-LGA-{suffix}", "Intel", 6_000_000m, 10, "cpu.png", ComponentType.Cpu,
+            new CpuSpecification { Socket = CpuSocket.LGA1700, SupportedMemoryType = RamType.DDR5, HasIntegratedGpu = false });
+        var moboAm5 = new Product(catMobo.Id, "B650", $"mobo-am5-{suffix}", $"SKU-AM5-{suffix}", "MSI", 4_000_000m, 10, "mobo.png", ComponentType.Motherboard,
+            new MotherboardSpecification { Socket = CpuSocket.AM5, MemoryType = RamType.DDR5, FormFactor = MotherboardFormFactor.ATX });
+        var psuLong = new Product(catPsu.Id, "PSU 200mm", $"psu-200-{suffix}", $"SKU-PSU-{suffix}", "Corsair", 3_000_000m, 10, "psu.png", ComponentType.Psu,
+            new PsuSpecification { Wattage = 850, LengthMm = 200 });
+        var caseShort = new Product(catCase.Id, "Case 160mm", $"case-160-{suffix}", $"SKU-CASE-{suffix}", "NZXT", 2_000_000m, 10, "case.png", ComponentType.Case,
+            new CaseSpecification { SupportedFormFactors = [MotherboardFormFactor.MicroATX], MaxPsuLengthMm = 160 });
+
+        context.Products.AddRange(cpuLga, moboAm5, psuLong, caseShort);
+
+        // Build 1: Snapshot IsCompatible = false + live conflicts
+        var buildFalseSnapshot = new PCBuild("Conflict Snapshot False", user.Id);
+        buildFalseSnapshot.ApplyCompatibilitySnapshot(false, 450, ["COMP-01", "COMP-13"]);
+        buildFalseSnapshot.AddItem(new PCBuildItem(buildFalseSnapshot.Id, cpuLga.Id, ComponentType.Cpu, cpuLga.Price, 1));
+        buildFalseSnapshot.AddItem(new PCBuildItem(buildFalseSnapshot.Id, moboAm5.Id, ComponentType.Motherboard, moboAm5.Price, 1));
+        buildFalseSnapshot.AddItem(new PCBuildItem(buildFalseSnapshot.Id, psuLong.Id, ComponentType.Psu, psuLong.Price, 1));
+        buildFalseSnapshot.AddItem(new PCBuildItem(buildFalseSnapshot.Id, caseShort.Id, ComponentType.Case, caseShort.Price, 1));
+
+        // Build 2: Stale Snapshot IsCompatible = true + live conflicts
+        var buildStaleTrueSnapshot = new PCBuild("Conflict Stale True", user.Id);
+        buildStaleTrueSnapshot.ApplyCompatibilitySnapshot(true, 450, []);
+        buildStaleTrueSnapshot.AddItem(new PCBuildItem(buildStaleTrueSnapshot.Id, cpuLga.Id, ComponentType.Cpu, cpuLga.Price, 1));
+        buildStaleTrueSnapshot.AddItem(new PCBuildItem(buildStaleTrueSnapshot.Id, psuLong.Id, ComponentType.Psu, psuLong.Price, 1));
+        buildStaleTrueSnapshot.AddItem(new PCBuildItem(buildStaleTrueSnapshot.Id, caseShort.Id, ComponentType.Case, caseShort.Price, 1));
+
+        context.PCBuilds.AddRange(buildFalseSnapshot, buildStaleTrueSnapshot);
+        await context.SaveChangesAsync();
+
+        var authMock = CreateCurrentUserMock(user.Id);
+        var stripeMock = new Mock<IStripePaymentGateway>();
+        stripeMock.Setup(x => x.IsEnabled).Returns(true);
+        stripeMock.Setup(x => x.CheckoutSessionLifetime).Returns(TimeSpan.FromMinutes(30));
+        stripeMock
+            .Setup(x => x.EnsureCheckoutSessionAsync(It.IsAny<CreateStripeCheckoutSessionRequest>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Result.Success(new StripeCheckoutSessionResult("cs_test_conflict_123", "https://checkout.stripe.com/pay/cs_test_conflict_123", DateTime.UtcNow.AddMinutes(30))));
+
+        var processor = new CheckoutOrderProcessor(context, stripeMock.Object);
+        var handler = new BuyNowPCBuildCommandHandler(context, authMock.Object, processor);
+
+        // 1. COD Buy Now on buildFalseSnapshot
+        var codKey = "cod-conflict-idempotency-key-001";
+        var codResult = await handler.Handle(new BuyNowPCBuildCommand(buildFalseSnapshot.Id, address.Id, PaymentMethod.COD, "COD Conflict", codKey), CancellationToken.None);
+        codResult.IsSuccess.Should().BeTrue();
+        codResult.Value.Status.Should().Be(OrderStatus.Confirmed);
+        codResult.Value.Items.Should().HaveCount(4);
+
+        // 2. Stripe Buy Now on buildStaleTrueSnapshot
+        var stripeKey = "stripe-conflict-idempotency-key-002";
+        var stripeResult = await handler.Handle(new BuyNowPCBuildCommand(buildStaleTrueSnapshot.Id, address.Id, PaymentMethod.Stripe, "Stripe Conflict", stripeKey), CancellationToken.None);
+        stripeResult.IsSuccess.Should().BeTrue();
+        stripeResult.Value.Status.Should().Be(OrderStatus.PendingPayment);
+        stripeResult.Value.PaymentAction.Should().NotBeNull();
+        stripeResult.Value.PaymentAction!.Url.Should().Contain("cs_test_conflict_123");
+
+        // 3. Mutate product specifications further and replay both COD and Stripe keys -> returns same order, no extra stock deduction
+        var cpuStockAfter2Orders = (await context.Products.FindAsync(cpuLga.Id))!.StockQuantity;
+        cpuStockAfter2Orders.Should().Be(8);
+
+        psuLong.Specifications = new PsuSpecification { Wattage = 300, LengthMm = 240 };
+        await context.SaveChangesAsync();
+
+        var codReplay = await handler.Handle(new BuyNowPCBuildCommand(buildFalseSnapshot.Id, address.Id, PaymentMethod.COD, "COD Conflict", codKey), CancellationToken.None);
+        codReplay.IsSuccess.Should().BeTrue();
+        codReplay.Value.Id.Should().Be(codResult.Value.Id);
+
+        var stripeReplay = await handler.Handle(new BuyNowPCBuildCommand(buildStaleTrueSnapshot.Id, address.Id, PaymentMethod.Stripe, "Stripe Conflict", stripeKey), CancellationToken.None);
+        stripeReplay.IsSuccess.Should().BeTrue();
+        stripeReplay.Value.Id.Should().Be(stripeResult.Value.Id);
+
+        (await context.Products.FindAsync(cpuLga.Id))!.StockQuantity.Should().Be(8);
+        (await context.Orders.CountAsync(o => o.UserId == user.Id)).Should().Be(2);
+        (await context.PaymentAttempts.CountAsync(a => a.OrderId == stripeResult.Value.Id)).Should().Be(1);
+
+        var dbCart = await context.Carts.Include(c => c.Items).FirstAsync(c => c.UserId == user.Id);
+        dbCart.Version.Should().Be(initialCartVersion);
+    }
+
     #endregion
 }

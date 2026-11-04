@@ -215,7 +215,7 @@ public class HardwareCompatibilityService : IHardwareCompatibilityService
         // Power Consumption & PSU Calculation
         // -------------------------------------------------------------
         var estimatedWattage = CalculateEstimatedWattage(cpu, gpu, mobo, ramList, storageList);
-        var recommendedPsuWattage = CalculateRecommendedPsu(estimatedWattage);
+        var recommendedPsuWattage = CalculateRecommendedPsu(estimatedWattage, gpu);
 
         if (psu != null && psu.Wattage > 0)
         {
@@ -236,7 +236,7 @@ public class HardwareCompatibilityService : IHardwareCompatibilityService
                     "Warning",
                     $"PSU ({psu.Wattage} W)",
                     $"Đề xuất ({recommendedPsuWattage} W)",
-                    $"Công suất Nguồn ({psu.Wattage} W) có thể đáp ứng cơ bản nhưng chưa đạt hệ số an toàn 25% khuyến nghị ({recommendedPsuWattage} W)."
+                    $"Công suất Nguồn ({psu.Wattage} W) đáp ứng mức tiêu thụ ước tính ({estimatedWattage} W) nhưng thấp hơn mức công suất khuyến nghị ({recommendedPsuWattage} W) theo cấu hình/GPU và khoảng dự phòng an toàn."
                 ));
             }
 
@@ -247,7 +247,38 @@ public class HardwareCompatibilityService : IHardwareCompatibilityService
                     "Warning",
                     $"GPU ({gpu.Chipset} cần 12VHPWR)",
                     $"PSU ({psu.Efficiency})",
-                    "Card đồ họa sử dụng cổng nguồn chuẩn mới 12VHPWR. Nguồn bạn chọn chưa có cáp này trực tiếp, bạn sẽ cần dùng cáp chuyển đổi đi kèm card."
+                    "Card đồ họa sử dụng cổng nguồn 12VHPWR nhưng Nguồn đã chọn chưa hỗ trợ cáp 12VHPWR trực tiếp. Vui lòng kiểm tra cáp hoặc bộ chuyển đổi (adapter) tương thích theo khuyến nghị của nhà sản xuất."
+                ));
+            }
+        }
+
+        // -------------------------------------------------------------
+        // RULE 12: Display Output Path (CPU without iGPU and no discrete GPU)
+        // -------------------------------------------------------------
+        if (cpu != null && !cpu.HasIntegratedGpu && gpu == null)
+        {
+            issues.Add(new CompatibilityIssueDto(
+                "COMP-12",
+                "Warning",
+                "CPU (Không có iGPU)",
+                "Card đồ họa rời (GPU)",
+                "CPU đã chọn không có nhân đồ họa tích hợp (iGPU). Bạn cần bổ sung Card đồ họa rời (GPU) để có đường xuất hình thông thường."
+            ));
+        }
+
+        // -------------------------------------------------------------
+        // RULE 13: PSU Physical Length vs Case Clearance
+        // -------------------------------------------------------------
+        if (psu != null && pcCase != null && psu.LengthMm > 0 && pcCase.MaxPsuLengthMm > 0)
+        {
+            if (psu.LengthMm > pcCase.MaxPsuLengthMm)
+            {
+                issues.Add(new CompatibilityIssueDto(
+                    "COMP-13",
+                    "Error",
+                    $"PSU Length ({psu.LengthMm} mm)",
+                    $"Case Max PSU ({pcCase.MaxPsuLengthMm} mm)",
+                    $"Chiều dài Nguồn PSU ({psu.LengthMm} mm) vượt quá chiều dài nguồn tối đa Vỏ Case cho phép ({pcCase.MaxPsuLengthMm} mm)."
                 ));
             }
         }
@@ -262,6 +293,10 @@ public class HardwareCompatibilityService : IHardwareCompatibilityService
         if (storageList.Count == 0) missingComponents.Add("Ổ cứng (SSD/HDD)");
         if (psu == null) missingComponents.Add("Nguồn (PSU)");
         if (pcCase == null) missingComponents.Add("Vỏ Case");
+        if (cpu != null && !cpu.HasIntegratedGpu && gpu == null)
+        {
+            missingComponents.Add("Card đồ họa rời (GPU)");
+        }
 
         // IsCompatible is true if there are NO ERRORS (Warnings do not block compatibility)
         var isCompatible = issues.All(i => i.Severity != "Error");
@@ -327,14 +362,19 @@ public class HardwareCompatibilityService : IHardwareCompatibilityService
         return total;
     }
 
-    private static int CalculateRecommendedPsu(int estimatedWattage)
+    private static int CalculateRecommendedPsu(int estimatedWattage, GpuSpecification? gpu)
     {
-        if (estimatedWattage <= 0) return 0;
+        var formulaRecommended = 0;
+        if (estimatedWattage > 0)
+        {
+            // Multiply by 1.25 (25% safety headroom) and round up to the nearest 50W
+            var withHeadroom = estimatedWattage * 1.25;
+            var rounded = (int)(Math.Ceiling(withHeadroom / 50.0) * 50);
+            formulaRecommended = Math.Max(450, rounded); // Minimum standard ATX PSU baseline 450W
+        }
 
-        // Multiply by 1.25 (25% safety headroom) and round up to the nearest 50W
-        var withHeadroom = estimatedWattage * 1.25;
-        var rounded = (int)(Math.Ceiling(withHeadroom / 50.0) * 50);
+        var gpuRecommended = gpu is { RecommendedPsuWattage: > 0 } ? gpu.RecommendedPsuWattage : 0;
 
-        return Math.Max(450, rounded); // Minimum standard ATX PSU baseline 450W
+        return Math.Max(formulaRecommended, gpuRecommended);
     }
 }

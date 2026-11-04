@@ -611,4 +611,73 @@ public class AddPCBuildToCartIntegrationTests : IAsyncLifetime
             cartInDb.Items.Should().HaveCount(49);
         }
     }
+
+    // 12. Saved build with real conflicting specs (COMP-01 + COMP-13) adds to cart successfully -> 200 OK
+    [Fact]
+    public async Task Scenario12_AddSavedBuildWithRealConflictingSpecsToCart_Returns200AndPersistsCart()
+    {
+        var (client, user) = await CreateCustomerClientAsync();
+
+        Product cpuLga;
+        Product moboAm5;
+        Product psuLong;
+        Product caseShort;
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var suffix = Guid.NewGuid().ToString("N")[..8];
+            var catCpu = new Category($"Cat CPU {suffix}", $"cat-cpu-{suffix}", ComponentType.Cpu);
+            var catMobo = new Category($"Cat Mobo {suffix}", $"cat-mobo-{suffix}", ComponentType.Motherboard);
+            var catPsu = new Category($"Cat PSU {suffix}", $"cat-psu-{suffix}", ComponentType.Psu);
+            var catCase = new Category($"Cat Case {suffix}", $"cat-case-{suffix}", ComponentType.Case);
+            db.Categories.AddRange(catCpu, catMobo, catPsu, catCase);
+
+            cpuLga = new Product(catCpu.Id, $"i5-13600KF {suffix}", $"cpu-lga-{suffix}", $"SKU-CPU-{suffix}", "Intel", 6_000_000m, 10, "cpu.png", ComponentType.Cpu,
+                new CpuSpecification { Socket = CpuSocket.LGA1700, SupportedMemoryType = RamType.DDR5, HasIntegratedGpu = false });
+            moboAm5 = new Product(catMobo.Id, $"B650 {suffix}", $"mobo-am5-{suffix}", $"SKU-MOBO-{suffix}", "MSI", 4_000_000m, 10, "mobo.png", ComponentType.Motherboard,
+                new MotherboardSpecification { Socket = CpuSocket.AM5, MemoryType = RamType.DDR5, FormFactor = MotherboardFormFactor.ATX });
+            psuLong = new Product(catPsu.Id, $"PSU 190mm {suffix}", $"psu-190-{suffix}", $"SKU-PSU-{suffix}", "Corsair", 3_000_000m, 10, "psu.png", ComponentType.Psu,
+                new PsuSpecification { Wattage = 850, LengthMm = 190 });
+            caseShort = new Product(catCase.Id, $"Case 160mm {suffix}", $"case-160-{suffix}", $"SKU-CASE-{suffix}", "NZXT", 2_000_000m, 10, "case.png", ComponentType.Case,
+                new CaseSpecification { SupportedFormFactors = [MotherboardFormFactor.MicroATX], MaxPsuLengthMm = 160 });
+
+            db.Products.AddRange(cpuLga, moboAm5, psuLong, caseShort);
+            await db.SaveChangesAsync();
+        }
+
+        // Create saved build via POST /api/v1/pc-builds -> engine computes IsCompatible = false (COMP-01, COMP-05, COMP-12, COMP-13)
+        var createBuildRes = await client.PostAsJsonAsync("/api/v1/pc-builds", new CreatePCBuildRequest(
+            "Conflicting Specs Build",
+            "Customer buying parts for separate PCs",
+            [
+                new(cpuLga.Id, 1),
+                new(moboAm5.Id, 1),
+                new(psuLong.Id, 1),
+                new(caseShort.Id, 1)
+            ]));
+        createBuildRes.StatusCode.Should().Be(HttpStatusCode.Created);
+        var buildDto = await createBuildRes.Content.ReadFromJsonAsync<MyPCBuildDto>(JsonOptions);
+        buildDto.Should().NotBeNull();
+        buildDto!.IsCompatible.Should().BeFalse();
+        buildDto.Issues.Should().Contain(i => i.RuleId == "COMP-01" && i.Severity == "Error");
+        buildDto.Issues.Should().Contain(i => i.RuleId == "COMP-13" && i.Severity == "Error");
+
+        // Add incompatible build to cart -> 200 OK
+        var addRes = await client.PostAsync($"/api/v1/carts/from-pc-build/{buildDto.Id}", null);
+        addRes.StatusCode.Should().Be(HttpStatusCode.OK);
+        var cartDto = await addRes.Content.ReadFromJsonAsync<CartDto>(JsonOptions);
+        cartDto.Should().NotBeNull();
+        cartDto!.Items.Should().HaveCount(4);
+        cartDto.Subtotal.Should().Be(15_000_000m);
+
+        // Verify persisted cart in PostgreSQL
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var cartInDb = await db.Carts.Include(c => c.Items).FirstOrDefaultAsync(c => c.UserId == user.Id);
+            cartInDb.Should().NotBeNull();
+            cartInDb!.Items.Should().HaveCount(4);
+            cartInDb.Version.Should().Be(cartDto.Version);
+        }
+    }
 }
