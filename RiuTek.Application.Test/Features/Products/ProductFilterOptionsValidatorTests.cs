@@ -1,3 +1,4 @@
+using FluentAssertions;
 using FluentValidation.TestHelper;
 using RiuTek.Application.Features.Products.Queries;
 using RiuTek.Core.Enums;
@@ -385,6 +386,203 @@ public class ProductFilterOptionsValidatorTests
             InStock: true,
             IsActive: true,
             SortBy: ProductSortOption.PriceLowToHigh);
+
+        var result = _validator.TestValidate(options);
+        result.ShouldNotHaveAnyValidationErrors();
+    }
+
+    #endregion
+
+    #region List Filters Tests
+
+    [Fact]
+    public void Validator_WhenBrandsExceeds20_FailsValidation()
+    {
+        var brands = Enumerable.Range(1, 21).Select(i => $"Brand{i}").ToList();
+        var options = new ProductFilterOptions(Brands: brands);
+        var result = _validator.TestValidate(options);
+        result.ShouldHaveValidationErrorFor(x => x.Brands)
+            .WithErrorMessage("Danh sách thương hiệu không được vượt quá 20 phần tử.");
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void Validator_WhenBrandInListIsBlank_FailsValidation(string blankBrand)
+    {
+        var options = new ProductFilterOptions(Brands: ["Intel", blankBrand]);
+        var result = _validator.TestValidate(options);
+        result.ShouldHaveValidationErrorFor(x => x.Brands)
+            .WithErrorMessage("Tên thương hiệu trong danh sách không được để trống.");
+    }
+
+    [Fact]
+    public void Validator_WhenBrandInListExceeds100Chars_FailsValidation()
+    {
+        var longBrand = new string('A', 101);
+        var options = new ProductFilterOptions(Brands: [longBrand]);
+        var result = _validator.TestValidate(options);
+        result.ShouldHaveValidationErrorFor(x => x.Brands)
+            .WithErrorMessage("Tên thương hiệu trong danh sách không được vượt quá 100 ký tự.");
+    }
+
+    [Theory]
+    [InlineData("Sockets")]
+    [InlineData("MemoryTypes")]
+    [InlineData("MotherboardFormFactors")]
+    [InlineData("RamFormFactors")]
+    [InlineData("StorageTypes")]
+    [InlineData("StorageInterfaces")]
+    [InlineData("PsuEfficiencies")]
+    [InlineData("PsuModularities")]
+    [InlineData("PsuFormFactors")]
+    [InlineData("CoolerTypes")]
+    [InlineData("CoreCounts")]
+    [InlineData("VramGbs")]
+    [InlineData("GpuLengthsMm")]
+    [InlineData("RamCapacitiesGb")]
+    [InlineData("RamSpeedsMhz")]
+    [InlineData("StorageCapacitiesGb")]
+    [InlineData("PsuWattages")]
+    public void Validator_WhenTechnicalListExceeds20_FailsValidation(string listName)
+    {
+        var options = listName switch
+        {
+            "Sockets" => new ProductFilterOptions(ComponentType: ComponentType.Cpu, Sockets: Enumerable.Repeat(CpuSocket.AM5, 21).ToList()),
+            "MemoryTypes" => new ProductFilterOptions(ComponentType: ComponentType.Ram, MemoryTypes: Enumerable.Repeat(RamType.DDR5, 21).ToList()),
+            "MotherboardFormFactors" => new ProductFilterOptions(ComponentType: ComponentType.Motherboard, MotherboardFormFactors: Enumerable.Repeat(MotherboardFormFactor.ATX, 21).ToList()),
+            "RamFormFactors" => new ProductFilterOptions(ComponentType: ComponentType.Ram, RamFormFactors: Enumerable.Repeat(RamFormFactor.DIMM, 21).ToList()),
+            "StorageTypes" => new ProductFilterOptions(ComponentType: ComponentType.Storage, StorageTypes: Enumerable.Repeat(StorageType.NVMe_M2, 21).ToList()),
+            "StorageInterfaces" => new ProductFilterOptions(ComponentType: ComponentType.Storage, StorageInterfaces: Enumerable.Repeat(StorageInterface.PCIe_4_0, 21).ToList()),
+            "PsuEfficiencies" => new ProductFilterOptions(ComponentType: ComponentType.Psu, PsuEfficiencies: Enumerable.Repeat(PsuEfficiency.Plus80Gold, 21).ToList()),
+            "PsuModularities" => new ProductFilterOptions(ComponentType: ComponentType.Psu, PsuModularities: Enumerable.Repeat(PsuModularity.FullModular, 21).ToList()),
+            "PsuFormFactors" => new ProductFilterOptions(ComponentType: ComponentType.Psu, PsuFormFactors: Enumerable.Repeat(PsuFormFactor.ATX, 21).ToList()),
+            "CoolerTypes" => new ProductFilterOptions(ComponentType: ComponentType.Cooler, CoolerTypes: Enumerable.Repeat(CoolerType.Air, 21).ToList()),
+            "CoreCounts" => new ProductFilterOptions(ComponentType: ComponentType.Cpu, CoreCounts: Enumerable.Range(1, 21).ToList()),
+            "VramGbs" => new ProductFilterOptions(ComponentType: ComponentType.Gpu, VramGbs: Enumerable.Range(1, 21).ToList()),
+            "GpuLengthsMm" => new ProductFilterOptions(ComponentType: ComponentType.Gpu, GpuLengthsMm: Enumerable.Range(1, 21).ToList()),
+            "RamCapacitiesGb" => new ProductFilterOptions(ComponentType: ComponentType.Ram, RamCapacitiesGb: Enumerable.Range(1, 21).ToList()),
+            "RamSpeedsMhz" => new ProductFilterOptions(ComponentType: ComponentType.Ram, RamSpeedsMhz: Enumerable.Range(1, 21).ToList()),
+            "StorageCapacitiesGb" => new ProductFilterOptions(ComponentType: ComponentType.Storage, StorageCapacitiesGb: Enumerable.Range(1, 21).ToList()),
+            "PsuWattages" => new ProductFilterOptions(ComponentType: ComponentType.Psu, PsuWattages: Enumerable.Range(1, 21).ToList()),
+            _ => throw new ArgumentException()
+        };
+
+        var result = _validator.TestValidate(options);
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().Contain(e => e.ErrorMessage.Contains("không được vượt quá 20 phần tử"));
+    }
+
+    [Theory]
+    [InlineData("Sockets")]
+    [InlineData("MemoryTypes")]
+    [InlineData("MotherboardFormFactors")]
+    [InlineData("RamFormFactors")]
+    [InlineData("StorageTypes")]
+    [InlineData("StorageInterfaces")]
+    [InlineData("PsuEfficiencies")]
+    [InlineData("PsuModularities")]
+    [InlineData("PsuFormFactors")]
+    [InlineData("CoolerTypes")]
+    [InlineData("CoreCounts")]
+    [InlineData("VramGbs")]
+    [InlineData("GpuLengthsMm")]
+    [InlineData("RamCapacitiesGb")]
+    [InlineData("RamSpeedsMhz")]
+    [InlineData("StorageCapacitiesGb")]
+    [InlineData("PsuWattages")]
+    public void Validator_WhenTechnicalListWithoutComponentType_FailsValidation(string listName)
+    {
+        var options = listName switch
+        {
+            "Sockets" => new ProductFilterOptions(Sockets: [CpuSocket.AM5]),
+            "MemoryTypes" => new ProductFilterOptions(MemoryTypes: [RamType.DDR5]),
+            "MotherboardFormFactors" => new ProductFilterOptions(MotherboardFormFactors: [MotherboardFormFactor.ATX]),
+            "RamFormFactors" => new ProductFilterOptions(RamFormFactors: [RamFormFactor.DIMM]),
+            "StorageTypes" => new ProductFilterOptions(StorageTypes: [StorageType.NVMe_M2]),
+            "StorageInterfaces" => new ProductFilterOptions(StorageInterfaces: [StorageInterface.PCIe_4_0]),
+            "PsuEfficiencies" => new ProductFilterOptions(PsuEfficiencies: [PsuEfficiency.Plus80Gold]),
+            "PsuModularities" => new ProductFilterOptions(PsuModularities: [PsuModularity.FullModular]),
+            "PsuFormFactors" => new ProductFilterOptions(PsuFormFactors: [PsuFormFactor.ATX]),
+            "CoolerTypes" => new ProductFilterOptions(CoolerTypes: [CoolerType.Air]),
+            "CoreCounts" => new ProductFilterOptions(CoreCounts: [6]),
+            "VramGbs" => new ProductFilterOptions(VramGbs: [12]),
+            "GpuLengthsMm" => new ProductFilterOptions(GpuLengthsMm: [250]),
+            "RamCapacitiesGb" => new ProductFilterOptions(RamCapacitiesGb: [32]),
+            "RamSpeedsMhz" => new ProductFilterOptions(RamSpeedsMhz: [6000]),
+            "StorageCapacitiesGb" => new ProductFilterOptions(StorageCapacitiesGb: [1000]),
+            "PsuWattages" => new ProductFilterOptions(PsuWattages: [750]),
+            _ => throw new ArgumentException()
+        };
+
+        var result = _validator.TestValidate(options);
+        result.ShouldHaveValidationErrorFor(x => x.ComponentType)
+            .WithErrorMessage("Loại linh kiện là bắt buộc khi sử dụng bộ lọc thông số kỹ thuật.");
+    }
+
+    [Fact]
+    public void Validator_WhenEmptyListsProvidedWithoutComponentType_PassesValidation()
+    {
+        var options = new ProductFilterOptions(
+            Brands: [],
+            Sockets: [],
+            MemoryTypes: [],
+            MotherboardFormFactors: [],
+            RamFormFactors: [],
+            StorageTypes: [],
+            StorageInterfaces: [],
+            PsuEfficiencies: [],
+            PsuModularities: [],
+            PsuFormFactors: [],
+            CoolerTypes: [],
+            CoreCounts: [],
+            VramGbs: [],
+            GpuLengthsMm: [],
+            RamCapacitiesGb: [],
+            RamSpeedsMhz: [],
+            StorageCapacitiesGb: [],
+            PsuWattages: []);
+
+        var result = _validator.TestValidate(options);
+        result.ShouldNotHaveAnyValidationErrors();
+    }
+
+    [Theory]
+    [InlineData("CoreCounts")]
+    [InlineData("VramGbs")]
+    [InlineData("GpuLengthsMm")]
+    [InlineData("RamCapacitiesGb")]
+    [InlineData("RamSpeedsMhz")]
+    [InlineData("StorageCapacitiesGb")]
+    [InlineData("PsuWattages")]
+    public void Validator_WhenNumericListContainsZeroOrNegative_FailsValidation(string listName)
+    {
+        var options = listName switch
+        {
+            "CoreCounts" => new ProductFilterOptions(ComponentType: ComponentType.Cpu, CoreCounts: [6, 0]),
+            "VramGbs" => new ProductFilterOptions(ComponentType: ComponentType.Gpu, VramGbs: [12, -1]),
+            "GpuLengthsMm" => new ProductFilterOptions(ComponentType: ComponentType.Gpu, GpuLengthsMm: [0]),
+            "RamCapacitiesGb" => new ProductFilterOptions(ComponentType: ComponentType.Ram, RamCapacitiesGb: [-16]),
+            "RamSpeedsMhz" => new ProductFilterOptions(ComponentType: ComponentType.Ram, RamSpeedsMhz: [0]),
+            "StorageCapacitiesGb" => new ProductFilterOptions(ComponentType: ComponentType.Storage, StorageCapacitiesGb: [-500]),
+            "PsuWattages" => new ProductFilterOptions(ComponentType: ComponentType.Psu, PsuWattages: [0]),
+            _ => throw new ArgumentException()
+        };
+
+        var result = _validator.TestValidate(options);
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().Contain(e => e.ErrorMessage.Contains("phải lớn hơn 0"));
+    }
+
+    [Fact]
+    public void Validator_ScalarAndListUnion_PassesValidation()
+    {
+        var options = new ProductFilterOptions(
+            ComponentType: ComponentType.Cpu,
+            Socket: CpuSocket.AM5,
+            Sockets: [CpuSocket.LGA1700, CpuSocket.AM5],
+            Brand: "AMD",
+            Brands: ["Intel", "AMD"]);
 
         var result = _validator.TestValidate(options);
         result.ShouldNotHaveAnyValidationErrors();

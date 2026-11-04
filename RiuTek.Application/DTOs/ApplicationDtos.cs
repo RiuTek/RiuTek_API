@@ -114,3 +114,14 @@ public record CompatibilityIssueDto(
     string ComponentB,
     string Message
 );
+
+
+public record ProductFilterGroupDto(
+    string Key,
+    IReadOnlyList<int> Values
+);
+
+public record ProductFilterOptionsDto(
+    IReadOnlyList<string> Brands,
+    IReadOnlyList<ProductFilterGroupDto> Groups
+);

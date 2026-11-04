@@ -224,6 +224,7 @@ public class ProductSpecificationFilterIntegrationTests : CatalogIntegrationTest
             {
                 Chipset = "RTX 4080 Super",
                 VramGb = 16,
+                LengthMm = 304,
                 Requires12VHPWR = true
             });
 
@@ -232,6 +233,7 @@ public class ProductSpecificationFilterIntegrationTests : CatalogIntegrationTest
             {
                 Chipset = "RX 7800 XT",
                 VramGb = 16,
+                LengthMm = 267,
                 Requires12VHPWR = false
             });
 
@@ -487,5 +489,433 @@ public class ProductSpecificationFilterIntegrationTests : CatalogIntegrationTest
         // HasWifi applied to GPU -> 400
         var resp3 = await client.GetAsync("/api/v1/products?componentType=3&hasWifi=true");
         resp3.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+    }
+
+    [Fact]
+    public async Task GetProducts_MultiSelect_UnionWithinSameGroup_IntersectionAcrossGroupsAndPrice()
+    {
+        var catalog = await SeedSpecificationCatalogAsync();
+        using var client = CreatePublicClient();
+
+        // 1. Two brands in same list => OR union
+        // AMD (cpu1) + Intel (cpu2) -> both returned (TotalCount = 2)
+        var brandResp = await client.GetAsync("/api/v1/products?componentType=1&brands=AMD&brands=Intel");
+        brandResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var brandResult = (await brandResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        brandResult.TotalCount.Should().Be(2);
+        brandResult.Items.Select(x => x.Id).Should().BeEquivalentTo([catalog.Cpu1.Id, catalog.Cpu2.Id]);
+
+        // 2. Two sockets in same list => OR union
+        // AM5 (5) + LGA1700 (1) -> both returned (TotalCount = 2)
+        var socketResp = await client.GetAsync("/api/v1/products?componentType=1&sockets=5&sockets=1");
+        socketResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var socketResult = (await socketResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        socketResult.TotalCount.Should().Be(2);
+        socketResult.Items.Select(x => x.Id).Should().BeEquivalentTo([catalog.Cpu1.Id, catalog.Cpu2.Id]);
+
+        // 3. Both brand list and socket list => AND intersection between groups
+        // (AMD OR Intel) AND (AM5 OR LGA1700) -> both returned
+        var bothResp = await client.GetAsync("/api/v1/products?componentType=1&brands=AMD&brands=Intel&sockets=5&sockets=1");
+        bothResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var bothResult = (await bothResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        bothResult.TotalCount.Should().Be(2);
+
+        // 4. Brand AMD AND LGA1700 (1) -> 0 results (intersection between groups)
+        var conflictResp = await client.GetAsync("/api/v1/products?componentType=1&brands=AMD&sockets=1");
+        conflictResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var conflictResult = (await conflictResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        conflictResult.TotalCount.Should().Be(0);
+        conflictResult.Items.Should().BeEmpty();
+
+        // 5. Union of brands/sockets AND minPrice intersection
+        // (AMD OR Intel) AND (AM5 OR LGA1700) AND minPrice >= 4,000,000 -> only Cpu1 (5,000,000)
+        var priceResp = await client.GetAsync("/api/v1/products?componentType=1&brands=AMD&brands=Intel&sockets=5&sockets=1&minPrice=4000000");
+        priceResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var priceResult = (await priceResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        priceResult.TotalCount.Should().Be(1);
+        priceResult.Items.Single().Id.Should().Be(catalog.Cpu1.Id);
+    }
+
+    [Fact]
+    public async Task GetProducts_ScalarAndListUnion_DeduplicatesAndPreservesLegacyScalar()
+    {
+        var catalog = await SeedSpecificationCatalogAsync();
+        using var client = CreatePublicClient();
+
+        // Scalar brand + list brands with casing/duplicates: brand=amd&brands=AMD&brands=amd
+        // Should merge to single "amd" search, matching Cpu1 (AMD) without duplicating rows
+        var brandResp = await client.GetAsync("/api/v1/products?componentType=1&brand=amd&brands=AMD&brands=amd");
+        brandResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var brandResult = (await brandResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        brandResult.TotalCount.Should().Be(1);
+        brandResult.Items.Single().Id.Should().Be(catalog.Cpu1.Id);
+
+        // Scalar socket + list sockets: socket=5&sockets=5&sockets=1
+        // Merged to [5, 1], returning both Cpu1 and Cpu2 without duplicating Cpu1
+        var socketResp = await client.GetAsync("/api/v1/products?componentType=1&socket=5&sockets=5&sockets=1");
+        socketResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var socketResult = (await socketResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        socketResult.TotalCount.Should().Be(2);
+        socketResult.Items.Select(x => x.Id).Should().BeEquivalentTo([catalog.Cpu1.Id, catalog.Cpu2.Id]);
+
+        // Legacy scalar: socket=5
+        var legacyResp = await client.GetAsync("/api/v1/products?componentType=1&socket=5");
+        legacyResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var legacyResult = (await legacyResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        legacyResult.TotalCount.Should().Be(1);
+        legacyResult.Items.Single().Id.Should().Be(catalog.Cpu1.Id);
+    }
+
+    [Fact]
+    public async Task GetProducts_CoolerAndCase_ArrayContainment_AnyMatchNotAll_NoRowDuplication()
+    {
+        var catalog = await SeedSpecificationCatalogAsync();
+        using var client = CreatePublicClient();
+
+        // Cooler1 supports [AM5 (5), AM4 (4), LGA1700 (1), LGA1851 (2)]
+        // Cooler2 supports [AM4 (4)]
+        // Query sockets=5&sockets=4: Cooler1 matches BOTH, Cooler2 matches AM4.
+        // Array ANY semantics: both match, Cooler1 must appear exactly ONCE (not twice).
+        var coolerResp = await client.GetAsync("/api/v1/products?componentType=8&sockets=5&sockets=4");
+        coolerResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var coolerResult = (await coolerResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        coolerResult.TotalCount.Should().Be(2);
+        coolerResult.Items.Should().HaveCount(2);
+        coolerResult.Items.Select(x => x.Id).Should().BeEquivalentTo([catalog.Cooler1.Id, catalog.Cooler2.Id]);
+
+        // Case1 supports [ATX (1), MicroATX (2), MiniITX (3)]
+        // Case2 supports [MiniITX (3)]
+        // Query motherboardFormFactors=1&motherboardFormFactors=3: Case1 matches BOTH, Case2 matches MiniITX.
+        // Array ANY semantics: both match, Case1 must appear exactly ONCE.
+        var caseResp = await client.GetAsync("/api/v1/products?componentType=7&motherboardFormFactors=1&motherboardFormFactors=3");
+        caseResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var caseResult = (await caseResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        caseResult.TotalCount.Should().Be(2);
+        caseResult.Items.Should().HaveCount(2);
+        caseResult.Items.Select(x => x.Id).Should().BeEquivalentTo([catalog.Case1.Id, catalog.Case2.Id]);
+    }
+
+    [Fact]
+    public async Task GetProducts_AllSevenNumericGroups_ExactBoundaryAndFieldSeparation()
+    {
+        var catalog = await SeedSpecificationCatalogAsync();
+        using var client = CreatePublicClient();
+
+        // 1. CPU CoreCounts: Cpu1 (6), Cpu2 (6)
+        var coreResp1 = await client.GetAsync("/api/v1/products?componentType=1&coreCounts=6");
+        coreResp1.StatusCode.Should().Be(HttpStatusCode.OK);
+        var coreResult1 = (await coreResp1.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        coreResult1.TotalCount.Should().Be(2);
+
+        var coreResp2 = await client.GetAsync("/api/v1/products?componentType=1&coreCounts=8");
+        coreResp2.StatusCode.Should().Be(HttpStatusCode.OK);
+        var coreResult2 = (await coreResp2.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        coreResult2.TotalCount.Should().Be(0);
+
+        // 2. GPU VramGbs: Gpu1 (16), Gpu2 (16)
+        var vramResp1 = await client.GetAsync("/api/v1/products?componentType=3&vramGbs=16");
+        vramResp1.StatusCode.Should().Be(HttpStatusCode.OK);
+        var vramResult1 = (await vramResp1.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        vramResult1.TotalCount.Should().Be(2);
+
+        var vramResp2 = await client.GetAsync("/api/v1/products?componentType=3&vramGbs=24");
+        vramResp2.StatusCode.Should().Be(HttpStatusCode.OK);
+        var vramResult2 = (await vramResp2.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        vramResult2.TotalCount.Should().Be(0);
+
+        // 3. GPU LengthsMm vs Case MaxGpuLengthMm separation:
+        // Gpu1 has LengthMm = 304, Gpu2 has LengthMm = 267. Case1 has MaxGpuLengthMm = 365.
+        var gpuLenResp1 = await client.GetAsync("/api/v1/products?componentType=3&gpuLengthsMm=304");
+        gpuLenResp1.StatusCode.Should().Be(HttpStatusCode.OK);
+        var gpuLenResult1 = (await gpuLenResp1.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        gpuLenResult1.TotalCount.Should().Be(1);
+        gpuLenResult1.Items.Single().Id.Should().Be(catalog.Gpu1.Id);
+
+        // Querying gpuLengthsMm=365 for GPU should NOT match Case1
+        var gpuLenResp2 = await client.GetAsync("/api/v1/products?componentType=3&gpuLengthsMm=365");
+        gpuLenResp2.StatusCode.Should().Be(HttpStatusCode.OK);
+        var gpuLenResult2 = (await gpuLenResp2.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        gpuLenResult2.TotalCount.Should().Be(0);
+
+        // Applying gpuLengthsMm to Case should fail validation (400)
+        var gpuLenCaseResp = await client.GetAsync("/api/v1/products?componentType=7&gpuLengthsMm=365");
+        gpuLenCaseResp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+
+        // 4. RAM CapacitiesGb (total kit capacity): Ram1 (32GB, 2 modules), Ram2 (16GB)
+        var ramCapResp1 = await client.GetAsync("/api/v1/products?componentType=4&ramCapacitiesGb=32");
+        ramCapResp1.StatusCode.Should().Be(HttpStatusCode.OK);
+        var ramCapResult1 = (await ramCapResp1.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        ramCapResult1.TotalCount.Should().Be(1);
+        ramCapResult1.Items.Single().Id.Should().Be(catalog.Ram1.Id);
+
+        var ramCapResp2 = await client.GetAsync("/api/v1/products?componentType=4&ramCapacitiesGb=16");
+        ramCapResp2.StatusCode.Should().Be(HttpStatusCode.OK);
+        var ramCapResult2 = (await ramCapResp2.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        ramCapResult2.TotalCount.Should().Be(1);
+        ramCapResult2.Items.Single().Id.Should().Be(catalog.Ram2.Id);
+
+        // 5. RAM SpeedsMhz: Ram1 (6000), Ram2 (3200)
+        var ramSpdResp1 = await client.GetAsync("/api/v1/products?componentType=4&ramSpeedsMhz=6000");
+        ramSpdResp1.StatusCode.Should().Be(HttpStatusCode.OK);
+        var ramSpdResult1 = (await ramSpdResp1.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        ramSpdResult1.TotalCount.Should().Be(1);
+        ramSpdResult1.Items.Single().Id.Should().Be(catalog.Ram1.Id);
+
+        var ramSpdResp2 = await client.GetAsync("/api/v1/products?componentType=4&ramSpeedsMhz=5200");
+        ramSpdResp2.StatusCode.Should().Be(HttpStatusCode.OK);
+        var ramSpdResult2 = (await ramSpdResp2.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        ramSpdResult2.TotalCount.Should().Be(0);
+
+        // 6. Storage CapacitiesGb: Storage1 (1000), Storage2 (500)
+        var storCapResp1 = await client.GetAsync("/api/v1/products?componentType=5&storageCapacitiesGb=1000");
+        storCapResp1.StatusCode.Should().Be(HttpStatusCode.OK);
+        var storCapResult1 = (await storCapResp1.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        storCapResult1.TotalCount.Should().Be(1);
+        storCapResult1.Items.Single().Id.Should().Be(catalog.Storage1.Id);
+
+        var storCapResp2 = await client.GetAsync("/api/v1/products?componentType=5&storageCapacitiesGb=2000");
+        storCapResp2.StatusCode.Should().Be(HttpStatusCode.OK);
+        var storCapResult2 = (await storCapResp2.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        storCapResult2.TotalCount.Should().Be(0);
+
+        // 7. PSU Wattages: Psu1 (850), Psu2 (650)
+        var psuWatResp1 = await client.GetAsync("/api/v1/products?componentType=6&psuWattages=850");
+        psuWatResp1.StatusCode.Should().Be(HttpStatusCode.OK);
+        var psuWatResult1 = (await psuWatResp1.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        psuWatResult1.TotalCount.Should().Be(1);
+        psuWatResult1.Items.Single().Id.Should().Be(catalog.Psu1.Id);
+
+        var psuWatResp2 = await client.GetAsync("/api/v1/products?componentType=6&psuWattages=1000");
+        psuWatResp2.StatusCode.Should().Be(HttpStatusCode.OK);
+        var psuWatResult2 = (await psuWatResp2.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        psuWatResult2.TotalCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task GetProducts_PaginationAndCount_FiltersAcrossEntireDataset_NoOverlap()
+    {
+        using var scope = Fixture.Factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        var cat = new Category("Pagination Test Category", $"pagination-cat-{Guid.NewGuid():N}", ComponentType.Storage);
+        db.Categories.Add(cat);
+        await db.SaveChangesAsync();
+
+        var products = new List<Product>();
+        // 15 products with CapacityGb = 1000
+        for (int i = 1; i <= 15; i++)
+        {
+            products.Add(new Product(
+                cat.Id,
+                $"Storage 1TB #{i:D2}",
+                $"storage-1tb-{Guid.NewGuid():N}",
+                $"SKU-1TB-{i:D2}-{Guid.NewGuid():N}",
+                "Crucial",
+                1000000m + (i * 10000m),
+                10,
+                $"https://example.com/p1tb{i}.jpg",
+                ComponentType.Storage,
+                new StorageSpecification
+                {
+                    StorageType = StorageType.NVMe_M2,
+                    Interface = StorageInterface.PCIe_4_0,
+                    CapacityGb = 1000
+                }));
+        }
+        // 10 products with CapacityGb = 2000
+        for (int i = 1; i <= 10; i++)
+        {
+            products.Add(new Product(
+                cat.Id,
+                $"Storage 2TB #{i:D2}",
+                $"storage-2tb-{Guid.NewGuid():N}",
+                $"SKU-2TB-{i:D2}-{Guid.NewGuid():N}",
+                "Crucial",
+                3000000m + (i * 10000m),
+                10,
+                $"https://example.com/p2tb{i}.jpg",
+                ComponentType.Storage,
+                new StorageSpecification
+                {
+                    StorageType = StorageType.NVMe_M2,
+                    Interface = StorageInterface.PCIe_4_0,
+                    CapacityGb = 2000
+                }));
+        }
+        db.Products.AddRange(products);
+        await db.SaveChangesAsync();
+
+        using var client = CreatePublicClient();
+
+        // Page 1: pageSize = 10, filter storageCapacitiesGb = 1000, sortBy = PriceLowToHigh (2)
+        var page1Resp = await client.GetAsync($"/api/v1/products?categoryId={cat.Id}&componentType=5&storageCapacitiesGb=1000&pageIndex=1&pageSize=10&sortBy=2");
+        page1Resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var page1Result = (await page1Resp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        page1Result.TotalCount.Should().Be(15);
+        page1Result.TotalPages.Should().Be(2);
+        page1Result.Items.Should().HaveCount(10);
+
+        // Page 2: pageSize = 10, filter storageCapacitiesGb = 1000
+        var page2Resp = await client.GetAsync($"/api/v1/products?categoryId={cat.Id}&componentType=5&storageCapacitiesGb=1000&pageIndex=2&pageSize=10&sortBy=2");
+        page2Resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var page2Result = (await page2Resp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+        page2Result.TotalCount.Should().Be(15);
+        page2Result.TotalPages.Should().Be(2);
+        page2Result.Items.Should().HaveCount(5);
+
+        // Overlap verification: Page 1 and Page 2 must not overlap
+        var page1Ids = page1Result.Items.Select(x => x.Id).ToHashSet();
+        var page2Ids = page2Result.Items.Select(x => x.Id).ToHashSet();
+        page1Ids.Intersect(page2Ids).Should().BeEmpty();
+        page1Ids.Union(page2Ids).Should().HaveCount(15);
+    }
+
+    [Fact]
+    public async Task GetFilterOptions_ScopedCategoryAndDescendant_ComponentType_ActiveStock_SortedAndDeduped()
+    {
+        using var scope = Fixture.Factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        var parentCat = new Category("Root CPU FilterOptions", $"root-cpu-fo-{Guid.NewGuid():N}", ComponentType.Cpu);
+        db.Categories.Add(parentCat);
+        await db.SaveChangesAsync();
+
+        var childCat = new Category("Child Desktop CPUs", $"child-cpu-fo-{Guid.NewGuid():N}", ComponentType.Cpu, parentId: parentCat.Id);
+        db.Categories.Add(childCat);
+        await db.SaveChangesAsync();
+
+        // Product A: Brand "  intel  " (spaces), Active, InStock, LGA1700 (1), 8 cores
+        var prodA = new Product(childCat.Id, "Intel Core i7-14700", $"intel-14700-{Guid.NewGuid():N}", $"SKU-A-{Guid.NewGuid():N}", "  intel  ", 9000000m, 10, "https://example.com/a.jpg", ComponentType.Cpu,
+            new CpuSpecification { Socket = CpuSocket.LGA1700, CoreCount = 8 });
+
+        // Product B: Brand "Intel" (PascalCase), Active, InStock, LGA1700 (1), 16 cores
+        var prodB = new Product(childCat.Id, "Intel Core i9-14900", $"intel-14900-{Guid.NewGuid():N}", $"SKU-B-{Guid.NewGuid():N}", "Intel", 14000000m, 5, "https://example.com/b.jpg", ComponentType.Cpu,
+            new CpuSpecification { Socket = CpuSocket.LGA1700, CoreCount = 16 });
+
+        // Product C: Brand "AMD", Inactive, InStock, AM5 (5), 12 cores
+        var prodC = new Product(childCat.Id, "AMD Ryzen 9 7900", $"amd-7900-{Guid.NewGuid():N}", $"SKU-C-{Guid.NewGuid():N}", "AMD", 10000000m, 5, "https://example.com/c.jpg", ComponentType.Cpu,
+            new CpuSpecification { Socket = CpuSocket.AM5, CoreCount = 12 });
+        prodC.IsActive = false;
+
+        // Product D: Brand "AMD", Active, OutOfStock (0), AM5 (5), 6 cores
+        var prodD = new Product(childCat.Id, "AMD Ryzen 5 7500F", $"amd-7500f-{Guid.NewGuid():N}", $"SKU-D-{Guid.NewGuid():N}", "AMD", 3800000m, 0, "https://example.com/d.jpg", ComponentType.Cpu,
+            new CpuSpecification { Socket = CpuSocket.AM5, CoreCount = 6 });
+
+        db.Products.AddRange(prodA, prodB, prodC, prodD);
+        await db.SaveChangesAsync();
+
+        using var client = CreatePublicClient();
+
+        // 1. Anonymous access & descendant scope: CategoryId = parentCat.Id includes childCat products
+        var resp1 = await client.GetAsync($"/api/v1/products/filter-options?categoryId={parentCat.Id}&componentType=1");
+        resp1.StatusCode.Should().Be(HttpStatusCode.OK);
+        var options1 = (await resp1.Content.ReadFromJsonAsync<ProductFilterOptionsDto>(JsonOptions))!;
+
+        // Brands: trimmed, deduped case-insensitively, sorted -> AMD, intel (or Intel)
+        options1.Brands.Should().HaveCount(2);
+        options1.Brands.Select(b => b.ToLowerInvariant()).Should().Contain(["amd", "intel"]);
+
+        // Groups for CPU whitelist: sockets, memoryTypes, coreCounts
+        options1.Groups.Select(g => g.Key).Should().BeEquivalentTo(["sockets", "memoryTypes", "coreCounts"]);
+        var socketsGroup = options1.Groups.Single(g => g.Key == "sockets");
+        socketsGroup.Values.Should().BeEquivalentTo([1, 5]); // LGA1700 (1), AM5 (5)
+        var coresGroup = options1.Groups.Single(g => g.Key == "coreCounts");
+        coresGroup.Values.Should().BeEquivalentTo([6, 8, 12, 16]); // All 4 products included by default
+
+        // 2. Missing category -> 404
+        var missingCatResp = await client.GetAsync($"/api/v1/products/filter-options?categoryId={Guid.NewGuid()}");
+        missingCatResp.StatusCode.Should().Be(HttpStatusCode.NotFound);
+
+        // 3. No componentType -> returns brands only, groups is empty
+        var noCompResp = await client.GetAsync($"/api/v1/products/filter-options?categoryId={parentCat.Id}");
+        noCompResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var noCompOptions = (await noCompResp.Content.ReadFromJsonAsync<ProductFilterOptionsDto>(JsonOptions))!;
+        noCompOptions.Brands.Should().HaveCount(2);
+        noCompOptions.Groups.Should().BeEmpty();
+
+        // 4. Scoped by isActive=true & inStock=true:
+        // Excludes Prod C (inactive) and Prod D (out of stock).
+        // Only Prod A & Prod B remain -> only "Intel", sockets [1], coreCounts [8, 16]
+        var scopedResp = await client.GetAsync($"/api/v1/products/filter-options?categoryId={parentCat.Id}&componentType=1&isActive=true&inStock=true");
+        scopedResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var scopedOptions = (await scopedResp.Content.ReadFromJsonAsync<ProductFilterOptionsDto>(JsonOptions))!;
+        scopedOptions.Brands.Should().HaveCount(1);
+        scopedOptions.Brands.Single().ToLowerInvariant().Should().Be("intel");
+        scopedOptions.Groups.Single(g => g.Key == "sockets").Values.Should().BeEquivalentTo([1]);
+        scopedOptions.Groups.Single(g => g.Key == "coreCounts").Values.Should().BeEquivalentTo([8, 16]);
+
+        // 5. Empty scope (category with no products) -> returns 200 with empty arrays
+        var emptyCat = new Category("Empty CPU Cat", $"empty-cpu-cat-{Guid.NewGuid():N}", ComponentType.Cpu);
+        db.Categories.Add(emptyCat);
+        await db.SaveChangesAsync();
+
+        var emptyResp = await client.GetAsync($"/api/v1/products/filter-options?categoryId={emptyCat.Id}&componentType=1");
+        emptyResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var emptyOptions = (await emptyResp.Content.ReadFromJsonAsync<ProductFilterOptionsDto>(JsonOptions))!;
+        emptyOptions.Brands.Should().BeEmpty();
+        emptyOptions.Groups.Should().HaveCount(3);
+        emptyOptions.Groups.All(g => g.Values.Count == 0).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task GetFilterOptions_FacetOptionsSentBackToProductsQuery_ReturnsExpectedResults()
+    {
+        await SeedSpecificationCatalogAsync();
+        using var client = CreatePublicClient();
+
+        // Retrieve filter options for CPUs
+        var optionsResp = await client.GetAsync("/api/v1/products/filter-options?componentType=1");
+        optionsResp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var options = (await optionsResp.Content.ReadFromJsonAsync<ProductFilterOptionsDto>(JsonOptions))!;
+        options.Brands.Should().NotBeEmpty();
+
+        // Every brand option should return matching products when passed to /api/v1/products
+        foreach (var brand in options.Brands)
+        {
+            var prodResp = await client.GetAsync($"/api/v1/products?componentType=1&brands={Uri.EscapeDataString(brand)}");
+            prodResp.StatusCode.Should().Be(HttpStatusCode.OK);
+            var prodResult = (await prodResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+            prodResult.TotalCount.Should().BeGreaterThan(0);
+            prodResult.Items.All(p => p.Brand.Trim().Equals(brand.Trim(), StringComparison.OrdinalIgnoreCase)).Should().BeTrue();
+        }
+
+        // Every socket option in sockets group should return matching products
+        var socketGroup = options.Groups.FirstOrDefault(g => g.Key == "sockets");
+        socketGroup.Should().NotBeNull();
+        foreach (var socketVal in socketGroup!.Values)
+        {
+            var prodResp = await client.GetAsync($"/api/v1/products?componentType=1&sockets={socketVal}");
+            prodResp.StatusCode.Should().Be(HttpStatusCode.OK);
+            var prodResult = (await prodResp.Content.ReadFromJsonAsync<PagedResult<ProductSummaryDto>>(JsonOptions))!;
+            prodResult.TotalCount.Should().BeGreaterThan(0);
+        }
+    }
+
+    [Fact]
+    public async Task GetFilterOptions_RouteMetadata_NotInterceptedByIdOrSlugRoute()
+    {
+        var catalog = await SeedSpecificationCatalogAsync();
+        using var client = CreatePublicClient();
+
+        // 1. GET /api/v1/products/filter-options without auth token -> 200 OK (public, not 401, not 404)
+        var optionsResp = await client.GetAsync("/api/v1/products/filter-options");
+        optionsResp.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        // 2. GET /api/v1/products/{id} without auth -> 401 Unauthorized (managed endpoint permissions preserved)
+        var unauthIdResp = await client.GetAsync($"/api/v1/products/{catalog.Cpu1.Id}");
+        unauthIdResp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+
+        // 3. GET /api/v1/products/{id} with admin client -> 200 OK
+        using var adminClient = CreateAdminClient();
+        var adminIdResp = await adminClient.GetAsync($"/api/v1/products/{catalog.Cpu1.Id}");
+        adminIdResp.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        // 4. GET /api/v1/products/slug/{slug} with public client -> 200 OK
+        var slugResp = await client.GetAsync($"/api/v1/products/slug/{catalog.Cpu1.Slug}");
+        slugResp.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        // 5. GET /api/v1/products/slug/filter-options -> 404 (slug does not exist)
+        var slugOptionsResp = await client.GetAsync("/api/v1/products/slug/filter-options");
+        slugOptionsResp.StatusCode.Should().Be(HttpStatusCode.NotFound);
     }
 }

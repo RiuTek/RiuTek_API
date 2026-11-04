@@ -27,6 +27,25 @@ public class ProductsController : ApiControllerBase
         return HandleResult(result);
     }
 
+    [HttpGet("filter-options")]
+    [AllowAnonymous]
+    [ProducesResponseType(typeof(ProductFilterOptionsDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetFilterOptions(
+        [FromQuery] ProductFilterOptionsRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        var query = new GetProductFilterOptionsQuery(
+            ComponentType: request.ComponentType,
+            CategoryId: request.CategoryId,
+            IsActive: request.IsActive,
+            InStock: request.InStock
+        );
+        var result = await Mediator.Send(query, cancellationToken);
+        return HandleResult(result);
+    }
+
     [HttpGet("slug/{slug}")]
     [AllowAnonymous]
     [ProducesResponseType(typeof(ProductDto), StatusCodes.Status200OK)]

@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using RiuTek.Application.Common.Interfaces;
 using RiuTek.Core.Common;
 using RiuTek.Core.Entities;
+using RiuTek.Core.Enums;
 
 namespace RiuTek.Application.Features.Products.Queries;
 
@@ -54,6 +55,38 @@ public static class ProductQueryExtensions
         return Result.Success(descendantIds);
     }
 
+    public static IQueryable<Product> ApplyScope(
+        this IQueryable<Product> query,
+        ComponentType? componentType,
+        HashSet<Guid>? categoryIds,
+        bool? isActive,
+        bool? inStock)
+    {
+        if (categoryIds != null && categoryIds.Count > 0)
+        {
+            query = query.Where(p => categoryIds.Contains(p.CategoryId));
+        }
+
+        if (componentType.HasValue)
+        {
+            query = query.Where(p => p.ComponentType == componentType.Value);
+        }
+
+        if (isActive.HasValue)
+        {
+            query = query.Where(p => p.IsActive == isActive.Value);
+        }
+
+        if (inStock.HasValue)
+        {
+            query = inStock.Value
+                ? query.Where(p => p.StockQuantity > 0)
+                : query.Where(p => p.StockQuantity == 0);
+        }
+
+        return query;
+    }
+
     public static IQueryable<Product> ApplyFilters(
         this IQueryable<Product> query,
         ProductFilterOptions options,
@@ -73,10 +106,32 @@ public static class ProductQueryExtensions
                 p.Brand.ToLower().Contains(search));
         }
 
+        var effectiveBrands = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         if (!string.IsNullOrWhiteSpace(options.Brand))
         {
-            var brand = options.Brand.Trim().ToLowerInvariant();
-            query = query.Where(p => p.Brand.ToLower() == brand);
+            effectiveBrands.Add(options.Brand.Trim());
+        }
+
+        if (options.Brands != null)
+        {
+            foreach (var b in options.Brands)
+            {
+                if (!string.IsNullOrWhiteSpace(b))
+                {
+                    effectiveBrands.Add(b.Trim());
+                }
+            }
+        }
+
+        if (effectiveBrands.Count == 1)
+        {
+            var brand = effectiveBrands.First().ToLowerInvariant();
+            query = query.Where(p => p.Brand.Trim().ToLower() == brand);
+        }
+        else if (effectiveBrands.Count > 1)
+        {
+            var brandList = effectiveBrands.Select(b => b.ToLowerInvariant()).ToList();
+            query = query.Where(p => brandList.Contains(p.Brand.Trim().ToLower()));
         }
 
         if (options.ComponentType.HasValue)

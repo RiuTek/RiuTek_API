@@ -1,3 +1,4 @@
+using RiuTek.Application.DTOs;
 using System.Reflection;
 using FluentAssertions;
 using Moq;
@@ -31,6 +32,12 @@ public class ProductQueryHandlerTests
     private sealed class PassThroughProductSpecificationFilterService : IProductSpecificationFilterService
     {
         public IQueryable<Product> Apply(IQueryable<Product> query, ProductFilterOptions options) => query;
+
+        public Task<ProductFilterOptionsDto> GetFilterOptionsAsync(
+            IQueryable<Product> scopedQuery,
+            ComponentType? componentType,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(new ProductFilterOptionsDto([], []));
     }
 
     private static readonly IProductSpecificationFilterService PassThroughSpecFilterService =
@@ -864,6 +871,71 @@ public class ProductQueryHandlerTests
         result.IsSuccess.Should().BeFalse();
         result.Error.Type.Should().Be(ErrorType.NotFound);
         result.Error.Code.Should().Be("Product.NotFound");
+    }
+
+    #endregion
+
+    #region GetProductFilterOptionsQueryHandler Tests
+
+    [Fact]
+    public void GetProductFilterOptionsQueryHandler_Constructor_WhenContextIsNull_ThrowsArgumentNullException()
+    {
+        var act = () => new GetProductFilterOptionsQueryHandler(null!, PassThroughSpecFilterService);
+        act.Should().Throw<ArgumentNullException>().WithParameterName("context");
+    }
+
+    [Fact]
+    public void GetProductFilterOptionsQueryHandler_Constructor_WhenSpecFilterServiceIsNull_ThrowsArgumentNullException()
+    {
+        using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var act = () => new GetProductFilterOptionsQueryHandler(context, null!);
+        act.Should().Throw<ArgumentNullException>().WithParameterName("specFilterService");
+    }
+
+    [Fact]
+    public async Task GetProductFilterOptions_WhenCategoryNotFound_ReturnsNotFound()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var handler = new GetProductFilterOptionsQueryHandler(context, PassThroughSpecFilterService);
+
+        var query = new GetProductFilterOptionsQuery(CategoryId: Guid.NewGuid());
+        var result = await handler.Handle(query, CancellationToken.None);
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Type.Should().Be(ErrorType.NotFound);
+        result.Error.Code.Should().Be("Product.CategoryNotFound");
+    }
+
+    [Fact]
+    public async Task GetProductFilterOptions_WhenCategoryExists_ResolvesDescendantsAndQueriesService()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var parentCat = CreateCategory("Parent Cat", "parent-cat", ComponentType.Cpu);
+        context.Categories.Add(parentCat);
+        await context.SaveChangesAsync();
+
+        var childCat = CreateCategory("Child Cat", "child-cat", ComponentType.Cpu, parentCat.Id);
+        context.Categories.Add(childCat);
+        await context.SaveChangesAsync();
+
+        var p1 = new Product(parentCat.Id, "P1", "p1", "SKU1", "Intel", 100, 10, "img.jpg", ComponentType.Cpu, CreateCpuSpec());
+        var p2 = new Product(childCat.Id, "P2", "p2", "SKU2", "AMD", 200, 5, "img.jpg", ComponentType.Cpu, CreateCpuSpec());
+        context.Products.AddRange(p1, p2);
+        await context.SaveChangesAsync();
+
+        var mockService = new Mock<IProductSpecificationFilterService>();
+        mockService
+            .Setup(s => s.GetFilterOptionsAsync(It.IsAny<IQueryable<Product>>(), ComponentType.Cpu, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new ProductFilterOptionsDto(["AMD", "Intel"], [new("sockets", [1, 2])]));
+
+        var handler = new GetProductFilterOptionsQueryHandler(context, mockService.Object);
+        var query = new GetProductFilterOptionsQuery(ComponentType: ComponentType.Cpu, CategoryId: parentCat.Id);
+
+        var result = await handler.Handle(query, CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Value.Brands.Should().ContainInOrder("AMD", "Intel");
+        result.Value.Groups.Should().HaveCount(1);
     }
 
     #endregion

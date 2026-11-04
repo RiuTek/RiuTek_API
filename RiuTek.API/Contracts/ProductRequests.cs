@@ -63,6 +63,25 @@ public class ProductListRequest
     public bool? Has12VHPWR { get; set; }
     public bool? Requires12VHPWR { get; set; }
 
+    public List<string>? Brands { get; set; }
+    public List<CpuSocket>? Sockets { get; set; }
+    public List<RamType>? MemoryTypes { get; set; }
+    public List<MotherboardFormFactor>? MotherboardFormFactors { get; set; }
+    public List<RamFormFactor>? RamFormFactors { get; set; }
+    public List<StorageType>? StorageTypes { get; set; }
+    public List<StorageInterface>? StorageInterfaces { get; set; }
+    public List<PsuEfficiency>? PsuEfficiencies { get; set; }
+    public List<PsuModularity>? PsuModularities { get; set; }
+    public List<PsuFormFactor>? PsuFormFactors { get; set; }
+    public List<CoolerType>? CoolerTypes { get; set; }
+    public List<int>? CoreCounts { get; set; }
+    public List<int>? VramGbs { get; set; }
+    public List<int>? GpuLengthsMm { get; set; }
+    public List<int>? RamCapacitiesGb { get; set; }
+    public List<int>? RamSpeedsMhz { get; set; }
+    public List<int>? StorageCapacitiesGb { get; set; }
+    public List<int>? PsuWattages { get; set; }
+
     public ProductFilterOptions ToFilterOptions() => new(
         PageIndex: PageIndex,
         PageSize: PageSize,
@@ -89,6 +108,32 @@ public class ProductListRequest
         HasWifi: HasWifi,
         HasRgb: HasRgb,
         Has12VHPWR: Has12VHPWR,
-        Requires12VHPWR: Requires12VHPWR
+        Requires12VHPWR: Requires12VHPWR,
+        Brands: Brands,
+        Sockets: Sockets,
+        MemoryTypes: MemoryTypes,
+        MotherboardFormFactors: MotherboardFormFactors,
+        RamFormFactors: RamFormFactors,
+        StorageTypes: StorageTypes,
+        StorageInterfaces: StorageInterfaces,
+        PsuEfficiencies: PsuEfficiencies,
+        PsuModularities: PsuModularities,
+        PsuFormFactors: PsuFormFactors,
+        CoolerTypes: CoolerTypes,
+        CoreCounts: CoreCounts,
+        VramGbs: VramGbs,
+        GpuLengthsMm: GpuLengthsMm,
+        RamCapacitiesGb: RamCapacitiesGb,
+        RamSpeedsMhz: RamSpeedsMhz,
+        StorageCapacitiesGb: StorageCapacitiesGb,
+        PsuWattages: PsuWattages
     );
+}
+
+public class ProductFilterOptionsRequest
+{
+    public ComponentType? ComponentType { get; set; }
+    public Guid? CategoryId { get; set; }
+    public bool? IsActive { get; set; }
+    public bool? InStock { get; set; }
 }

@@ -37,7 +37,7 @@ public class ActualEndpointMetadataTests
 
             // Total controller actions: 6 Posts + 6 Comments + 7 Products + 5 Categories + 6 Carts + 4 Auth + 10 Orders + 1 Payments + 6 Users + 3 ProductMedia + 3 ProductImports + 9 Reviews + 6 PCBuilds = 72
             var controllerEndpoints = endpoints.Where(e => e.Metadata.GetMetadata<ControllerActionDescriptor>() != null).ToList();
-            controllerEndpoints.Should().HaveCount(73);
+            controllerEndpoints.Should().HaveCount(74);
 
             // Helper to get action descriptor
             ControllerActionDescriptor GetDescriptor(RouteEndpoint e) => e.Metadata.GetMetadata<ControllerActionDescriptor>()!;
@@ -140,7 +140,13 @@ public class ActualEndpointMetadataTests
                 e.Metadata.GetMetadata<ControllerActionDescriptor>()?.ControllerTypeInfo.AsType() == typeof(ProductsController))
                 .ToList();
 
-            productEndpoints.Should().HaveCount(7);
+            productEndpoints.Should().HaveCount(8);
+
+            // GET api/v1/products/filter-options (AllowAnonymous) - Action: GetFilterOptions
+            var getFilterOptions = productEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(ProductsController.GetFilterOptions) && GetHttpMethods(e).Contains("GET"));
+            getFilterOptions.Should().NotBeNull();
+            GetFullRoutePattern(getFilterOptions!).Should().BeEquivalentTo("api/v1/products/filter-options");
+            AssertPublicEndpoint(getFilterOptions!);
 
             // 13. GET api/v1/products (AllowAnonymous) - Action: GetProducts
             var getProducts = productEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(ProductsController.GetProducts) && GetHttpMethods(e).Contains("GET"));

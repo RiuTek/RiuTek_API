@@ -58,6 +58,19 @@ public class ProductsControllerContractTests : IDisposable
     #region Attribute & Routing Reflection Tests
 
     [Fact]
+    public void GetFilterOptions_HasHttpGetWithTemplateAndAllowAnonymousAttributes()
+    {
+        var method = typeof(ProductsController).GetMethod(nameof(ProductsController.GetFilterOptions));
+        method.Should().NotBeNull();
+
+        var httpGet = method!.GetCustomAttribute<HttpGetAttribute>();
+        httpGet.Should().NotBeNull();
+        httpGet!.Template.Should().Be("filter-options");
+
+        method.GetCustomAttribute<AllowAnonymousAttribute>().Should().NotBeNull();
+    }
+
+    [Fact]
     public void GetProducts_HasHttpGetAndAllowAnonymousAttributes()
     {
         var method = typeof(ProductsController).GetMethod(nameof(ProductsController.GetProducts));
@@ -564,4 +577,40 @@ public class ProductsControllerContractTests : IDisposable
     }
 
     #endregion
+
+    [Fact]
+    public async Task GetFilterOptions_WhenSuccess_ReturnsOkStatusWithData()
+    {
+        var expectedDto = new ProductFilterOptionsDto(["AMD", "Intel"], [new("sockets", [1, 2])]);
+        _senderMock.Setup(s => s.Send(It.IsAny<GetProductFilterOptionsQuery>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Result.Success(expectedDto));
+
+        var request = new ProductFilterOptionsRequest
+        {
+            ComponentType = ComponentType.Cpu,
+            CategoryId = Guid.NewGuid(),
+            IsActive = true,
+            InStock = true
+        };
+
+        var actionResult = await _controller.GetFilterOptions(request, CancellationToken.None);
+
+        var okResult = actionResult as OkObjectResult;
+        okResult.Should().NotBeNull();
+        okResult!.StatusCode.Should().Be(StatusCodes.Status200OK);
+        okResult.Value.Should().BeEquivalentTo(expectedDto);
+    }
+
+    [Fact]
+    public async Task GetFilterOptions_WhenCategoryNotFound_ReturnsNotFoundStatus()
+    {
+        _senderMock.Setup(s => s.Send(It.IsAny<GetProductFilterOptionsQuery>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Result.Failure<ProductFilterOptionsDto>(Error.NotFound("Product.CategoryNotFound", "Category not found")));
+
+        var actionResult = await _controller.GetFilterOptions(new ProductFilterOptionsRequest { CategoryId = Guid.NewGuid() }, CancellationToken.None);
+
+        var notFoundResult = actionResult as NotFoundObjectResult;
+        notFoundResult.Should().NotBeNull();
+        notFoundResult!.StatusCode.Should().Be(StatusCodes.Status404NotFound);
+    }
 }
