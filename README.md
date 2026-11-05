@@ -2,222 +2,119 @@
 
 [![CI & Publish to ACR](https://github.com/RiuTek/RiuTek_API/actions/workflows/ci-acr.yml/badge.svg)](https://github.com/RiuTek/RiuTek_API/actions/workflows/ci-acr.yml)
 
-Backend API for a PC-component e-commerce and PC-building platform. RiuTek is designed to help users browse hardware, validate component compatibility, manage a persistent cart, and complete an order even when they are not familiar with building a PC.
+Backend for RiuTek, a personal e-commerce project for buying PC components and choosing parts for a custom build. Customers can browse products, check compatibility, save configurations and place orders through a conventional cart or Buy Now flow.
 
-This is an actively developed personal portfolio project. It focuses on backend architecture, transactional e-commerce workflows, automated testing, and cloud deployment. The long-term goal is to add an AI-assisted PC advisor on top of deterministic compatibility rules and semantic product search.
+[Live website](https://riutek.store) · [Frontend repository](https://github.com/RiuTek/RiuTek_Web)
 
-## What the project solves
+## Features
 
-Buying PC parts requires more than adding products to a cart: sockets, memory generations, form factors, power requirements, cooler support, and physical dimensions must be compatible. RiuTek combines a conventional product catalog and checkout flow with structured hardware specifications and a compatibility engine so that users can build a valid configuration with clearer guidance.
+- **Accounts:** JWT authentication, rotating refresh tokens in HttpOnly cookies, profiles, delivery addresses and Customer/Staff/Admin permissions.
+- **Catalog:** nested categories, nine component types, structured hardware specifications, keyword search, technical filters, sorting and pagination.
+- **PC Builder:** anonymous compatibility previews, customer saved configurations, quantity-aware checks, build-to-cart and direct build checkout. Compatibility findings are advisory; price, availability and stock are checked separately when purchasing.
+- **Cart and checkout:** authenticated persistent carts, version checks, checkout of selected cart items, Buy Now for individual products or saved builds, checkout quotes and idempotent order creation. Inactive carts are cleaned up after 30 days.
+- **Orders and payments:** customer order history/cancellation, staff fulfillment actions, COD and Stripe Checkout in test mode. Signed Stripe webhooks handle payment events and stock restoration where applicable.
+- **Inventory:** stock movement history and manual adjustments with concurrency checks. Creation, import, checkout, cancellation and payment expiration record their stock changes.
+- **Product imports and media:** downloadable Excel templates, workbook inspection, validation before import and transactional create-only imports. Images uploaded to Cloudflare R2 can be mapped to workbook products by SKU.
+- **Content:** post/comment APIs, purchased-product reviews with ratings and moderation, and homepage banner management. Banner images reuse the R2 upload flow; referenced media is protected from deletion.
 
-## Current capabilities
+Posts, comments and reviews are implemented as backend APIs; their customer-facing frontend screens are not part of the current web release. PNG export is implemented by the frontend in the browser, without an export API or stored image.
 
-- JWT authentication with refresh-token rotation, BCrypt password hashing, HttpOnly refresh cookies, and role-based authorization for Customer, Staff, and Admin.
-- Customer profile and address management with ownership protection and deterministic default-address rules.
-- Product and category management for nine component types: CPU, motherboard, GPU, RAM, storage, PSU, case, cooler, and accessory.
-- Polymorphic JSON hardware specifications, filtering, search, sorting, and deterministic pagination.
-- PC Builder: Guest preview without persistence (`POST /api/v1/pc-builds/preview`), Customer saved-build CRUD (`/api/v1/pc-builds`), strict DB ownership verification, clear separation between hardware compatibility (`IsCompatible`, issues) and commercial availability (`CanPurchase`, `CanPurchaseAll`), and quantity-aware RAM/storage calculation. Atomic build-to-cart, Buy Now, and AI Advisor are scheduled for future phases.
-- Authenticated persistent cart with version-based conflict detection and automatic cleanup of inactive carts after 30 days.
-- Checkout quotation, idempotent order creation, stock reservation, customer order history, Staff/Admin order management, COD fulfillment, Stripe Checkout sandbox integration, and signed webhook processing.
-- Posts and reusable comments for products and posts.
-- Redis-backed caching with a database fallback when Redis is unavailable.
-- Cloudflare R2 product-media uploads through presigned URLs, with validation and ownership rules verified in the deployed environment.
-- Versioned Excel template generation, dry-run validation, and transactional create-only bulk import for all nine component types.
-- Inventory audit logging (`StockMovement`), optimistic concurrency manual adjustments (`POST /api/v1/products/{id}/stock-adjustments`), and paginated stock movement history (`GET /api/v1/products/{id}/stock-movements`).
-- Verified product reviews: restricted to Customers with completed orders (1 review per Order-Product pair), public rating summary and distribution (1..5 stars), Customer self-management (create/update/delete), Staff/Admin replies and moderation deletion, concurrency protection via UpdatedAt tokens (review images/R2 deferred to future media phase).
-- Homepage banner management: public active banners (`GET /api/v1/banners`), ContentManager administration CRUD (`/api/v1/banners`), deterministic ordering (`DisplayOrder ASC, Id ASC`), internal target URL validation, reuse of the existing Cloudflare R2 upload flow (`/api/v1/product-media`), and media deletion guard preventing removal of assets in use by active or inactive banners.
-- PostgreSQL integration tests with Testcontainers and automated container deployment through GitHub Actions.
+## Design
 
-## Architecture
-
-RiuTek is a modular monolith using Clean Architecture. The Application layer is organized with Vertical Slices and CQRS.
+The backend is a modular monolith with Clean Architecture. Application features are organized as vertical slices using CQRS and MediatR.
 
 ```text
-RiuTek.API
-    HTTP contracts, controllers, authentication middleware
-        |
-        v
-RiuTek.Application
-    Commands, queries, handlers, validators, DTOs, interfaces
-        |
-        v
-RiuTek.Core
-    Entities, enums, domain specifications, business abstractions
-
-RiuTek.Infrastructure
-    EF Core, PostgreSQL, Redis, JWT, Stripe, Cloudflare R2 adapters
-        |
-        +---- implements Application/Core interfaces
+Core             Entities, component specifications and business rules
+Application      Commands, queries, validators, DTOs and integration interfaces
+Infrastructure   EF Core, PostgreSQL, Redis, authentication, Stripe and R2 adapters
+API              HTTP contracts, controllers and application startup
 ```
 
-Key design choices:
+Core does not depend on the outer layers. Application depends on Core; Infrastructure implements the interfaces used by Application. API composes the application and infrastructure services.
 
-- `Result<T>` and typed errors are used for expected business failures instead of exception-driven control flow.
-- FluentValidation runs through the MediatR pipeline.
-- DTO mapping is explicit rather than hidden behind AutoMapper.
-- Authorization and ownership are enforced again in handlers, not only through controller attributes.
-- Product price, availability, stock, and cart version are revalidated during checkout.
-- External integrations are represented by Application interfaces and implemented in Infrastructure.
-- Optional services such as Redis, Stripe, and R2 can be disabled without breaking the core API.
+Expected business failures use Result/Error responses. FluentValidation runs in the MediatR pipeline, DTOs are mapped explicitly, and handlers enforce account/ownership checks in addition to endpoint authorization. Checkout revalidates prices and stock; idempotency and concurrency checks address repeated or competing requests.
 
-## Tech stack
+## Technology
 
-| Area | Technologies |
-|---|---|
-| Runtime | .NET 10, ASP.NET Core Web API, C# |
-| Architecture | Clean Architecture, Vertical Slice Architecture, CQRS, MediatR |
-| Validation | FluentValidation |
-| Data | PostgreSQL, EF Core 10, Npgsql, pgvector |
-| Authentication | JWT Bearer, refresh-token rotation, BCrypt |
-| Caching | Redis / Upstash-compatible Redis |
-| Payments | Stripe Checkout and webhooks, COD |
-| Media | Cloudflare R2 through the S3-compatible API |
-| Imports | ClosedXML, versioned `.xlsx` contracts, dry-run validation, transactional batch creation |
-| Testing | xUnit, FluentAssertions, ASP.NET Core integration testing, Testcontainers |
-| Delivery | Docker, GitHub Actions, Azure Container Registry, Azure Web App, Supabase |
+| Area | Stack |
+| --- | --- |
+| API | .NET 10, ASP.NET Core, C# |
+| Application | MediatR, FluentValidation, CQRS |
+| Database | PostgreSQL, EF Core 10, Npgsql |
+| Authentication | JWT Bearer, BCrypt, refresh-token rotation |
+| Integrations | Redis, Stripe Checkout, Cloudflare R2/S3 API, ClosedXML |
+| Testing | xUnit, FluentAssertions, PostgreSQL Testcontainers |
+| Deployment | Docker, GitHub Actions, Azure Container Registry, Azure App Service |
 
-## Repository structure
+The database includes pgvector support for future embedding search. AI recommendations and semantic search are not implemented yet.
 
-```text
-RiuTek.Core/                 Domain model and business abstractions
-RiuTek.Application/          CQRS slices, validation, DTOs and ports
-RiuTek.Infrastructure/       Database and external-service adapters
-RiuTek.API/                  HTTP API and composition root
-RiuTek.Application.Test/     Unit and contract tests
-RiuTek.API.IntegrationTest/  HTTP/PostgreSQL integration tests
-.github/workflows/           CI/CD workflow
-```
+## Run locally
 
-## Getting started
+Requirements: .NET 10 SDK, PostgreSQL with the vector extension enabled, and EF Core CLI matching the project's EF Core version. Docker is needed for PostgreSQL integration tests; it is not required when using an existing local PostgreSQL instance.
 
-### Prerequisites
+From the repository root, configure a local database and a random JWT signing key in the terminal environment. The JWT key must contain at least 32 UTF-8 bytes; length alone does not guarantee randomness. Do not use production credentials for local development.
 
-- [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
-- PostgreSQL with the `vector` extension, or Docker Desktop for a local PostgreSQL/pgvector container
-- Docker Desktop when running the integration-test project
-
-Redis, Stripe, and R2 are optional for local development and should remain disabled until their settings are configured.
-
-### Required configuration
-
-Secrets must be supplied at runtime and must not be committed to any `appsettings*.json`, `.env`, workflow, or source file.
-
-| Environment variable | Required | Purpose |
-|---|---:|---|
-| `ConnectionStrings__DefaultConnection` | Yes | PostgreSQL connection string |
-| `JwtSettings__SecretKey` | Yes | Random JWT signing key, at least 32 UTF-8 bytes |
-| `RedisSettings__Enabled` | No | Enables Redis caching |
-| `RedisSettings__ConnectionString` | When Redis is enabled | Redis connection string |
-| `Stripe__Enabled` | No | Enables Stripe sandbox checkout |
-| `Stripe__SecretKey` | When Stripe is enabled | Stripe test secret key |
-| `Stripe__WebhookSecret` | When Stripe is enabled | Stripe endpoint signing secret |
-| `R2__Enabled` | No | Enables Cloudflare R2 product media |
-| `R2__ServiceUrl` and `R2__PublicBaseUrl` | When R2 is enabled | S3 endpoint and public media base URL |
-| `R2__AccessKeyId`, `R2__SecretAccessKey`, `R2__BucketName` | When R2 is enabled | Bucket-scoped R2 credentials and bucket name |
-
-Example for a temporary PowerShell session:
+PowerShell 7.1 or newer:
 
 ```powershell
+$env:DOTNET_ENVIRONMENT = "Development"
 $env:ASPNETCORE_ENVIRONMENT = "Development"
-$env:ConnectionStrings__DefaultConnection = Read-Host "PostgreSQL connection string" -MaskInput
-$env:JwtSettings__SecretKey = Read-Host "JWT signing key" -MaskInput
+$env:ConnectionStrings__DefaultConnection = Read-Host "Local PostgreSQL connection string" -MaskInput
+$env:JwtSettings__SecretKey = Read-Host "Random JWT signing key" -MaskInput
+$env:RedisSettings__Enabled = "false"
+$env:Stripe__Enabled = "false"
+$env:R2__Enabled = "false"
+$env:CartCleanup__Enabled = "false"
 
 dotnet restore RiuTek_API.slnx
 dotnet ef database update --project RiuTek.Infrastructure --startup-project RiuTek.API
 dotnet run --project RiuTek.API --no-launch-profile
 ```
 
-`Read-Host -MaskInput` requires PowerShell 7.1 or newer. Environment variables set this way live only in the current terminal session and are inherited by its child processes.
+Install the matching dotnet-ef tool if it is not already available. Use the local URL printed by the application. In Development, the OpenAPI document is served at /openapi/v1.json. For refresh-cookie authentication, use HTTPS: refresh cookies are always Secure and HttpOnly. Do not weaken cookie settings to make local HTTP authentication work.
 
-When running in Development, the OpenAPI document is available at:
+Environment variables set in this terminal apply to that process and its child processes; they do not permanently update User/Machine settings. Redis, Stripe and R2 are optional for local startup. Background cart cleanup is disabled in the example to avoid a startup sweep during setup.
 
-```text
-http://localhost:5000/openapi/v1.json
-```
+### Optional integrations
 
-Use the actual host and port printed by `dotnet run`; the launch profile commonly uses `http://localhost:5251`.
+Configure these only when enabling the corresponding integration:
+
+| Service | Environment variable names |
+| --- | --- |
+| Redis | RedisSettings__Enabled, RedisSettings__ConnectionString |
+| Stripe test mode | Stripe__Enabled, Stripe__SecretKey, Stripe__WebhookSecret, Stripe__SuccessUrl, Stripe__CancelUrl |
+| Cloudflare R2 | R2__Enabled, R2__ServiceUrl, R2__PublicBaseUrl, R2__BucketName, R2__AccessKeyId, R2__SecretAccessKey |
+
+Keep secrets in runtime environment settings, outside source control. See the configuration classes for optional non-secret limits and timeouts. Never put backend credentials in the frontend's public VITE variables.
 
 ## Build and test
 
-Build the complete solution:
-
 ```powershell
 dotnet build RiuTek_API.slnx -c Release
-```
-
-Run fast Application/unit/contract tests without Docker:
-
-```powershell
 dotnet test RiuTek.Application.Test/RiuTek.Application.Test.csproj -c Release
-```
-
-Run PostgreSQL HTTP integration tests with Docker Desktop running:
-
-```powershell
 dotnet test RiuTek.API.IntegrationTest/RiuTek.API.IntegrationTest.csproj -c Release
 ```
 
-Run the complete suite:
+The integration tests start an isolated PostgreSQL/pgvector container and apply migrations. They do not use the production Supabase database. External services are replaced with test implementations where appropriate.
 
-```powershell
-dotnet test RiuTek_API.slnx -c Release
-```
-
-The integration project starts an isolated `pgvector/pgvector:pg17` container, applies EF Core migrations, executes the tests, and disposes the database afterward. It does not connect to the production Supabase database.
-
-## Docker
-
-Build the production image:
+## Deployment
 
 ```powershell
 docker build -f RiuTek.API/Dockerfile -t riutek-api:local .
 ```
 
-The final Linux image:
+The image runs the API as a non-root user on port 8080. Supply configuration at runtime; do not include secrets in the image. GET /health/live checks process liveness, not database or external-service readiness.
 
-- uses the official .NET 10 ASP.NET runtime;
-- runs as the non-root `app` user;
-- listens on port `8080`;
-- contains no production credentials;
-- exposes `GET /health/live` as a process liveness endpoint.
+Pushes to master run the GitHub Actions workflow: build and tests, Docker build/push to ACR using the commit SHA, EF migrations to Supabase, deployment to Azure App Service, and HTTP smoke checks. The deployed application uses Supabase PostgreSQL, Upstash Redis and Cloudflare R2. Credentials are supplied through GitHub/Azure settings.
 
-Runtime secrets must be injected through the deployment environment. The liveness endpoint intentionally does not prove database, Redis, Stripe, or R2 connectivity.
+The frontend is deployed separately on Vercel and proxies API requests through /api/v1. See the frontend repository for browser setup and deployment details.
 
-## CI/CD and deployment
+## Roadmap and scope
 
-Every push to `master` runs the GitHub Actions pipeline:
+This is a personal portfolio project. Stripe runs in test mode; the deployed site is intended for demonstrating the workflows, not claiming a live retail operation.
 
-1. restore, Release build, and all automated tests;
-2. build an immutable Docker image tagged with the commit SHA;
-3. push the image to Azure Container Registry;
-4. apply EF Core migrations to Supabase PostgreSQL;
-5. deploy the exact image to Azure Web App;
-6. smoke-test liveness, products, categories, and posts.
-
-Credentials and connection strings are stored in GitHub/Azure environment settings, not in the repository. Production currently uses Azure Web App, Supabase PostgreSQL, and Upstash Redis.
-
-## Development status and roadmap
-
-Completed or operationally verified:
-
-- authentication and profile/address management;
-- catalog, compatibility rules, authenticated cart, checkout, order history;
-- Stripe sandbox success, signed webhook, and duplicate-event handling;
-- Staff/Admin order search and fulfillment workflow with concurrency protection, one-time cancellation restock, customer COD cancellation, and COD payment completion;
-- Cloudflare R2 product-media upload and deletion lifecycle;
-- versioned Excel template, dry-run validation, and all-or-nothing product import for all nine component types;
-- inventory audit tracking (`StockMovement`) across creation, bulk import, checkout, cancellation, payment expiration, and optimistic concurrency manual stock adjustments;
-- Docker image, PostgreSQL integration testing, CI/CD, Azure/Supabase/Redis deployment.
-
-In progress or planned:
-
-- product import history and richer administrative audit reporting;
-- advanced refund, return, and failed-delivery workflows;
-- product reviews and rating aggregate workflows;
-- AI-assisted PC recommendations using embeddings and pgvector;
-- React + Vite customer and administration frontend;
-- optional VNPay integration.
-
-## Project scope
-
-RiuTek is a solo learning and portfolio project, not a claim of production-scale operation. Some patterns intentionally model real backend concerns—idempotency, concurrency, ownership, failure isolation, migrations, and CI/CD—so they can be studied and tested in one codebase. Features are implemented incrementally and marked as complete only after automated and, where relevant, deployed-environment verification.
+Future work:
+- Customer-facing posts, comments and reviews screens, using the existing APIs.
+- AI-assisted build recommendations and semantic product search.
+- VNPay integration and broader return/refund workflows.
+- Laptop and prebuilt-PC catalog support as independent stocked products, without component-level stock or compatibility rules for those products.
