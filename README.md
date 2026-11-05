@@ -1,34 +1,65 @@
-# RiuTek API
+<div align="center">
+  <img src="https://raw.githubusercontent.com/RiuTek/RiuTek_Web/main/src/assets/branding/riutek-mark-v2.png" alt="RiuTek logo" width="80" />
+  <h1>RiuTek API</h1>
+  <p>PC component shopping &amp; custom builds</p>
+  <p>
+    <a href="https://riutek.store">Live website</a> &nbsp;·&nbsp;
+    <a href="https://github.com/RiuTek/RiuTek_Web">Frontend repository</a> &nbsp;·&nbsp;
+    <a href="#run-locally">Local setup</a>
+  </p>
 
+![.NET 10](https://img.shields.io/badge/.NET-10-512BD4?style=flat-square&logo=dotnet&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?style=flat-square&logo=postgresql&logoColor=white)
+![Redis](https://img.shields.io/badge/Redis-DC382D?style=flat-square&logo=redis&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-2496ED?style=flat-square&logo=docker&logoColor=white)
 [![CI & Publish to ACR](https://github.com/RiuTek/RiuTek_API/actions/workflows/ci-acr.yml/badge.svg)](https://github.com/RiuTek/RiuTek_API/actions/workflows/ci-acr.yml)
 
-Backend for RiuTek, a personal e-commerce project for buying PC components and choosing parts for a custom build. Customers can browse products, check compatibility, save configurations and place orders through a conventional cart or Buy Now flow.
+</div>
 
-[Live website](https://riutek.store) · [Frontend repository](https://github.com/RiuTek/RiuTek_Web)
+---
+
+RiuTek is a personal e-commerce project that helps customers buy PC components and choose parts for a custom build. This repository contains the backend: catalog and compatibility rules, accounts, checkout, payments and store administration.
+
+> **Demo scope** — The application is deployed for portfolio demonstrations. Stripe uses test mode.
+
+[Features](#features) · [Architecture](#architecture) · [Technology](#technology) · [Setup](#run-locally) · [Testing](#build-and-test) · [Deployment](#deployment) · [Roadmap](#roadmap)
 
 ## Features
 
-- **Accounts:** JWT authentication, rotating refresh tokens in HttpOnly cookies, profiles, delivery addresses and Customer/Staff/Admin permissions.
-- **Catalog:** nested categories, nine component types, structured hardware specifications, keyword search, technical filters, sorting and pagination.
-- **PC Builder:** anonymous compatibility previews, customer saved configurations, quantity-aware checks, build-to-cart and direct build checkout. Compatibility findings are advisory; price, availability and stock are checked separately when purchasing.
-- **Cart and checkout:** authenticated persistent carts, version checks, checkout of selected cart items, Buy Now for individual products or saved builds, checkout quotes and idempotent order creation. Inactive carts are cleaned up after 30 days.
-- **Orders and payments:** customer order history/cancellation, staff fulfillment actions, COD and Stripe Checkout in test mode. Signed Stripe webhooks handle payment events and stock restoration where applicable.
-- **Inventory:** stock movement history and manual adjustments with concurrency checks. Creation, import, checkout, cancellation and payment expiration record their stock changes.
-- **Product imports and media:** downloadable Excel templates, workbook inspection, validation before import and transactional create-only imports. Images uploaded to Cloudflare R2 can be mapped to workbook products by SKU.
-- **Content:** post/comment APIs, purchased-product reviews with ratings and moderation, and homepage banner management. Banner images reuse the R2 upload flow; referenced media is protected from deletion.
+| Feature | Implemented capabilities |
+| :--- | :--- |
+| **Accounts** | JWT authentication, rotating refresh tokens in HttpOnly cookies, profiles, delivery addresses and Customer/Staff/Admin permissions. |
+| **Catalog** | nested categories, nine component types, structured hardware specifications, keyword search, technical filters, sorting and pagination. |
+| **PC Builder** | anonymous compatibility previews, customer saved configurations, quantity-aware checks, build-to-cart and direct build checkout. Compatibility findings are advisory; price, availability and stock are checked separately when purchasing. |
+| **Cart and checkout** | authenticated persistent carts, version checks, checkout of selected cart items, Buy Now for individual products or saved builds, checkout quotes and idempotent order creation. Inactive carts are cleaned up after 30 days. |
+| **Orders and payments** | customer order history/cancellation, staff fulfillment actions, COD and Stripe Checkout in test mode. Signed Stripe webhooks handle payment events and stock restoration where applicable. |
+| **Inventory** | stock movement history and manual adjustments with concurrency checks. Creation, import, checkout, cancellation and payment expiration record their stock changes. |
+| **Product imports and media** | downloadable Excel templates, workbook inspection, validation before import and transactional create-only imports. Images uploaded to Cloudflare R2 can be mapped to workbook products by SKU. |
+| **Content** | post/comment APIs, purchased-product reviews with ratings and moderation, and homepage banner management. Banner images reuse the R2 upload flow; referenced media is protected from deletion. |
 
 Posts, comments and reviews are implemented as backend APIs; their customer-facing frontend screens are not part of the current web release. PNG export is implemented by the frontend in the browser, without an export API or stored image.
 
-## Design
+## Architecture
 
 The backend is a modular monolith with Clean Architecture. Application features are organized as vertical slices using CQRS and MediatR.
 
-```text
-Core             Entities, component specifications and business rules
-Application      Commands, queries, validators, DTOs and integration interfaces
-Infrastructure   EF Core, PostgreSQL, Redis, authentication, Stripe and R2 adapters
-API              HTTP contracts, controllers and application startup
+```mermaid
+flowchart LR
+    API --> Application
+    API --> Infrastructure
+    Infrastructure --> Application
+    Application --> Core
+    Infrastructure --> Core
 ```
+
+*Arrows represent project dependencies.*
+
+| Layer | Responsibility |
+| :--- | :--- |
+| `Core` | Entities, component specifications and business rules |
+| `Application` | Commands, queries, validators, DTOs and integration interfaces |
+| `Infrastructure` | EF Core, PostgreSQL, Redis, authentication, Stripe and R2 adapters |
+| `API` | HTTP contracts, controllers and application startup |
 
 Core does not depend on the outer layers. Application depends on Core; Infrastructure implements the interfaces used by Application. API composes the application and infrastructure services.
 
@@ -50,7 +81,12 @@ The database includes pgvector support for future embedding search. AI recommend
 
 ## Run locally
 
-Requirements: .NET 10 SDK, PostgreSQL with the vector extension enabled, and EF Core CLI matching the project's EF Core version. Docker is needed for PostgreSQL integration tests; it is not required when using an existing local PostgreSQL instance.
+**Prerequisites**
+
+- .NET 10 SDK.
+- PostgreSQL with the `vector` extension enabled.
+- EF Core CLI matching the project's EF Core version.
+- Docker for PostgreSQL integration tests; an existing local PostgreSQL instance is sufficient to run the API.
 
 From the repository root, configure a local database and a random JWT signing key in the terminal environment. The JWT key must contain at least 32 UTF-8 bytes; length alone does not guarantee randomness. Do not use production credentials for local development.
 
@@ -75,7 +111,9 @@ Install the matching dotnet-ef tool if it is not already available. Use the loca
 
 Environment variables set in this terminal apply to that process and its child processes; they do not permanently update User/Machine settings. Redis, Stripe and R2 are optional for local startup. Background cart cleanup is disabled in the example to avoid a startup sweep during setup.
 
-### Optional integrations
+<details>
+<summary><strong>Optional integrations and environment variables</strong></summary>
+
 
 Configure these only when enabling the corresponding integration:
 
@@ -86,6 +124,8 @@ Configure these only when enabling the corresponding integration:
 | Cloudflare R2 | R2__Enabled, R2__ServiceUrl, R2__PublicBaseUrl, R2__BucketName, R2__AccessKeyId, R2__SecretAccessKey |
 
 Keep secrets in runtime environment settings, outside source control. See the configuration classes for optional non-secret limits and timeouts. Never put backend credentials in the frontend's public VITE variables.
+
+</details>
 
 ## Build and test
 
@@ -109,11 +149,12 @@ Pushes to master run the GitHub Actions workflow: build and tests, Docker build/
 
 The frontend is deployed separately on Vercel and proxies API requests through /api/v1. See the frontend repository for browser setup and deployment details.
 
-## Roadmap and scope
+## Roadmap
 
 This is a personal portfolio project. Stripe runs in test mode; the deployed site is intended for demonstrating the workflows, not claiming a live retail operation.
 
-Future work:
+Planned additions:
+
 - Customer-facing posts, comments and reviews screens, using the existing APIs.
 - AI-assisted build recommendations and semantic product search.
 - VNPay integration and broader return/refund workflows.
