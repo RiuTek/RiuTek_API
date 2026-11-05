@@ -37,7 +37,7 @@ public class ActualEndpointMetadataTests
 
             // Total controller actions: 6 Posts + 6 Comments + 7 Products + 5 Categories + 6 Carts + 4 Auth + 10 Orders + 1 Payments + 6 Users + 3 ProductMedia + 3 ProductImports + 9 Reviews + 6 PCBuilds = 72
             var controllerEndpoints = endpoints.Where(e => e.Metadata.GetMetadata<ControllerActionDescriptor>() != null).ToList();
-            controllerEndpoints.Should().HaveCount(74);
+            controllerEndpoints.Should().HaveCount(80);
 
             // Helper to get action descriptor
             ControllerActionDescriptor GetDescriptor(RouteEndpoint e) => e.Metadata.GetMetadata<ControllerActionDescriptor>()!;
@@ -608,6 +608,52 @@ public class ActualEndpointMetadataTests
             deleteMyBuild.Should().NotBeNull();
             GetFullRoutePattern(deleteMyBuild!).Should().BeEquivalentTo("api/v1/pc-builds/{id:guid}");
             AssertAuthorized(deleteMyBuild!);
+
+            #endregion
+
+            #region Banners Endpoints (6)
+
+            var bannerEndpoints = endpoints.Where(e =>
+                e.Metadata.GetMetadata<ControllerActionDescriptor>()?.ControllerTypeInfo.AsType() == typeof(BannersController))
+                .ToList();
+
+            bannerEndpoints.Should().HaveCount(6);
+
+            // 1. GET api/v1/banners (AllowAnonymous) - Action: GetPublicBanners
+            var getPublicBanners = bannerEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(BannersController.GetPublicBanners) && GetHttpMethods(e).Contains("GET"));
+            getPublicBanners.Should().NotBeNull();
+            GetFullRoutePattern(getPublicBanners!).Should().BeEquivalentTo("api/v1/banners");
+            AssertPublicEndpoint(getPublicBanners!);
+
+            // 2. GET api/v1/banners/managed (Policies.ContentManager) - Action: GetManagedBanners
+            var getManagedBanners = bannerEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(BannersController.GetManagedBanners) && GetHttpMethods(e).Contains("GET"));
+            getManagedBanners.Should().NotBeNull();
+            GetFullRoutePattern(getManagedBanners!).Should().BeEquivalentTo("api/v1/banners/managed");
+            AssertAuthorizePolicy(getManagedBanners!, Policies.ContentManager);
+
+            // 3. GET api/v1/banners/{id:guid} (Policies.ContentManager) - Action: GetById
+            var getBannerById = bannerEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(BannersController.GetById) && GetHttpMethods(e).Contains("GET"));
+            getBannerById.Should().NotBeNull();
+            GetFullRoutePattern(getBannerById!).Should().BeEquivalentTo("api/v1/banners/{id:guid}");
+            AssertAuthorizePolicy(getBannerById!, Policies.ContentManager);
+
+            // 4. POST api/v1/banners (Policies.ContentManager) - Action: Create
+            var createBanner = bannerEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(BannersController.Create) && GetHttpMethods(e).Contains("POST"));
+            createBanner.Should().NotBeNull();
+            GetFullRoutePattern(createBanner!).Should().BeEquivalentTo("api/v1/banners");
+            AssertAuthorizePolicy(createBanner!, Policies.ContentManager);
+
+            // 5. PUT api/v1/banners/{id:guid} (Policies.ContentManager) - Action: Update
+            var updateBanner = bannerEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(BannersController.Update) && GetHttpMethods(e).Contains("PUT"));
+            updateBanner.Should().NotBeNull();
+            GetFullRoutePattern(updateBanner!).Should().BeEquivalentTo("api/v1/banners/{id:guid}");
+            AssertAuthorizePolicy(updateBanner!, Policies.ContentManager);
+
+            // 6. DELETE api/v1/banners/{id:guid} (Policies.ContentManager) - Action: Delete
+            var deleteBanner = bannerEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(BannersController.Delete) && GetHttpMethods(e).Contains("DELETE"));
+            deleteBanner.Should().NotBeNull();
+            GetFullRoutePattern(deleteBanner!).Should().BeEquivalentTo("api/v1/banners/{id:guid}");
+            AssertAuthorizePolicy(deleteBanner!, Policies.ContentManager);
 
             #endregion
         }

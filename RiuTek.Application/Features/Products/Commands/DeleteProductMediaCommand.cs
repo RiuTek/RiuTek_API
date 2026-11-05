@@ -66,15 +66,19 @@ public class DeleteProductMediaCommandHandler : IRequestHandler<DeleteProductMed
 
         var publicUrl = _storage.GetPublicUrl(request.ObjectKey);
 
-        var isInUse = await _context.Products
+        var isInUseByProduct = await _context.Products
             .AsNoTracking()
             .AnyAsync(p => p.ImageUrl == publicUrl || p.AdditionalImages.Contains(publicUrl), cancellationToken);
 
-        if (isInUse)
+        var isInUseByBanner = await _context.Banners
+            .AsNoTracking()
+            .AnyAsync(b => b.ImageObjectKey == request.ObjectKey || b.ImageUrl == publicUrl, cancellationToken);
+
+        if (isInUseByProduct || isInUseByBanner)
         {
             return Result.Failure(Error.Conflict(
                 "ProductMedia.InUse",
-                "Media is currently in use by one or more products."));
+                "Media is currently in use by a product or banner."));
         }
 
         return await _storage.DeleteObjectAsync(request.ObjectKey, cancellationToken);

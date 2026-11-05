@@ -415,6 +415,7 @@ internal sealed class TestHookApplicationDbContext : IApplicationDbContext
     public DbSet<Cart> Carts => _inner.Carts;
     public DbSet<CartItem> CartItems => _inner.CartItems;
     public DbSet<StockMovement> StockMovements => _inner.StockMovements;
+    public DbSet<Banner> Banners => _inner.Banners;
 
     public async Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
     {

@@ -132,6 +132,7 @@ public class ProductMediaIntegrationTests : IAsyncLifetime
         await using var tx = await db.Database.BeginTransactionAsync();
         try
         {
+            await db.Banners.ExecuteDeleteAsync();
             await db.StockMovements.ExecuteDeleteAsync();
             await db.Products.ExecuteDeleteAsync();
             await db.Categories.ExecuteDeleteAsync();
