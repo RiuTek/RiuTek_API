@@ -33,13 +33,17 @@ public record GroqStructuredPlan(
     bool? InStockOnly = null,
     IReadOnlyDictionary<string, string>? TechnicalCriteria = null,
     IReadOnlyList<string>? RequiredFacts = null,
-    string? ClarificationQuestion = null);
+    string? ClarificationQuestion = null,
+    int? MinPsuWattage = null,
+    int? ExactPsuWattage = null);
 
 public record GroqWebSearchResult(
     string FactKey,
     string Summary,
     string SourceTitle,
-    string SourceUrl);
+    string SourceUrl,
+    string? ProductKey = null,
+    string? ModelName = null);
 
 public record FaqEntry(
     string Key,

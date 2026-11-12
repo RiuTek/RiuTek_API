@@ -56,7 +56,8 @@ public record ProductFilterOptions(
     IReadOnlyList<int>? RamCapacitiesGb = null,
     IReadOnlyList<int>? RamSpeedsMhz = null,
     IReadOnlyList<int>? StorageCapacitiesGb = null,
-    IReadOnlyList<int>? PsuWattages = null
+    IReadOnlyList<int>? PsuWattages = null,
+    int? MinPsuWattage = null
 );
 
 public class ProductFilterOptionsValidator : AbstractValidator<ProductFilterOptions>
@@ -316,6 +317,11 @@ public class ProductFilterOptionsValidator : AbstractValidator<ProductFilterOpti
             .Must(l => l == null || l.All(v => v > 0))
             .WithMessage("Công suất nguồn phải lớn hơn 0.");
 
+        RuleFor(x => x.MinPsuWattage)
+            .GreaterThan(0)
+            .When(x => x.MinPsuWattage.HasValue)
+            .WithMessage("Công suất nguồn tối thiểu phải lớn hơn 0.");
+
         // If any technical filter is present, ComponentType is required
         RuleFor(x => x.ComponentType)
             .NotNull()
@@ -483,6 +489,11 @@ public class ProductFilterOptionsValidator : AbstractValidator<ProductFilterOpti
             .Must((options, _) => options.ComponentType is ComponentType.Psu)
             .When(x => x.ComponentType.HasValue && x.PsuWattages != null && x.PsuWattages.Count > 0)
             .WithMessage("Bộ lọc công suất nguồn chỉ áp dụng cho Nguồn máy tính (PSU).");
+
+        RuleFor(x => x.MinPsuWattage)
+            .Must((options, _) => options.ComponentType is ComponentType.Psu)
+            .When(x => x.ComponentType.HasValue && x.MinPsuWattage.HasValue)
+            .WithMessage("Bộ lọc công suất nguồn tối thiểu chỉ áp dụng cho Nguồn máy tính (PSU).");
     }
 
     public static bool HasAnyTechnicalFilter(ProductFilterOptions x) =>
@@ -501,6 +512,7 @@ public class ProductFilterOptionsValidator : AbstractValidator<ProductFilterOpti
         x.HasRgb.HasValue ||
         x.Has12VHPWR.HasValue ||
         x.Requires12VHPWR.HasValue ||
+        x.MinPsuWattage.HasValue ||
         (x.Sockets != null && x.Sockets.Count > 0) ||
         (x.MemoryTypes != null && x.MemoryTypes.Count > 0) ||
         (x.MotherboardFormFactors != null && x.MotherboardFormFactors.Count > 0) ||

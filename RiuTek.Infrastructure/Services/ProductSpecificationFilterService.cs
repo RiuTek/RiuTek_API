@@ -276,6 +276,35 @@ public class ProductSpecificationFilterService : IProductSpecificationFilterServ
             }
         }
 
+        // 17b. MinPsuWattage: Psu (Wattage >= MinPsuWattage)
+        if (options.MinPsuWattage is > 0 && componentType is ComponentType.Psu &&
+            _context != null && _context.Database.IsRelational())
+        {
+            var minWattage = options.MinPsuWattage.Value;
+            var psuComponentType = (int)ComponentType.Psu;
+
+            var matchingPsuIds = _context.Database.SqlQuery<Guid>(
+                $"""
+                SELECT p."Id" AS "Value"
+                FROM "Products" p
+                WHERE p."ComponentType" = {psuComponentType}
+                  AND p."Specifications" IS NOT NULL
+                  AND jsonb_typeof(p."Specifications") = 'object'
+                  AND (p."Specifications"->>'Wattage') ~ '^[0-9]+$'
+                  AND ltrim(p."Specifications"->>'Wattage', '0') <> ''
+                  AND (
+                      length(ltrim(p."Specifications"->>'Wattage', '0')) < 10
+                      OR (
+                          length(ltrim(p."Specifications"->>'Wattage', '0')) = 10
+                          AND (ltrim(p."Specifications"->>'Wattage', '0') COLLATE "C") <= '2147483647'
+                      )
+                  )
+                  AND (ltrim(p."Specifications"->>'Wattage', '0'))::int >= {minWattage}
+                """);
+
+            query = query.Where(p => matchingPsuIds.Contains(p.Id));
+        }
+
         // 18. HasIntegratedGpu: Cpu (HasIntegratedGpu)
         if (options.HasIntegratedGpu.HasValue && componentType is ComponentType.Cpu)
         {

@@ -1,5 +1,6 @@
-using System.Diagnostics;
 using System.Globalization;
+using System.Diagnostics;
+using System.Text.RegularExpressions;
 using FluentValidation;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
@@ -69,6 +70,11 @@ public class AskAiConsultantQueryValidator : AbstractValidator<AskAiConsultantQu
 
 public class AskAiConsultantQueryHandler : IRequestHandler<AskAiConsultantQuery, Result<AiConsultantResponseDto>>
 {
+    private sealed record ProductMissingFactsTarget(
+        string ProductKey,
+        string BrandAndModel,
+        IReadOnlyList<string> MissingFacts);
+
     private static readonly HashSet<string> ChipsetVendors = new(StringComparer.OrdinalIgnoreCase)
     {
         "amd", "nvidia", "geforce", "radeon", "intel", "arc", "rtx", "gtx", "rx"
@@ -202,16 +208,21 @@ public class AskAiConsultantQueryHandler : IRequestHandler<AskAiConsultantQuery,
                 return Result.Success(clarifyResponse);
             }
 
-            // 3. Resolve catalog products & FAQ
+            // 3. Resolve catalog products & FAQ / unpublished policy intent
             var matchedFaqs = CuratedFaqRepository.FindMatching(question, plan.RequiredFacts);
+            var unpublishedPolicyKeys = CuratedFaqRepository.DetectUnpublishedPolicyKeys(question, plan.RequiredFacts);
+            var hasNoProductTargets = (plan.TargetProducts == null || plan.TargetProducts.Count == 0) &&
+                                      string.IsNullOrWhiteSpace(productSlug);
 
-            if (taskType == "faq" && (plan.TargetProducts == null || plan.TargetProducts.Count == 0) && string.IsNullOrWhiteSpace(productSlug))
+            if ((taskType == "faq" || unpublishedPolicyKeys.Count > 0) &&
+                taskType != "recommend" &&
+                hasNoProductTargets)
             {
                 if (matchedFaqs.Count == 0)
                 {
                     var noFaqResponse = new AiConsultantResponseDto(
                         Status: "insufficient_data",
-                        Answer: "Hiện tại RiuTek chưa có thông tin chính sách chi tiết cho câu hỏi này. Bạn vui lòng liên hệ bộ phận chăm sóc khách hàng để được hỗ trợ trực tiếp.",
+                        Answer: CuratedFaqRepository.BuildStandaloneUnpublishedPolicyAnswer(),
                         Products: [],
                         Sources: []);
                     LogMetadata(requestId, analysisCalls, webCalls, synthesisCalls, sw.ElapsedMilliseconds, noFaqResponse.Status);
@@ -316,8 +327,9 @@ public class AskAiConsultantQueryHandler : IRequestHandler<AskAiConsultantQuery,
                 }
             }
 
-            // 5. Determine missing technical facts and web search eligibility
-            var missingTechnicalFacts = new List<string>();
+            // 5. Determine missing technical facts per product (ProductKey, FactKey)
+            var targetsWithMissingFacts = new List<ProductMissingFactsTarget>();
+
             if (catalogProducts.Count > 0)
             {
                 foreach (var prod in catalogProducts)
@@ -325,23 +337,36 @@ public class AskAiConsultantQueryHandler : IRequestHandler<AskAiConsultantQuery,
                     var missingForProd = ProductSpecFactExtractor.FindMissingTechnicalFacts(
                         plan.RequiredFacts,
                         productFactsBySku[prod.Sku]);
-                    foreach (var mf in missingForProd)
+
+                    if (missingForProd.Count > 0)
                     {
-                        if (!missingTechnicalFacts.Contains(mf, StringComparer.OrdinalIgnoreCase))
-                        {
-                            missingTechnicalFacts.Add(mf);
-                        }
+                        targetsWithMissingFacts.Add(new ProductMissingFactsTarget(
+                            ProductKey: prod.Sku,
+                            BrandAndModel: $"{prod.Brand} {prod.Name}".Trim(),
+                            MissingFacts: missingForProd));
                     }
                 }
             }
-            else if (plan.RequiredFacts is { Count: > 0 })
+            else if (plan.RequiredFacts is { Count: > 0 } &&
+                     plan.TargetProducts is { Count: 1 })
             {
-                foreach (var rf in plan.RequiredFacts)
+                var candidateModel = plan.TargetProducts[0].Trim();
+                var tokens = candidateModel.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (tokens.Length >= 2 && candidateModel.Any(char.IsDigit))
                 {
-                    if (ProductSpecFactExtractor.IsWebSearchableTechnicalFact(rf) &&
-                        !missingTechnicalFacts.Contains(rf, StringComparer.OrdinalIgnoreCase))
+                    var missingForUnlisted = plan.RequiredFacts
+                        .Where(ProductSpecFactExtractor.IsWebSearchableTechnicalFact)
+                        .Select(ProductSpecFactExtractor.NormalizeFactKey)
+                        .Where(f => !string.IsNullOrWhiteSpace(f))
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToList();
+
+                    if (missingForUnlisted.Count > 0)
                     {
-                        missingTechnicalFacts.Add(rf);
+                        targetsWithMissingFacts.Add(new ProductMissingFactsTarget(
+                            ProductKey: candidateModel,
+                            BrandAndModel: candidateModel,
+                            MissingFacts: missingForUnlisted));
                     }
                 }
             }
@@ -349,13 +374,11 @@ public class AskAiConsultantQueryHandler : IRequestHandler<AskAiConsultantQuery,
             var webFacts = new List<GroqWebSearchResult>();
             var webBranchDegraded = false;
 
-            var canIdentifyModelForWeb = DetermineModelForWebSearch(catalogProducts, plan.TargetProducts);
-            var isEligibleForWebSearch =
-                (taskType is "product_info" or "compare") &&
-                missingTechnicalFacts.Count > 0 &&
-                !string.IsNullOrWhiteSpace(canIdentifyModelForWeb);
+            var primaryWebTarget = (taskType is "product_info" or "compare")
+                ? targetsWithMissingFacts.FirstOrDefault()
+                : null;
 
-            if (isEligibleForWebSearch)
+            if (primaryWebTarget != null)
             {
                 if (!_settings.WebSearchEnabled)
                 {
@@ -389,13 +412,46 @@ public class AskAiConsultantQueryHandler : IRequestHandler<AskAiConsultantQuery,
                         {
                             webCalls++;
                             var webResult = await _groqClient.SearchWebForTechnicalFactsAsync(
-                                canIdentifyModelForWeb!,
-                                missingTechnicalFacts,
+                                primaryWebTarget.BrandAndModel,
+                                primaryWebTarget.MissingFacts,
                                 cancellationToken);
 
                             if (webResult.IsSuccess && webResult.Value.Count > 0)
                             {
-                                webFacts.AddRange(webResult.Value);
+                                var targetMissingSet = primaryWebTarget.MissingFacts
+                                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                                foreach (var rawWf in webResult.Value)
+                                {
+                                    if (!ProductSpecFactExtractor.IsEvidenceValidForTarget(
+                                        rawWf,
+                                        primaryWebTarget.BrandAndModel,
+                                        primaryWebTarget.ProductKey,
+                                        targetMissingSet))
+                                    {
+                                        continue;
+                                    }
+
+                                    var normalizedKey = ProductSpecFactExtractor.NormalizeFactKey(rawWf.FactKey);
+                                    if (webFacts.Any(existing =>
+                                        string.Equals(existing.ProductKey, primaryWebTarget.ProductKey, StringComparison.OrdinalIgnoreCase) &&
+                                        string.Equals(existing.FactKey, normalizedKey, StringComparison.OrdinalIgnoreCase)))
+                                    {
+                                        continue;
+                                    }
+
+                                    webFacts.Add(rawWf with
+                                    {
+                                        FactKey = normalizedKey,
+                                        ProductKey = primaryWebTarget.ProductKey,
+                                        ModelName = primaryWebTarget.BrandAndModel
+                                    });
+                                }
+
+                                if (webFacts.Count == 0)
+                                {
+                                    webBranchDegraded = true;
+                                }
                             }
                             else
                             {
@@ -406,15 +462,40 @@ public class AskAiConsultantQueryHandler : IRequestHandler<AskAiConsultantQuery,
                 }
             }
 
-            var unresolvedMissingFacts = missingTechnicalFacts
-                .Where(mf => !webFacts.Any(wf => string.Equals(wf.FactKey, mf, StringComparison.OrdinalIgnoreCase)))
-                .ToList();
+            // Compute unresolved missing technical facts per product (ProductKey, FactKey)
+            var unresolvedMissingFacts = new List<string>();
+            foreach (var target in targetsWithMissingFacts)
+            {
+                foreach (var mf in target.MissingFacts)
+                {
+                    var isVerifiedForTarget = webFacts.Any(wf =>
+                        string.Equals(wf.ProductKey, target.ProductKey, StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(wf.FactKey, mf, StringComparison.OrdinalIgnoreCase));
 
-            var hasUnresolvedFacts = unresolvedMissingFacts.Count > 0 || webBranchDegraded;
+                    if (!isVerifiedForTarget)
+                    {
+                        unresolvedMissingFacts.Add($"{target.ProductKey}:{mf}");
+                    }
+                }
+            }
+
+            var hasUnpublishedPolicyInTurn = unpublishedPolicyKeys.Count > 0;
+            var hasUnresolvedFacts = unresolvedMissingFacts.Count > 0 || webBranchDegraded || hasUnpublishedPolicyInTurn;
 
             // If no catalog products, no FAQ, and no verified web facts
             if (catalogProducts.Count == 0 && matchedFaqs.Count == 0 && webFacts.Count == 0)
             {
+                if (hasUnpublishedPolicyInTurn && (plan.TargetProducts == null || plan.TargetProducts.Count == 0))
+                {
+                    var policyInsufficient = new AiConsultantResponseDto(
+                        Status: "insufficient_data",
+                        Answer: CuratedFaqRepository.BuildStandaloneUnpublishedPolicyAnswer(),
+                        Products: [],
+                        Sources: []);
+                    LogMetadata(requestId, analysisCalls, webCalls, synthesisCalls, sw.ElapsedMilliseconds, policyInsufficient.Status);
+                    return Result.Success(policyInsufficient);
+                }
+
                 var noDataStatus = (plan.TargetProducts == null || plan.TargetProducts.Count == 0)
                     ? "needs_clarification"
                     : "insufficient_data";
@@ -486,6 +567,13 @@ public class AskAiConsultantQueryHandler : IRequestHandler<AskAiConsultantQuery,
                     synthQuota.IsRedisUnavailable
                         ? Error.Unavailable("Ai.QuotaUnavailable", "Hệ thống kiểm soát hạn mức AI tạm thời gián đoạn.")
                         : Error.TooManyRequests("Ai.ProviderLimitExceeded", "Hệ thống AI đã đạt giới hạn phục vụ trong ngày.", synthQuota.RetryAfterSeconds));
+            }
+
+            if (hasUnpublishedPolicyInTurn &&
+                !finalAnswer.Contains("chưa được công bố", StringComparison.OrdinalIgnoreCase) &&
+                !finalAnswer.Contains("chưa công bố", StringComparison.OrdinalIgnoreCase))
+            {
+                finalAnswer = $"{finalAnswer} {CuratedFaqRepository.BuildMixedUnpublishedPolicyNotice()}".Trim();
             }
 
             if (hasUnresolvedFacts && finalStatus == "answered")
@@ -583,6 +671,41 @@ public class AskAiConsultantQueryHandler : IRequestHandler<AskAiConsultantQuery,
         string question,
         CancellationToken cancellationToken)
     {
+        var filterOptions = BuildRecommendationFilterOptions(plan, question, out var invalidFilterResponse);
+        if (invalidFilterResponse != null || filterOptions == null)
+        {
+            return ([], invalidFilterResponse);
+        }
+
+        var queryResult = await _mediator.Send(new GetProductsQuery(filterOptions), cancellationToken);
+        if (queryResult.IsFailure || queryResult.Value.Items.Count == 0)
+        {
+            return ([], null);
+        }
+
+        var summaryIds = queryResult.Value.Items.Take(5).Select(i => i.Id).ToList();
+        var products = await _context.Products
+            .AsNoTracking()
+            .Where(p => summaryIds.Contains(p.Id))
+            .Select(ProductMappingExtensions.ToDtoProjection)
+            .ToListAsync(cancellationToken);
+
+        var ordered = summaryIds
+            .Select(id => products.FirstOrDefault(p => p.Id == id))
+            .Where(p => p != null)
+            .Cast<ProductDto>()
+            .ToList();
+
+        return (ordered, null);
+    }
+
+    public static ProductFilterOptions? BuildRecommendationFilterOptions(
+        GroqStructuredPlan plan,
+        string question,
+        out AiConsultantResponseDto? invalidFilterResponse)
+    {
+        invalidFilterResponse = null;
+
         ComponentType? componentType = null;
         if (!string.IsNullOrWhiteSpace(plan.ComponentType) &&
             Enum.TryParse<ComponentType>(plan.ComponentType.Trim(), ignoreCase: true, out var parsedComp))
@@ -627,6 +750,93 @@ public class AskAiConsultantQueryHandler : IRequestHandler<AskAiConsultantQuery,
         List<int>? ramCapacities = null;
         List<int>? storageCapacities = null;
         List<int>? psuWattages = null;
+        int? minPsuWattage = null;
+
+        // Validate and map PSU wattage filters (minimum vs exact)
+        var hasMinWattageCriteriaKey = plan.TechnicalCriteria != null &&
+            (plan.TechnicalCriteria.ContainsKey("minWattage") || plan.TechnicalCriteria.ContainsKey("min_psu_wattage"));
+        var hasExactWattageCriteriaKey = plan.TechnicalCriteria != null &&
+            (plan.TechnicalCriteria.ContainsKey("wattage") || plan.TechnicalCriteria.ContainsKey("psuWattage"));
+
+        var hasAnyWattageIntent =
+            plan.MinPsuWattage.HasValue ||
+            plan.ExactPsuWattage.HasValue ||
+            hasMinWattageCriteriaKey ||
+            hasExactWattageCriteriaKey;
+
+        if (hasAnyWattageIntent)
+        {
+            if (componentType != ComponentType.Psu)
+            {
+                invalidFilterResponse = new AiConsultantResponseDto(
+                    Status: "insufficient_data",
+                    Answer: "Bộ lọc công suất nguồn (Wattage) chỉ áp dụng khi tìm kiếm Nguồn máy tính (PSU) với giá trị số nguyên dương hợp lệ.",
+                    Products: [],
+                    Sources: []);
+                return null;
+            }
+
+            var isMinimumWattageIntent = IsMinimumWattageQuestion(question);
+
+            if (plan.MinPsuWattage.HasValue)
+            {
+                if (plan.MinPsuWattage.Value <= 0)
+                {
+                    invalidFilterResponse = BuildInvalidWattageResponse();
+                    return null;
+                }
+                minPsuWattage = plan.MinPsuWattage.Value;
+            }
+            else if (hasMinWattageCriteriaKey)
+            {
+                var rawMin = plan.TechnicalCriteria!.TryGetValue("minWattage", out var v1) ? v1 : plan.TechnicalCriteria["min_psu_wattage"];
+                if (!TryParsePositiveWattage(rawMin, out var parsedMin))
+                {
+                    invalidFilterResponse = BuildInvalidWattageResponse();
+                    return null;
+                }
+                minPsuWattage = parsedMin;
+            }
+
+            if (!minPsuWattage.HasValue)
+            {
+                if (plan.ExactPsuWattage.HasValue)
+                {
+                    if (plan.ExactPsuWattage.Value <= 0)
+                    {
+                        invalidFilterResponse = BuildInvalidWattageResponse();
+                        return null;
+                    }
+
+                    if (isMinimumWattageIntent)
+                    {
+                        minPsuWattage = plan.ExactPsuWattage.Value;
+                    }
+                    else
+                    {
+                        psuWattages = [plan.ExactPsuWattage.Value];
+                    }
+                }
+                else if (hasExactWattageCriteriaKey)
+                {
+                    var rawExact = plan.TechnicalCriteria!.TryGetValue("wattage", out var v1) ? v1 : plan.TechnicalCriteria["psuWattage"];
+                    if (!TryParsePositiveWattage(rawExact, out var parsedWatt))
+                    {
+                        invalidFilterResponse = BuildInvalidWattageResponse();
+                        return null;
+                    }
+
+                    if (isMinimumWattageIntent || rawExact.Contains(">=", StringComparison.Ordinal) || rawExact.Contains('+'))
+                    {
+                        minPsuWattage = parsedWatt;
+                    }
+                    else
+                    {
+                        psuWattages = [parsedWatt];
+                    }
+                }
+            }
+        }
 
         if (plan.TechnicalCriteria != null)
         {
@@ -674,7 +884,7 @@ public class AskAiConsultantQueryHandler : IRequestHandler<AskAiConsultantQuery,
 
             if (componentType == ComponentType.Gpu &&
                 plan.TechnicalCriteria.TryGetValue("vramGb", out var rawVram) &&
-                int.TryParse( ExtractDigits(rawVram), out var vram) && vram > 0)
+                int.TryParse(ExtractDigits(rawVram), out var vram) && vram > 0)
             {
                 vramGbs = [vram];
             }
@@ -692,13 +902,6 @@ public class AskAiConsultantQueryHandler : IRequestHandler<AskAiConsultantQuery,
             {
                 storageCapacities = [stoCap];
             }
-
-            if (componentType == ComponentType.Psu &&
-                plan.TechnicalCriteria.TryGetValue("wattage", out var rawWatt) &&
-                int.TryParse(ExtractDigits(rawWatt), out var watt) && watt > 0)
-            {
-                psuWattages = [watt];
-            }
         }
 
         decimal? minPrice = plan.MinPrice is >= 0 ? plan.MinPrice : null;
@@ -708,7 +911,7 @@ public class AskAiConsultantQueryHandler : IRequestHandler<AskAiConsultantQuery,
             (minPrice, maxPrice) = (maxPrice, minPrice);
         }
 
-        var filterOptions = new ProductFilterOptions(
+        return new ProductFilterOptions(
             PageIndex: 1,
             PageSize: 5,
             SearchTerm: searchTerm,
@@ -728,53 +931,47 @@ public class AskAiConsultantQueryHandler : IRequestHandler<AskAiConsultantQuery,
             VramGbs: vramGbs,
             RamCapacitiesGb: ramCapacities,
             StorageCapacitiesGb: storageCapacities,
-            PsuWattages: psuWattages);
-
-        var queryResult = await _mediator.Send(new GetProductsQuery(filterOptions), cancellationToken);
-        if (queryResult.IsFailure || queryResult.Value.Items.Count == 0)
-        {
-            return ([], null);
-        }
-
-        var summaryIds = queryResult.Value.Items.Take(5).Select(i => i.Id).ToList();
-        var products = await _context.Products
-            .AsNoTracking()
-            .Where(p => summaryIds.Contains(p.Id))
-            .Select(ProductMappingExtensions.ToDtoProjection)
-            .ToListAsync(cancellationToken);
-
-        var ordered = summaryIds
-            .Select(id => products.FirstOrDefault(p => p.Id == id))
-            .Where(p => p != null)
-            .Cast<ProductDto>()
-            .ToList();
-
-        return (ordered, null);
+            PsuWattages: psuWattages,
+            MinPsuWattage: minPsuWattage);
     }
 
-    private static string? DetermineModelForWebSearch(
-        IReadOnlyList<ProductDto> catalogProducts,
-        IReadOnlyList<string>? targetProducts)
+    private static bool IsMinimumWattageQuestion(string? question)
     {
-        if (catalogProducts.Count > 0)
+        if (string.IsNullOrWhiteSpace(question))
         {
-            var p = catalogProducts[0];
-            return $"{p.Brand} {p.Name}".Trim();
+            return false;
         }
 
-        if (targetProducts is { Count: 1 })
-        {
-            var candidate = targetProducts[0].Trim();
-            // Require at least 2 tokens (e.g. brand/series + model number) so vague queries don't trigger web search
-            var tokens = candidate.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            if (tokens.Length >= 2 && candidate.Any(char.IsDigit))
-            {
-                return candidate;
-            }
-        }
-
-        return null;
+        return Regex.IsMatch(
+            question,
+            @"(trở\s+lên|tối\s+thiểu|ít\s+nhất|>=\s*\d+|\btrên\s+\d+\s*w|\bfrom\s+\d+\s*w|\bat\s+least\s+\d+\s*w)",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     }
+
+    private static bool TryParsePositiveWattage(string? rawValue, out int wattage)
+    {
+        wattage = 0;
+        if (string.IsNullOrWhiteSpace(rawValue))
+        {
+            return false;
+        }
+
+        var trimmed = rawValue.Trim();
+        if (trimmed.StartsWith('-'))
+        {
+            return false;
+        }
+
+        var digits = ExtractDigits(trimmed);
+        return int.TryParse(digits, NumberStyles.None, CultureInfo.InvariantCulture, out wattage) && wattage > 0;
+    }
+
+    private static AiConsultantResponseDto BuildInvalidWattageResponse() =>
+        new(
+            Status: "insufficient_data",
+            Answer: "Mức công suất nguồn (Wattage) yêu cầu không hợp lệ. Bạn vui lòng nhập mức công suất là số nguyên dương (ví dụ: 650W hoặc từ 650W trở lên).",
+            Products: [],
+            Sources: []);
 
     private static string NormalizeTaskType(string? rawTaskType)
     {
@@ -816,20 +1013,26 @@ public class AskAiConsultantQueryHandler : IRequestHandler<AskAiConsultantQuery,
         if (catalogProducts.Count > 0)
         {
             var usedCatalogKeys = supportingKeys
-                .Where(k => catalogFactKeys.Contains(k))
+                .Where(k => !CuratedFaqRepository.IsPolicyFactKey(k) && catalogFactKeys.Contains(k))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();
 
             if (usedCatalogKeys.Count == 0)
             {
-                usedCatalogKeys = catalogFactKeys.Take(6).ToList();
+                usedCatalogKeys = catalogFactKeys
+                    .Where(k => !CuratedFaqRepository.IsPolicyFactKey(k))
+                    .Take(6)
+                    .ToList();
             }
 
-            sources.Add(new AiSourceDto(
-                Kind: "catalog",
-                Title: "Danh mục sản phẩm RiuTek",
-                Url: null,
-                FactKeys: usedCatalogKeys));
+            if (usedCatalogKeys.Count > 0)
+            {
+                sources.Add(new AiSourceDto(
+                    Kind: "catalog",
+                    Title: "Danh mục sản phẩm RiuTek",
+                    Url: null,
+                    FactKeys: usedCatalogKeys));
+            }
         }
 
         foreach (var faq in matchedFaqs)
@@ -841,16 +1044,41 @@ public class AskAiConsultantQueryHandler : IRequestHandler<AskAiConsultantQuery,
                 FactKeys: [faq.Key]));
         }
 
-        foreach (var wf in webFacts)
+        var groupedWebFacts = webFacts
+            .Where(wf => !string.IsNullOrWhiteSpace(wf.SourceUrl) &&
+                         !string.IsNullOrWhiteSpace(wf.FactKey) &&
+                         !CuratedFaqRepository.IsPolicyFactKey(wf.FactKey))
+            .GroupBy(
+                wf => $"{wf.ProductKey ?? string.Empty}|{wf.SourceUrl.Trim()}",
+                StringComparer.OrdinalIgnoreCase);
+
+        foreach (var grp in groupedWebFacts)
         {
-            if (!string.IsNullOrWhiteSpace(wf.SourceUrl))
+            var verifiedFactKeys = grp
+                .Select(wf => wf.FactKey)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (verifiedFactKeys.Count == 0)
             {
-                sources.Add(new AiSourceDto(
-                    Kind: "manufacturer",
-                    Title: string.IsNullOrWhiteSpace(wf.SourceTitle) ? "Thông số kỹ thuật từ hãng" : wf.SourceTitle,
-                    Url: wf.SourceUrl,
-                    FactKeys: [wf.FactKey]));
+                continue;
             }
+
+            var first = grp.First();
+            var baseTitle = string.IsNullOrWhiteSpace(first.SourceTitle)
+                ? "Thông số kỹ thuật từ hãng"
+                : first.SourceTitle.Trim();
+
+            var titleWithModel = !string.IsNullOrWhiteSpace(first.ModelName) &&
+                                 !baseTitle.Contains(first.ModelName, StringComparison.OrdinalIgnoreCase)
+                ? $"{baseTitle} ({first.ModelName})"
+                : baseTitle;
+
+            sources.Add(new AiSourceDto(
+                Kind: "manufacturer",
+                Title: titleWithModel,
+                Url: first.SourceUrl,
+                FactKeys: verifiedFactKeys));
         }
 
         return sources;

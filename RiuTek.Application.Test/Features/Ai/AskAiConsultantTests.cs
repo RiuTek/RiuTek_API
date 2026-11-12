@@ -131,6 +131,57 @@ public class AskAiConsultantTests
         }
     }
 
+    private sealed class FakeInMemorySpecFilterService : IProductSpecificationFilterService
+    {
+        private readonly TestApplicationDbContext _context;
+        public ProductFilterOptions? LastAppliedOptions { get; private set; }
+
+        public FakeInMemorySpecFilterService(TestApplicationDbContext context)
+        {
+            _context = context;
+        }
+
+        public IQueryable<Product> Apply(IQueryable<Product> query, ProductFilterOptions options)
+        {
+            LastAppliedOptions = options;
+            if (options.ComponentType == ComponentType.Psu)
+            {
+                if (options.MinPsuWattage is > 0)
+                {
+                    var minW = options.MinPsuWattage.Value;
+                    var matchingIds = _context.Products
+                        .AsEnumerable()
+                        .Where(p => p.ComponentType == ComponentType.Psu &&
+                                    p.Specifications is PsuSpecification psu &&
+                                    psu.Wattage >= minW)
+                        .Select(p => p.Id)
+                        .ToList();
+                    query = query.Where(p => matchingIds.Contains(p.Id));
+                }
+
+                if (options.PsuWattages is { Count: > 0 })
+                {
+                    var wattSet = options.PsuWattages.ToHashSet();
+                    var matchingIds = _context.Products
+                        .AsEnumerable()
+                        .Where(p => p.ComponentType == ComponentType.Psu &&
+                                    p.Specifications is PsuSpecification psu &&
+                                    wattSet.Contains(psu.Wattage))
+                        .Select(p => p.Id)
+                        .ToList();
+                    query = query.Where(p => matchingIds.Contains(p.Id));
+                }
+            }
+
+            return query;
+        }
+
+        public Task<ProductFilterOptionsDto> GetFilterOptionsAsync(
+            ProductFilterScope scope,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(new ProductFilterOptionsDto([], []));
+    }
+
     private static (TestApplicationDbContext Context, Mock<ISender> MediatorMock) SetupDbAndMediator()
     {
         var context = TestDbContextFactory.CreateInMemoryDbContext();
@@ -141,7 +192,7 @@ public class AskAiConsultantTests
             .Returns<GetProductBySlugQuery, CancellationToken>((q, ct) =>
                 new GetProductBySlugQueryHandler(context).Handle(q, ct));
 
-        var specFilterService = new ProductSpecificationFilterService();
+        var specFilterService = new FakeInMemorySpecFilterService(context);
 
         mediatorMock
             .Setup(m => m.Send(It.IsAny<GetProductsQuery>(), It.IsAny<CancellationToken>()))
@@ -159,11 +210,14 @@ public class AskAiConsultantTests
         string sku = "CPU-INTEL-14600K",
         decimal price = 7890000m,
         int stock = 10,
-        int tdp = 125)
+        int tdp = 125,
+        string brand = "Intel",
+        CpuSocket socket = CpuSocket.LGA1700,
+        int l3CacheMb = 0)
     {
         var spec = new CpuSpecification
         {
-            Socket = CpuSocket.LGA1700,
+            Socket = socket,
             CoreCount = 14,
             ThreadCount = 20,
             BaseClockGhz = 3.5,
@@ -171,10 +225,11 @@ public class AskAiConsultantTests
             TdpWattage = tdp,
             HasIntegratedGpu = true,
             SupportedMemoryType = RamType.DDR5,
-            MaxMemorySpeedMhz = 5600
+            MaxMemorySpeedMhz = 5600,
+            L3CacheMb = l3CacheMb
         };
 
-        var prod = new Product(category.Id, name, slug, sku, "Intel", price, stock, "https://example.com/cpu.png", ComponentType.Cpu, spec);
+        var prod = new Product(category.Id, name, slug, sku, brand, price, stock, "https://example.com/cpu.png", ComponentType.Cpu, spec);
         context.Products.Add(prod);
         context.SaveChanges();
         return prod;
@@ -522,80 +577,6 @@ public class AskAiConsultantTests
     }
 
     [Fact]
-    public void ExtractVerifiedWebEvidence_RejectsMissingUrlFakeDomainAndWrongModel()
-    {
-        var jsonWithRetailAndWrongModel = """
-        {
-          "choices": [
-            {
-              "message": {
-                "content": "TDP is 125W [Fake link](https://shopee.vn/cpu-14600k)",
-                "executed_tools": [
-                  {
-                    "search_results": {
-                      "results": [
-                        {
-                          "title": "Shopee Intel 14600K",
-                          "url": "https://shopee.vn/intel-14600k",
-                          "content": "Intel Core i5-14600K 125W"
-                        },
-                        {
-                          "title": "Fake domain boundary",
-                          "url": "https://fake-intel.com/14600k",
-                          "content": "Intel Core i5-14600K 125W"
-                        },
-                        {
-                          "title": "Wrong model Intel 14900K",
-                          "url": "https://www.intel.com/14900k",
-                          "content": "Intel Core i9-14900K specifications"
-                        }
-                      ]
-                    }
-                  }
-                ]
-              }
-            }
-          ]
-        }
-        """;
-
-        using var doc1 = JsonDocument.Parse(jsonWithRetailAndWrongModel);
-        var evidence1 = GroqClient.ExtractVerifiedWebEvidence(doc1.RootElement, "Intel Core i5-14600K", ["tdpWattage"]);
-        evidence1.Should().BeEmpty();
-
-        var jsonWithValidOfficialSource = """
-        {
-          "choices": [
-            {
-              "message": {
-                "content": "Intel Core i5-14600K has 24MB L3 Cache.",
-                "executed_tools": [
-                  {
-                    "search_results": {
-                      "results": [
-                        {
-                          "title": "Intel Core i5-14600K Official Specs",
-                          "url": "https://www.intel.com/content/www/us/en/products/14600k.html",
-                          "content": "Intel Core i5-14600K 24 MB Intel Smart Cache"
-                        }
-                      ]
-                    }
-                  }
-                ]
-              }
-            }
-          ]
-        }
-        """;
-
-        using var doc2 = JsonDocument.Parse(jsonWithValidOfficialSource);
-        var evidence2 = GroqClient.ExtractVerifiedWebEvidence(doc2.RootElement, "Intel Core i5-14600K", ["l3CacheMb"]);
-        evidence2.Should().ContainSingle(e =>
-            e.FactKey == "l3CacheMb" &&
-            e.SourceUrl == "https://www.intel.com/content/www/us/en/products/14600k.html");
-    }
-
-    [Fact]
     public async Task Handle_NewSkuNotInPrompt_ResolvesFromCatalogWithZeroWebCalls()
     {
         var (context, mediatorMock) = SetupDbAndMediator();
@@ -604,7 +585,7 @@ public class AskAiConsultantTests
         context.SaveChanges();
 
         var dynamicSku = $"SKU-DYNAMIC-{Guid.NewGuid().ToString("N")[..8].ToUpperInvariant()}";
-        SeedCpuProduct(context, cat, "AMD Ryzen 7 9800X3D", "amd-ryzen-7-9800x3d", dynamicSku, 13990000m, stock: 3);
+        SeedCpuProduct(context, cat, "AMD Ryzen 7 9800X3D", "amd-ryzen-7-9800x3d", dynamicSku, 13990000m, stock: 3, brand: "AMD", socket: CpuSocket.AM5);
 
         var settings = new FakeAiRuntimeSettings { WebSearchEnabled = true };
         var quota = new FakeAiQuotaService();
@@ -725,7 +706,7 @@ public class AskAiConsultantTests
             [
                 new GroqWebSearchResult(
                     FactKey: "maxTurboPowerW",
-                    Summary: "Processor Base Power is 125W, Maximum Turbo Power is 181W.",
+                    Summary: "Intel Core i5-14600K Processor Base Power is 125W, Maximum Turbo Power is 181W.",
                     SourceTitle: "Intel Ark i5-14600K",
                     SourceUrl: "https://www.intel.com/content/www/us/en/products/sku/236799/specifications.html")
             ]),
@@ -747,5 +728,590 @@ public class AskAiConsultantTests
         result.Value.Sources.Should().Contain(s => s.Kind == "catalog");
         result.Value.Sources.Should().Contain(s => s.Kind == "manufacturer" && s.Url!.Contains("intel.com"));
         groq.WebSearchCallCount.Should().Be(1);
+    }
+
+    // =========================================================================
+    // REVIEW FIX 1: Unapproved FAQ (shipping, warranty, returns, payment)
+    // =========================================================================
+
+    [Theory]
+    [InlineData("shipping", "RiuTek giao hàng nội thành và ngoại tỉnh mất mấy ngày?")]
+    [InlineData("warranty", "Chính sách bảo hành linh kiện tại RiuTek là bao nhiêu tháng?")]
+    [InlineData("returns", "Mua hàng tại RiuTek được đổi trả trong bao nhiêu ngày?")]
+    [InlineData("payment", "Shop có hỗ trợ thanh toán COD và trả góp không?")]
+    public async Task Handle_UnpublishedPolicyQuestions_ReturnsInsufficientDataEmptySourcesAndNoFabricatedPolicy(
+        string policyKey,
+        string question)
+    {
+        var (context, mediatorMock) = SetupDbAndMediator();
+        var settings = new FakeAiRuntimeSettings { WebSearchEnabled = true };
+        var quota = new FakeAiQuotaService();
+
+        var groq = new FakeGroqClient
+        {
+            OnAnalyze = (_, _, _) => Result.Success(new GroqStructuredPlan(
+                TaskType: "faq",
+                TargetProducts: [],
+                RequiredFacts: [policyKey])),
+            // Even if synthesis were called and tried to fabricate policy text, handler must not use it
+            OnSynthesize = _ => Result.Success(new GroqSynthesisResult(
+                Status: "answered",
+                Answer: "RiuTek giao hàng trong 1-2 ngày, bảo hành 36 tháng, đổi mới 15 ngày và nhận COD.",
+                SupportingFactKeys: [policyKey]))
+        };
+
+        var handler = new AskAiConsultantQueryHandler(
+            mediatorMock.Object, context, settings, quota, groq, NullLogger<AskAiConsultantQueryHandler>.Instance);
+
+        var result = await handler.Handle(
+            new AskAiConsultantQuery(question, null, null, "user:1"),
+            CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Value.Status.Should().Be("insufficient_data");
+        result.Value.Products.Should().BeEmpty();
+        result.Value.Sources.Should().BeEmpty();
+        result.Value.Answer.Should().NotContain("1-2 ngày");
+        result.Value.Answer.Should().NotContain("36 tháng");
+        result.Value.Answer.Should().NotContain("15 ngày");
+        groq.WebSearchCallCount.Should().Be(0);
+        groq.SynthesizeCallCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Handle_MixedCatalogStockAndWarrantyQuestion_ReturnsPartialWithCatalogProductAndNoWarrantySource()
+    {
+        var (context, mediatorMock) = SetupDbAndMediator();
+        var cat = new Category("CPU", "cpu", ComponentType.Cpu, "Vi xử lý");
+        context.Categories.Add(cat);
+        context.SaveChanges();
+
+        SeedCpuProduct(context, cat, "Intel Core i5-14600K", "intel-core-i5-14600k", "CPU-INTEL-14600K", 7890000m, stock: 8);
+
+        var settings = new FakeAiRuntimeSettings { WebSearchEnabled = true };
+        var quota = new FakeAiQuotaService();
+        var groq = new FakeGroqClient
+        {
+            OnAnalyze = (_, _, _) => Result.Success(new GroqStructuredPlan(
+                TaskType: "product_info",
+                TargetProducts: ["CPU-INTEL-14600K"],
+                RequiredFacts: ["inStock", "priceVnd", "warranty"])),
+            OnSynthesize = _ => Result.Success(new GroqSynthesisResult(
+                Status: "answered",
+                Answer: "Intel Core i5-14600K hiện còn hàng với giá 7.890.000 VNĐ.",
+                SupportingFactKeys: ["inStock", "priceVnd", "warranty"]))
+        };
+
+        var handler = new AskAiConsultantQueryHandler(
+            mediatorMock.Object, context, settings, quota, groq, NullLogger<AskAiConsultantQueryHandler>.Instance);
+
+        var result = await handler.Handle(
+            new AskAiConsultantQuery("Intel Core i5-14600K còn hàng không và bảo hành bao lâu?", null, null, "user:1"),
+            CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Value.Status.Should().Be("partial");
+        result.Value.Products.Should().ContainSingle(p =>
+            p.Sku == "CPU-INTEL-14600K" &&
+            p.InStock &&
+            p.PriceVnd == 7890000m);
+        result.Value.Answer.Should().Contain("chưa được công bố");
+        result.Value.Sources.Should().ContainSingle(s => s.Kind == "catalog");
+        result.Value.Sources.SelectMany(s => s.FactKeys).Should().NotContain("warranty");
+        result.Value.Sources.Should().NotContain(s => s.Kind == "faq");
+        groq.WebSearchCallCount.Should().Be(0);
+    }
+
+    // =========================================================================
+    // REVIEW FIX 2: Per-(ProductKey, FactKey) Web Evidence & Source Attribution
+    // =========================================================================
+
+    [Fact]
+    public async Task Handle_CompareTwoCpus_WhenCpuAHasL3InCatalogAndCpuBMissesL3_SearchesOnlyCpuBAndRejectsCpuASource()
+    {
+        var (context, mediatorMock) = SetupDbAndMediator();
+        var cat = new Category("CPU", "cpu", ComponentType.Cpu, "Vi xử lý");
+        context.Categories.Add(cat);
+        context.SaveChanges();
+
+        // CPU A has L3CacheMb = 24 in catalog
+        SeedCpuProduct(
+            context,
+            cat,
+            name: "Intel Core i5-14600K",
+            slug: "intel-core-i5-14600k",
+            sku: "CPU-INTEL-14600K",
+            price: 7890000m,
+            brand: "Intel",
+            socket: CpuSocket.LGA1700,
+            l3CacheMb: 24);
+
+        // CPU B misses L3CacheMb (0) in catalog
+        SeedCpuProduct(
+            context,
+            cat,
+            name: "AMD Ryzen 5 7600",
+            slug: "amd-ryzen-5-7600",
+            sku: "CPU-AMD-7600",
+            price: 4990000m,
+            brand: "AMD",
+            socket: CpuSocket.AM5,
+            l3CacheMb: 0);
+
+        var settings = new FakeAiRuntimeSettings { WebSearchEnabled = true };
+        var quota = new FakeAiQuotaService();
+        var groq = new FakeGroqClient
+        {
+            OnAnalyze = (_, _, _) => Result.Success(new GroqStructuredPlan(
+                TaskType: "compare",
+                TargetProducts: ["CPU-INTEL-14600K", "CPU-AMD-7600"],
+                RequiredFacts: ["l3CacheMb", "priceVnd"])),
+            // Web search returns a source that only matches CPU A (Intel 14600K), NOT CPU B (AMD 7600)
+            OnWebSearch = (_, _) => Result.Success<IReadOnlyList<GroqWebSearchResult>>(
+            [
+                new GroqWebSearchResult(
+                    FactKey: "l3CacheMb",
+                    Summary: "Intel Core i5-14600K has 24 MB Intel Smart Cache (L3).",
+                    SourceTitle: "Intel Core i5-14600K Specifications",
+                    SourceUrl: "https://www.intel.com/content/www/us/en/products/14600k.html")
+            ])
+        };
+
+        var handler = new AskAiConsultantQueryHandler(
+            mediatorMock.Object, context, settings, quota, groq, NullLogger<AskAiConsultantQueryHandler>.Instance);
+
+        var result = await handler.Handle(
+            new AskAiConsultantQuery("So sánh L3 cache của Intel Core i5-14600K và AMD Ryzen 5 7600", null, null, "user:1"),
+            CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+        groq.WebSearchCallCount.Should().Be(1);
+        groq.LastWebSearchModel.Should().Contain("7600").And.NotContain("14600K");
+        result.Value.Status.Should().Be("partial");
+        result.Value.Products.Should().HaveCount(2);
+        result.Value.Sources.Should().NotContain(s => s.Kind == "manufacturer");
+    }
+
+    [Fact]
+    public async Task Handle_CompareTwoCpus_WhenBothMissL3Cache_SearchesAtMostOnceAndReturnsPartial()
+    {
+        var (context, mediatorMock) = SetupDbAndMediator();
+        var cat = new Category("CPU", "cpu", ComponentType.Cpu, "Vi xử lý");
+        context.Categories.Add(cat);
+        context.SaveChanges();
+
+        SeedCpuProduct(context, cat, "Intel Core i5-14600K", "intel-core-i5-14600k", "CPU-INTEL-14600K", 7890000m, l3CacheMb: 0);
+        SeedCpuProduct(context, cat, "Intel Core i5-13600K", "intel-core-i5-13600k", "CPU-INTEL-13600K", 6990000m, l3CacheMb: 0);
+
+        var settings = new FakeAiRuntimeSettings { WebSearchEnabled = true };
+        var quota = new FakeAiQuotaService();
+        var groq = new FakeGroqClient
+        {
+            OnAnalyze = (_, _, _) => Result.Success(new GroqStructuredPlan(
+                TaskType: "compare",
+                TargetProducts: ["CPU-INTEL-14600K", "CPU-INTEL-13600K"],
+                RequiredFacts: ["l3CacheMb", "priceVnd"])),
+            OnWebSearch = (_, _) => Result.Success<IReadOnlyList<GroqWebSearchResult>>(
+            [
+                new GroqWebSearchResult(
+                    FactKey: "l3CacheMb",
+                    Summary: "Intel Core i5-14600K features 24 MB Intel Smart Cache (L3).",
+                    SourceTitle: "Intel Core i5-14600K Specifications",
+                    SourceUrl: "https://www.intel.com/content/www/us/en/products/14600k.html")
+            ]),
+            // Even if synthesis tries to claim "answered", handler must enforce "partial" because CPU B still misses l3CacheMb
+            OnSynthesize = _ => Result.Success(new GroqSynthesisResult(
+                Status: "answered",
+                Answer: "i5-14600K có 24MB L3 Cache, còn i5-13600K hiện chưa có dữ liệu L3 Cache trong hệ thống.",
+                SupportingFactKeys: ["l3CacheMb", "priceVnd"]))
+        };
+
+        var handler = new AskAiConsultantQueryHandler(
+            mediatorMock.Object, context, settings, quota, groq, NullLogger<AskAiConsultantQueryHandler>.Instance);
+
+        var result = await handler.Handle(
+            new AskAiConsultantQuery("So sánh L3 cache giữa i5-14600K và i5-13600K", null, null, "user:1"),
+            CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+        groq.WebSearchCallCount.Should().Be(1);
+        result.Value.Status.Should().Be("partial");
+        result.Value.Sources.Should().ContainSingle(s =>
+            s.Kind == "manufacturer" &&
+            s.Title.Contains("14600K") &&
+            s.FactKeys.SequenceEqual(new[] { "l3CacheMb" }));
+    }
+
+    [Fact]
+    public async Task Handle_SingleProductMissingTwoFacts_WhenSnippetOnlySupportsL3Cache_VerifiesOnlyL3CacheAndReturnsPartial()
+    {
+        var (context, mediatorMock) = SetupDbAndMediator();
+        var cat = new Category("CPU", "cpu", ComponentType.Cpu, "Vi xử lý");
+        context.Categories.Add(cat);
+        context.SaveChanges();
+
+        SeedCpuProduct(
+            context,
+            cat,
+            name: "AMD Ryzen 5 7600",
+            slug: "amd-ryzen-5-7600",
+            sku: "CPU-AMD-7600",
+            price: 4990000m,
+            brand: "AMD",
+            socket: CpuSocket.AM5,
+            l3CacheMb: 0);
+
+        // Simulate Groq web search payload where message.content claims both L3 cache and Wraith cooler,
+        // but executed_tools snippet ONLY contains L3 cache.
+        var groqWebResponseJson = """
+        {
+          "choices": [
+            {
+              "message": {
+                "content": "AMD Ryzen 5 7600 has 32 MB L3 Cache and includes AMD Wraith Stealth Cooler.",
+                "executed_tools": [
+                  {
+                    "search_results": {
+                      "results": [
+                        {
+                          "title": "AMD Ryzen 5 7600 Desktop Processor Specifications",
+                          "url": "https://www.amd.com/en/products/processors/desktops/ryzen/7000-series/amd-ryzen-5-7600.html",
+                          "content": "AMD Ryzen 5 7600 specifications: L3 Cache 32 MB, 6 Cores, 12 Threads."
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+        """;
+
+        using var webDoc = JsonDocument.Parse(groqWebResponseJson);
+        var extractedEvidence = GroqClient.ExtractVerifiedWebEvidence(
+            webDoc.RootElement,
+            "AMD Ryzen 5 7600",
+            ["l3CacheMb", "includedCooler"],
+            productKey: "CPU-AMD-7600");
+
+        extractedEvidence.Should().ContainSingle(e => e.FactKey == "l3CacheMb");
+        extractedEvidence.Should().NotContain(e => e.FactKey == "includedCooler");
+
+        var settings = new FakeAiRuntimeSettings { WebSearchEnabled = true };
+        var quota = new FakeAiQuotaService();
+        var groq = new FakeGroqClient
+        {
+            OnAnalyze = (_, _, _) => Result.Success(new GroqStructuredPlan(
+                TaskType: "product_info",
+                TargetProducts: ["CPU-AMD-7600"],
+                RequiredFacts: ["l3CacheMb", "includedCooler"])),
+            OnWebSearch = (_, _) => Result.Success<IReadOnlyList<GroqWebSearchResult>>(extractedEvidence),
+            OnSynthesize = _ => Result.Success(new GroqSynthesisResult(
+                Status: "answered",
+                Answer: "AMD Ryzen 5 7600 có 32MB L3 Cache, thông tin tản nhiệt kèm theo chưa xác minh.",
+                SupportingFactKeys: ["l3CacheMb"]))
+        };
+
+        var handler = new AskAiConsultantQueryHandler(
+            mediatorMock.Object, context, settings, quota, groq, NullLogger<AskAiConsultantQueryHandler>.Instance);
+
+        var result = await handler.Handle(
+            new AskAiConsultantQuery("AMD Ryzen 5 7600 có bao nhiêu MB L3 cache và kèm tản nhiệt gì?", null, null, "user:1"),
+            CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Value.Status.Should().Be("partial");
+        var manufacturerSource = result.Value.Sources.Should().ContainSingle(s => s.Kind == "manufacturer").Subject;
+        manufacturerSource.FactKeys.Should().BeEquivalentTo(["l3CacheMb"]);
+    }
+
+    [Theory]
+    [InlineData(
+        "AMD Ryzen 5 7600",
+        "l3CacheMb",
+        """
+        {
+          "choices": [{
+            "message": {
+              "content": "AMD Ryzen 5 7600 has 32 MB L3 Cache.",
+              "executed_tools": [{
+                "search_results": {
+                  "results": [{
+                    "title": "AMD Ryzen 5 7600X Specifications",
+                    "url": "https://www.amd.com/en/products/cpu/amd-ryzen-5-7600x",
+                    "content": "AMD Ryzen 5 7600X L3 Cache 32 MB"
+                  }]
+                }
+              }]
+            }
+          }]
+        }
+        """)]
+    [InlineData(
+        "Intel Core i5-14600K",
+        "tdpWattage",
+        """
+        {
+          "choices": [{
+            "message": {
+              "content": "TDP is 125W",
+              "executed_tools": [{
+                "search_results": {
+                  "results": [{
+                    "title": "Intel Core i5-14600K",
+                    "url": "https://fake-intel.com/14600k",
+                    "content": "Intel Core i5-14600K Processor Base Power 125W TDP"
+                  }]
+                }
+              }]
+            }
+          }]
+        }
+        """)]
+    [InlineData(
+        "Intel Core i5-14600K",
+        "l3CacheMb",
+        """
+        {
+          "choices": [{
+            "message": {
+              "content": "Intel Core i5-14600K has 24 MB Intel Smart Cache (L3).",
+              "annotations": [{
+                "title": "Intel Core i5-14600K",
+                "url": "https://www.intel.com/content/www/us/en/products/14600k.html"
+              }]
+            }
+          }]
+        }
+        """)]
+    [InlineData(
+        "Intel Core i5-14600K",
+        "l3CacheMb",
+        """
+        {
+          "choices": [{
+            "message": {
+              "content": "Intel Core i5-14600K has 24 MB L3 Cache [Intel Ark](https://www.intel.com/content/www/us/en/products/14600k.html)"
+            }
+          }]
+        }
+        """)]
+    public void ExtractVerifiedWebEvidence_RejectsInvalidVariantFakeHostUrlOnlyAnnotationAndContentLink(
+        string brandAndModel,
+        string missingFact,
+        string payloadJson)
+    {
+        using var doc = JsonDocument.Parse(payloadJson);
+        var evidence = GroqClient.ExtractVerifiedWebEvidence(doc.RootElement, brandAndModel, [missingFact]);
+        evidence.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void ExtractVerifiedWebEvidence_AcceptsValidToolSnippetWithMatchingModelAndFact()
+    {
+        var jsonWithValidOfficialSource = """
+        {
+          "choices": [
+            {
+              "message": {
+                "content": "Intel Core i5-14600K has 24MB L3 Cache.",
+                "executed_tools": [
+                  {
+                    "search_results": {
+                      "results": [
+                        {
+                          "title": "Intel Core i5-14600K Official Specs",
+                          "url": "https://www.intel.com/content/www/us/en/products/14600k.html",
+                          "content": "Intel Core i5-14600K 24 MB Intel Smart Cache"
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+        """;
+
+        using var doc = JsonDocument.Parse(jsonWithValidOfficialSource);
+        var evidence = GroqClient.ExtractVerifiedWebEvidence(
+            doc.RootElement,
+            "Intel Core i5-14600K",
+            ["l3CacheMb"],
+            productKey: "CPU-INTEL-14600K");
+
+        evidence.Should().ContainSingle(e =>
+            e.FactKey == "l3CacheMb" &&
+            e.ProductKey == "CPU-INTEL-14600K" &&
+            e.SourceUrl == "https://www.intel.com/content/www/us/en/products/14600k.html");
+    }
+
+    [Fact]
+    public async Task Handle_WhenWebSearchDisabledAndTechnicalFactMissing_MakesZeroWebCallsAndReturnsPartial()
+    {
+        var (context, mediatorMock) = SetupDbAndMediator();
+        var cat = new Category("CPU", "cpu", ComponentType.Cpu, "Vi xử lý");
+        context.Categories.Add(cat);
+        context.SaveChanges();
+
+        SeedCpuProduct(context, cat, "Intel Core i5-14600K", "intel-core-i5-14600k", "CPU-INTEL-14600K", 7890000m, l3CacheMb: 0);
+
+        var settings = new FakeAiRuntimeSettings { WebSearchEnabled = false };
+        var quota = new FakeAiQuotaService();
+        var groq = new FakeGroqClient
+        {
+            OnAnalyze = (_, _, _) => Result.Success(new GroqStructuredPlan(
+                TaskType: "product_info",
+                TargetProducts: ["CPU-INTEL-14600K"],
+                RequiredFacts: ["l3CacheMb", "priceVnd"]))
+        };
+
+        var handler = new AskAiConsultantQueryHandler(
+            mediatorMock.Object, context, settings, quota, groq, NullLogger<AskAiConsultantQueryHandler>.Instance);
+
+        var result = await handler.Handle(
+            new AskAiConsultantQuery("i5-14600K có L3 cache bao nhiêu MB và giá bao nhiêu?", null, null, "user:1"),
+            CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Value.Status.Should().Be("partial");
+        groq.WebSearchCallCount.Should().Be(0);
+    }
+
+    // =========================================================================
+    // REVIEW FIX 3: PSU Minimum Wattage (>= 650W) vs Exact Wattage (650W)
+    // =========================================================================
+
+    [Fact]
+    public void BuildRecommendationFilterOptions_DistinguishesMinimumPsuWattageFromExactWattage()
+    {
+        var minPlanJson = """
+        {
+          "task_type": "recommend",
+          "target_products": [],
+          "component_type": "Psu",
+          "min_price": null,
+          "max_price": 3000000,
+          "in_stock_only": true,
+          "min_psu_wattage": 650,
+          "exact_psu_wattage": null,
+          "technical_criteria": [],
+          "required_facts": ["wattage", "priceVnd"],
+          "clarification_question": null
+        }
+        """;
+
+        var parsedMinPlan = GroqClient.ParseStructuredPlanJson(minPlanJson);
+        parsedMinPlan.IsSuccess.Should().BeTrue();
+        parsedMinPlan.Value.MinPsuWattage.Should().Be(650);
+        parsedMinPlan.Value.ExactPsuWattage.Should().BeNull();
+
+        var minOptions = AskAiConsultantQueryHandler.BuildRecommendationFilterOptions(
+            parsedMinPlan.Value,
+            "Tìm nguồn từ 650W trở lên dưới 3 triệu",
+            out var minInvalid);
+
+        minInvalid.Should().BeNull();
+        minOptions.Should().NotBeNull();
+        minOptions!.MinPsuWattage.Should().Be(650);
+        minOptions.PsuWattages.Should().BeNull();
+
+        var exactPlanJson = """
+        {
+          "task_type": "recommend",
+          "target_products": [],
+          "component_type": "Psu",
+          "min_price": null,
+          "max_price": 3000000,
+          "in_stock_only": true,
+          "min_psu_wattage": null,
+          "exact_psu_wattage": 650,
+          "technical_criteria": [],
+          "required_facts": ["wattage", "priceVnd"],
+          "clarification_question": null
+        }
+        """;
+
+        var parsedExactPlan = GroqClient.ParseStructuredPlanJson(exactPlanJson);
+        parsedExactPlan.IsSuccess.Should().BeTrue();
+        parsedExactPlan.Value.ExactPsuWattage.Should().Be(650);
+        parsedExactPlan.Value.MinPsuWattage.Should().BeNull();
+
+        var exactOptions = AskAiConsultantQueryHandler.BuildRecommendationFilterOptions(
+            parsedExactPlan.Value,
+            "Tìm nguồn đúng 650W dưới 3 triệu",
+            out var exactInvalid);
+
+        exactInvalid.Should().BeNull();
+        exactOptions.Should().NotBeNull();
+        exactOptions!.PsuWattages.Should().BeEquivalentTo([650]);
+        exactOptions.MinPsuWattage.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Handle_RecommendPsuMinimumWattageVsExactWattage_ReturnsExpectedPsusAndRejectsInvalidWattage()
+    {
+        var (context, mediatorMock) = SetupDbAndMediator();
+        var psuCat = new Category("PSU", "psu", ComponentType.Psu, "Nguồn máy tính");
+        context.Categories.Add(psuCat);
+        context.SaveChanges();
+
+        context.Products.AddRange(
+            new Product(psuCat.Id, "Corsair CV550 550W", "corsair-cv550", "PSU-550", "Corsair", 1190000m, 5, "https://example.com/p1.png", ComponentType.Psu, new PsuSpecification { Wattage = 550 }),
+            new Product(psuCat.Id, "MSI MAG A650BN 650W", "msi-mag-a650bn", "PSU-650", "MSI", 1490000m, 5, "https://example.com/p2.png", ComponentType.Psu, new PsuSpecification { Wattage = 650 }),
+            new Product(psuCat.Id, "Corsair RM750e 750W", "corsair-rm750e", "PSU-750", "Corsair", 2590000m, 4, "https://example.com/p3.png", ComponentType.Psu, new PsuSpecification { Wattage = 750 }));
+        context.SaveChanges();
+
+        var settings = new FakeAiRuntimeSettings();
+        var quota = new FakeAiQuotaService();
+
+        // 1. Minimum wattage >= 650W returns both 650W and 750W
+        var groqMin = new FakeGroqClient
+        {
+            OnAnalyze = (_, _, _) => Result.Success(new GroqStructuredPlan(
+                TaskType: "recommend",
+                TargetProducts: [],
+                ComponentType: "Psu",
+                MaxPrice: 3000000m,
+                InStockOnly: true,
+                MinPsuWattage: 650,
+                RequiredFacts: ["wattage", "priceVnd"]))
+        };
+
+        var handlerMin = new AskAiConsultantQueryHandler(
+            mediatorMock.Object, context, settings, quota, groqMin, NullLogger<AskAiConsultantQueryHandler>.Instance);
+
+        var minResult = await handlerMin.Handle(
+            new AskAiConsultantQuery("Gợi ý nguồn từ 650W trở lên dưới 3 triệu", null, null, "user:1"),
+            CancellationToken.None);
+
+        minResult.IsSuccess.Should().BeTrue();
+        minResult.Value.Products.Select(p => p.Sku).Should().BeEquivalentTo(["PSU-650", "PSU-750"]);
+
+        // 2. Invalid wattage (e.g. -650 or non-PSU component) does not silently drop filter
+        var groqInvalid = new FakeGroqClient
+        {
+            OnAnalyze = (_, _, _) => Result.Success(new GroqStructuredPlan(
+                TaskType: "recommend",
+                TargetProducts: [],
+                ComponentType: "Psu",
+                MaxPrice: 3000000m,
+                InStockOnly: true,
+                MinPsuWattage: -650,
+                RequiredFacts: ["wattage", "priceVnd"]))
+        };
+
+        var handlerInvalid = new AskAiConsultantQueryHandler(
+            mediatorMock.Object, context, settings, quota, groqInvalid, NullLogger<AskAiConsultantQueryHandler>.Instance);
+
+        var invalidResult = await handlerInvalid.Handle(
+            new AskAiConsultantQuery("Gợi ý nguồn công suất âm", null, null, "user:1"),
+            CancellationToken.None);
+
+        invalidResult.IsSuccess.Should().BeTrue();
+        invalidResult.Value.Status.Should().Be("insufficient_data");
+        invalidResult.Value.Products.Should().BeEmpty();
     }
 }

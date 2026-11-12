@@ -31,6 +31,7 @@ public record CpuSpecification : ComponentSpecification
     public bool HasIntegratedGpu { get; init; }
     public RamType SupportedMemoryType { get; init; }
     public int MaxMemorySpeedMhz { get; init; }
+    public int L3CacheMb { get; init; }
 }
 
 public record MotherboardSpecification : ComponentSpecification
