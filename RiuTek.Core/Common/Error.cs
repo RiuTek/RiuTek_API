@@ -8,10 +8,11 @@ public enum ErrorType
     Conflict,
     Unauthorized,
     Forbidden,
-    Unavailable
+    Unavailable,
+    TooManyRequests
 }
 
-public record Error(string Code, string Description, ErrorType Type = ErrorType.Failure)
+public record Error(string Code, string Description, ErrorType Type = ErrorType.Failure, int? RetryAfterSeconds = null)
 {
     public static readonly Error None = new(string.Empty, string.Empty, ErrorType.Failure);
     public static readonly Error NullValue = new("Error.NullValue", "The specified result value is null.", ErrorType.Failure);
@@ -23,4 +24,5 @@ public record Error(string Code, string Description, ErrorType Type = ErrorType.
     public static Error Unauthorized(string code, string description) => new(code, description, ErrorType.Unauthorized);
     public static Error Forbidden(string code, string description) => new(code, description, ErrorType.Forbidden);
     public static Error Unavailable(string code, string description) => new(code, description, ErrorType.Unavailable);
+    public static Error TooManyRequests(string code, string description, int? retryAfterSeconds = null) => new(code, description, ErrorType.TooManyRequests, retryAfterSeconds);
 }

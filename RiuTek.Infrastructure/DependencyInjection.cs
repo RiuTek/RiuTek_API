@@ -146,6 +146,28 @@ public static class DependencyInjection
         // Product Bulk Import Workbook Service (ClosedXML)
         services.AddSingleton<IProductImportWorkbookService, Services.ClosedXmlProductImportWorkbookService>();
 
+        // AI Consultant Settings, Quota & Groq Typed HttpClient
+        var aiSettings = new Settings.AiSettings();
+        configuration.GetSection(Settings.AiSettings.SectionName).Bind(aiSettings);
+        services.AddSingleton(aiSettings);
+        services.AddSingleton<IAiRuntimeSettings>(aiSettings);
+        services.AddSingleton<IAiQuotaService, Services.RedisAiQuotaService>();
+
+        services.AddHttpClient<IGroqClient, Services.GroqClient>(client =>
+        {
+            var baseUrl = string.IsNullOrWhiteSpace(aiSettings.Groq.BaseUrl)
+                ? "https://api.groq.com/openai/v1/"
+                : aiSettings.Groq.BaseUrl.Trim();
+            if (!baseUrl.EndsWith('/'))
+            {
+                baseUrl += "/";
+            }
+
+            client.BaseAddress = new Uri(baseUrl);
+            var timeoutSeconds = Math.Clamp(aiSettings.Groq.TimeoutSeconds, 5, 60);
+            client.Timeout = TimeSpan.FromSeconds(timeoutSeconds + 5);
+        });
+
         return services;
     }
 }

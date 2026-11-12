@@ -37,7 +37,7 @@ public class ActualEndpointMetadataTests
 
             // Total controller actions: 6 Posts + 6 Comments + 7 Products + 5 Categories + 6 Carts + 4 Auth + 10 Orders + 1 Payments + 6 Users + 3 ProductMedia + 3 ProductImports + 9 Reviews + 6 PCBuilds = 72
             var controllerEndpoints = endpoints.Where(e => e.Metadata.GetMetadata<ControllerActionDescriptor>() != null).ToList();
-            controllerEndpoints.Should().HaveCount(80);
+            controllerEndpoints.Should().HaveCount(81);
 
             // Helper to get action descriptor
             ControllerActionDescriptor GetDescriptor(RouteEndpoint e) => e.Metadata.GetMetadata<ControllerActionDescriptor>()!;
@@ -654,6 +654,20 @@ public class ActualEndpointMetadataTests
             deleteBanner.Should().NotBeNull();
             GetFullRoutePattern(deleteBanner!).Should().BeEquivalentTo("api/v1/banners/{id:guid}");
             AssertAuthorizePolicy(deleteBanner!, Policies.ContentManager);
+
+            #endregion
+
+            #region AI Endpoints (1)
+
+            var aiEndpoints = endpoints.Where(e =>
+                e.Metadata.GetMetadata<ControllerActionDescriptor>()?.ControllerTypeInfo.AsType() == typeof(AiController))
+                .ToList();
+            aiEndpoints.Should().HaveCount(1);
+
+            var askAi = aiEndpoints.FirstOrDefault(e => GetDescriptor(e).ActionName == nameof(AiController.Ask) && GetHttpMethods(e).Contains("POST"));
+            askAi.Should().NotBeNull();
+            GetFullRoutePattern(askAi!).Should().BeEquivalentTo("api/v1/ai/ask");
+            AssertPublicEndpoint(askAi!);
 
             #endregion
         }
