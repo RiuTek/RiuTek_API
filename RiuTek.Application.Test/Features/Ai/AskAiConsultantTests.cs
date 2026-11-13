@@ -789,7 +789,7 @@ public class AskAiConsultantTests
         SeedCpuProduct(context, cat, "Intel Core i5-14600K", "intel-core-i5-14600k", "CPU-INTEL-14600K", 7890000m, stock: 8);
 
         var settings = new FakeAiRuntimeSettings { WebSearchEnabled = true };
-        var quota = new FakeAiQuotaService();
+        var quota = new FakeAiQuotaService { RemainingProviderRequests = 10 };
         var groq = new FakeGroqClient
         {
             OnAnalyze = (_, _, _) => Result.Success(new GroqStructuredPlan(
@@ -798,7 +798,7 @@ public class AskAiConsultantTests
                 RequiredFacts: ["inStock", "priceVnd", "warranty"])),
             OnSynthesize = _ => Result.Success(new GroqSynthesisResult(
                 Status: "answered",
-                Answer: "Intel Core i5-14600K hiện còn hàng với giá 7.890.000 VNĐ.",
+                Answer: "CPU còn hàng và được bảo hành 36 tháng.",
                 SupportingFactKeys: ["inStock", "priceVnd", "warranty"]))
         };
 
@@ -815,11 +815,25 @@ public class AskAiConsultantTests
             p.Sku == "CPU-INTEL-14600K" &&
             p.InStock &&
             p.PriceVnd == 7890000m);
+        result.Value.Answer.Should().Contain("CPU-INTEL-14600K");
         result.Value.Answer.Should().Contain("chưa được công bố");
+        result.Value.Answer.Should().NotContain("36 tháng");
         result.Value.Sources.Should().ContainSingle(s => s.Kind == "catalog");
         result.Value.Sources.SelectMany(s => s.FactKeys).Should().NotContain("warranty");
         result.Value.Sources.Should().NotContain(s => s.Kind == "faq");
+        groq.SynthesizeCallCount.Should().Be(0);
         groq.WebSearchCallCount.Should().Be(0);
+        quota.RemainingProviderRequests.Should().Be(9, "only AnalyzeQuestionAsync should reserve 1 provider request; synthesis must not reserve quota");
+
+        // Also verify that if OnSynthesize throws when called, the handler still succeeds without calling it
+        groq.OnSynthesize = _ => throw new InvalidOperationException("SynthesizeAnswerAsync must not be called when unpublished policy is requested.");
+        var resultWhenThrowConfigured = await handler.Handle(
+            new AskAiConsultantQuery("Intel Core i5-14600K còn hàng không và bảo hành bao lâu?", null, null, "user:1"),
+            CancellationToken.None);
+        resultWhenThrowConfigured.IsSuccess.Should().BeTrue();
+        resultWhenThrowConfigured.Value.Status.Should().Be("partial");
+        resultWhenThrowConfigured.Value.Answer.Should().NotContain("36 tháng");
+        groq.SynthesizeCallCount.Should().Be(0);
     }
 
     // =========================================================================
@@ -1145,7 +1159,200 @@ public class AskAiConsultantTests
         evidence.Should().ContainSingle(e =>
             e.FactKey == "l3CacheMb" &&
             e.ProductKey == "CPU-INTEL-14600K" &&
+            e.Summary.Contains("24 MB") &&
             e.SourceUrl == "https://www.intel.com/content/www/us/en/products/14600k.html");
+    }
+
+    [Fact]
+    public void ExtractVerifiedWebEvidence_L3CacheWithPrecedingL2Cache_Extracts32MbAndRejectsUnpublishedOrConflictingL3()
+    {
+        // 1. Repro fixture: "AMD Ryzen 5 7600. L2 Cache: 6 MB. L3 Cache: 32 MB." -> must extract 32 MB, not 6 MB
+        var l2AndL3Payload = """
+        {
+          "choices": [{
+            "message": {
+              "content": "AMD Ryzen 5 7600 specs.",
+              "executed_tools": [{
+                "search_results": {
+                  "results": [{
+                    "title": "AMD Ryzen 5 7600 Specifications",
+                    "url": "https://www.amd.com/en/products/processors/desktops/ryzen/7000-series/amd-ryzen-5-7600.html",
+                    "content": "AMD Ryzen 5 7600. L2 Cache: 6 MB. L3 Cache: 32 MB."
+                  }]
+                }
+              }]
+            }
+          }]
+        }
+        """;
+
+        using var doc1 = JsonDocument.Parse(l2AndL3Payload);
+        var ev1 = GroqClient.ExtractVerifiedWebEvidence(doc1.RootElement, "AMD Ryzen 5 7600", ["l3CacheMb"], "CPU-AMD-7600");
+        var single1 = ev1.Should().ContainSingle(e => e.FactKey == "l3CacheMb").Subject;
+        single1.Summary.Should().Contain("32 MB").And.NotContain("6 MB");
+
+        // 2. Value-before-label fixture: "6 MB L2 Cache, 32 MB L3 Cache" -> must extract 32 MB, not 6 MB
+        var valueBeforeLabelPayload = """
+        {
+          "choices": [{
+            "message": {
+              "content": "AMD Ryzen 5 7600 specs.",
+              "executed_tools": [{
+                "search_results": {
+                  "results": [{
+                    "title": "AMD Ryzen 5 7600 Specifications",
+                    "url": "https://www.amd.com/en/products/processors/desktops/ryzen/7000-series/amd-ryzen-5-7600.html",
+                    "content": "AMD Ryzen 5 7600 features 6 MB L2 Cache and 32 MB L3 Cache."
+                  }]
+                }
+              }]
+            }
+          }]
+        }
+        """;
+
+        using var doc2 = JsonDocument.Parse(valueBeforeLabelPayload);
+        var ev2 = GroqClient.ExtractVerifiedWebEvidence(doc2.RootElement, "AMD Ryzen 5 7600", ["l3CacheMb"], "CPU-AMD-7600");
+        var single2 = ev2.Should().ContainSingle(e => e.FactKey == "l3CacheMb").Subject;
+        single2.Summary.Should().Contain("32 MB").And.NotContain("6 MB");
+
+        // 3. Unpublished L3 fixture: "L2 Cache: 6 MB. L3 Cache: không công bố." -> must produce 0 evidence
+        var unpublishedL3Payload = """
+        {
+          "choices": [{
+            "message": {
+              "content": "AMD Ryzen 5 7600 has 32 MB L3 Cache.",
+              "executed_tools": [{
+                "search_results": {
+                  "results": [{
+                    "title": "AMD Ryzen 5 7600 Specifications",
+                    "url": "https://www.amd.com/en/products/processors/desktops/ryzen/7000-series/amd-ryzen-5-7600.html",
+                    "content": "AMD Ryzen 5 7600. L2 Cache: 6 MB. L3 Cache: không công bố."
+                  }]
+                }
+              }]
+            }
+          }]
+        }
+        """;
+
+        using var doc3 = JsonDocument.Parse(unpublishedL3Payload);
+        var ev3 = GroqClient.ExtractVerifiedWebEvidence(doc3.RootElement, "AMD Ryzen 5 7600", ["l3CacheMb"], "CPU-AMD-7600");
+        ev3.Should().BeEmpty();
+
+        // 4. Conflicting L3 values in snippet -> must produce 0 evidence
+        var conflictingL3Payload = """
+        {
+          "choices": [{
+            "message": {
+              "content": "AMD Ryzen 5 7600 specs.",
+              "executed_tools": [{
+                "search_results": {
+                  "results": [{
+                    "title": "AMD Ryzen 5 7600 Specifications",
+                    "url": "https://www.amd.com/en/products/processors/desktops/ryzen/7000-series/amd-ryzen-5-7600.html",
+                    "content": "AMD Ryzen 5 7600. L3 Cache: 32 MB. Other table says 64 MB L3 Cache."
+                  }]
+                }
+              }]
+            }
+          }]
+        }
+        """;
+
+        using var doc4 = JsonDocument.Parse(conflictingL3Payload);
+        var ev4 = GroqClient.ExtractVerifiedWebEvidence(doc4.RootElement, "AMD Ryzen 5 7600", ["l3CacheMb"], "CPU-AMD-7600");
+        ev4.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Handle_WhenWebSnippetHasL2AndL3_ForwardsOnly32MbToSynthesisAndReturnsPartialWhenL3HasNoCapacity()
+    {
+        var (context, mediatorMock) = SetupDbAndMediator();
+        var cat = new Category("CPU", "cpu", ComponentType.Cpu, "Vi xử lý");
+        context.Categories.Add(cat);
+        context.SaveChanges();
+
+        SeedCpuProduct(
+            context,
+            cat,
+            name: "AMD Ryzen 5 7600",
+            slug: "amd-ryzen-5-7600",
+            sku: "CPU-AMD-7600",
+            price: 4990000m,
+            brand: "AMD",
+            socket: CpuSocket.AM5,
+            l3CacheMb: 0);
+
+        var settings = new FakeAiRuntimeSettings { WebSearchEnabled = true };
+        var quota = new FakeAiQuotaService();
+
+        // Case A: Web returns snippet containing both "L2 Cache: 6 MB" and "L3 Cache: 32 MB"
+        var groqValidL3 = new FakeGroqClient
+        {
+            OnAnalyze = (_, _, _) => Result.Success(new GroqStructuredPlan(
+                TaskType: "product_info",
+                TargetProducts: ["CPU-AMD-7600"],
+                RequiredFacts: ["l3CacheMb", "priceVnd"])),
+            OnWebSearch = (_, _) => Result.Success<IReadOnlyList<GroqWebSearchResult>>(
+            [
+                new GroqWebSearchResult(
+                    FactKey: "l3CacheMb",
+                    Summary: "AMD Ryzen 5 7600. L2 Cache: 6 MB. L3 Cache: 32 MB.",
+                    SourceTitle: "AMD Ryzen 5 7600 Specifications",
+                    SourceUrl: "https://www.amd.com/en/products/processors/desktops/ryzen/7000-series/amd-ryzen-5-7600.html")
+            ]),
+            OnSynthesize = req => Result.Success(new GroqSynthesisResult(
+                Status: "answered",
+                Answer: "AMD Ryzen 5 7600 có bộ nhớ đệm L3 32 MB và giá 4.990.000 VNĐ.",
+                SupportingFactKeys: ["l3CacheMb", "priceVnd"]))
+        };
+
+        var handlerValid = new AskAiConsultantQueryHandler(
+            mediatorMock.Object, context, settings, quota, groqValidL3, NullLogger<AskAiConsultantQueryHandler>.Instance);
+
+        var resValid = await handlerValid.Handle(
+            new AskAiConsultantQuery("AMD Ryzen 5 7600 có L3 cache bao nhiêu MB?", null, null, "user:1"),
+            CancellationToken.None);
+
+        resValid.IsSuccess.Should().BeTrue();
+        resValid.Value.Status.Should().Be("answered");
+        groqValidL3.LastSynthesisRequest.Should().NotBeNull();
+        var forwardedWebFact = groqValidL3.LastSynthesisRequest!.WebFacts.Should().ContainSingle(w => w.FactKey == "l3CacheMb").Subject;
+        forwardedWebFact.Summary.Should().Contain("32 MB").And.NotContain("6 MB").And.NotContain("L2");
+
+        // Case B: Web returns snippet "L2 Cache: 6 MB. L3 Cache: không công bố." -> must reject L3 and return partial
+        var groqMissingL3 = new FakeGroqClient
+        {
+            OnAnalyze = (_, _, _) => Result.Success(new GroqStructuredPlan(
+                TaskType: "product_info",
+                TargetProducts: ["CPU-AMD-7600"],
+                RequiredFacts: ["l3CacheMb", "priceVnd"])),
+            OnWebSearch = (_, _) => Result.Success<IReadOnlyList<GroqWebSearchResult>>(
+            [
+                new GroqWebSearchResult(
+                    FactKey: "l3CacheMb",
+                    Summary: "AMD Ryzen 5 7600. L2 Cache: 6 MB. L3 Cache: không công bố.",
+                    SourceTitle: "AMD Ryzen 5 7600 Specifications",
+                    SourceUrl: "https://www.amd.com/en/products/processors/desktops/ryzen/7000-series/amd-ryzen-5-7600.html")
+            ]),
+            OnSynthesize = _ => Result.Success(new GroqSynthesisResult(
+                Status: "answered",
+                Answer: "AMD Ryzen 5 7600 có giá 4.990.000 VNĐ, hiện chưa có dữ liệu L3 Cache.",
+                SupportingFactKeys: ["priceVnd"]))
+        };
+
+        var handlerMissing = new AskAiConsultantQueryHandler(
+            mediatorMock.Object, context, settings, quota, groqMissingL3, NullLogger<AskAiConsultantQueryHandler>.Instance);
+
+        var resMissing = await handlerMissing.Handle(
+            new AskAiConsultantQuery("AMD Ryzen 5 7600 có L3 cache bao nhiêu MB?", null, null, "user:1"),
+            CancellationToken.None);
+
+        resMissing.IsSuccess.Should().BeTrue();
+        resMissing.Value.Status.Should().Be("partial");
+        resMissing.Value.Sources.Should().NotContain(s => s.Kind == "manufacturer");
+        groqMissingL3.LastSynthesisRequest!.WebFacts.Should().BeEmpty();
     }
 
     [Fact]

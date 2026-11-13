@@ -421,6 +421,9 @@ public class AskAiConsultantQueryHandler : IRequestHandler<AskAiConsultantQuery,
                                 var targetMissingSet = primaryWebTarget.MissingFacts
                                     .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
+                                var verifiedCandidatesByFact = new Dictionary<string, List<(GroqWebSearchResult Result, string Signature)>>(
+                                    StringComparer.OrdinalIgnoreCase);
+
                                 foreach (var rawWf in webResult.Value)
                                 {
                                     if (!ProductSpecFactExtractor.IsEvidenceValidForTarget(
@@ -433,19 +436,54 @@ public class AskAiConsultantQueryHandler : IRequestHandler<AskAiConsultantQuery,
                                     }
 
                                     var normalizedKey = ProductSpecFactExtractor.NormalizeFactKey(rawWf.FactKey);
-                                    if (webFacts.Any(existing =>
-                                        string.Equals(existing.ProductKey, primaryWebTarget.ProductKey, StringComparison.OrdinalIgnoreCase) &&
-                                        string.Equals(existing.FactKey, normalizedKey, StringComparison.OrdinalIgnoreCase)))
+                                    var snippetText = $"{rawWf.SourceTitle}. {rawWf.Summary}".Trim();
+                                    if (!ProductSpecFactExtractor.TryVerifyFactInSnippet(normalizedKey, snippetText, out var signature))
                                     {
                                         continue;
                                     }
 
-                                    webFacts.Add(rawWf with
+                                    var cleanSummary = rawWf.Summary.Trim();
+                                    if (string.Equals(normalizedKey, "l3CacheMb", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        if (!ProductSpecFactExtractor.TryExtractL3CacheMbFromText(snippetText, out var normalizedL3Value, out signature))
+                                        {
+                                            continue;
+                                        }
+
+                                        cleanSummary = $"{primaryWebTarget.BrandAndModel} L3 Cache: {normalizedL3Value}";
+                                    }
+
+                                    var candidate = rawWf with
                                     {
                                         FactKey = normalizedKey,
+                                        Summary = cleanSummary,
                                         ProductKey = primaryWebTarget.ProductKey,
                                         ModelName = primaryWebTarget.BrandAndModel
-                                    });
+                                    };
+
+                                    if (!verifiedCandidatesByFact.TryGetValue(normalizedKey, out var list))
+                                    {
+                                        list = [];
+                                        verifiedCandidatesByFact[normalizedKey] = list;
+                                    }
+
+                                    list.Add((candidate, signature));
+                                }
+
+                                foreach (var kvp in verifiedCandidatesByFact)
+                                {
+                                    var distinctSigs = kvp.Value
+                                        .Select(x => x.Signature)
+                                        .Where(s => !string.IsNullOrWhiteSpace(s))
+                                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                                        .ToList();
+
+                                    if (distinctSigs.Count > 1)
+                                    {
+                                        continue;
+                                    }
+
+                                    webFacts.Add(kvp.Value[0].Result);
                                 }
 
                                 if (webFacts.Count == 0)
@@ -513,35 +551,78 @@ public class AskAiConsultantQueryHandler : IRequestHandler<AskAiConsultantQuery,
                 return Result.Success(insufficientResponse);
             }
 
-            // 6. Synthesize final response
-            var synthesisRequest = new GroqSynthesisRequest(
-                UserQuestion: question,
-                TaskType: taskType,
-                CatalogProducts: catalogProducts,
-                ProductFactsBySku: productFactsBySku,
-                WebFacts: webFacts,
-                FaqEntries: matchedFaqs,
-                History: sanitizedHistory,
-                HasMissingTechnicalFacts: hasUnresolvedFacts);
-
+            // 6. Synthesize final response (or build deterministic backend answer when unpublished policy is requested)
             string finalStatus;
             string finalAnswer;
             var supportingKeys = new List<string>();
 
-            var synthQuota = await _quotaService.ReserveProviderRequestAsync(cancellationToken);
-            if (!synthQuota.IsRedisUnavailable && synthQuota.IsAllowed)
+            if (hasUnpublishedPolicyInTurn)
             {
-                synthesisCalls++;
-                var synthResult = await _groqClient.SynthesizeAnswerAsync(synthesisRequest, cancellationToken);
-                if (synthResult.IsSuccess && !string.IsNullOrWhiteSpace(synthResult.Value.Answer))
+                finalStatus = (catalogProducts.Count > 0 || matchedFaqs.Count > 0 || webFacts.Count > 0)
+                    ? "partial"
+                    : "insufficient_data";
+
+                if (plan.RequiredFacts != null)
                 {
-                    finalStatus = ValidStatuses.Contains(synthResult.Value.Status)
-                        ? synthResult.Value.Status.ToLowerInvariant()
-                        : "answered";
-                    finalAnswer = synthResult.Value.Answer.Trim();
-                    if (synthResult.Value.SupportingFactKeys != null)
+                    foreach (var rf in plan.RequiredFacts)
                     {
-                        supportingKeys.AddRange(synthResult.Value.SupportingFactKeys);
+                        var norm = ProductSpecFactExtractor.NormalizeFactKey(rf);
+                        if (!CuratedFaqRepository.IsPolicyFactKey(rf) &&
+                            !CuratedFaqRepository.IsPolicyFactKey(norm) &&
+                            allCatalogFactKeys.Contains(norm))
+                        {
+                            supportingKeys.Add(norm);
+                        }
+                    }
+                }
+
+                var baseAnswer = BuildDeterministicFallbackAnswer(
+                    catalogProducts,
+                    productFactsBySku,
+                    webFacts,
+                    matchedFaqs,
+                    unresolvedMissingFacts);
+
+                finalAnswer = $"{baseAnswer} {CuratedFaqRepository.BuildMixedUnpublishedPolicyNotice()}".Trim();
+            }
+            else
+            {
+                var synthesisRequest = new GroqSynthesisRequest(
+                    UserQuestion: question,
+                    TaskType: taskType,
+                    CatalogProducts: catalogProducts,
+                    ProductFactsBySku: productFactsBySku,
+                    WebFacts: webFacts,
+                    FaqEntries: matchedFaqs,
+                    History: sanitizedHistory,
+                    HasMissingTechnicalFacts: hasUnresolvedFacts);
+
+                var synthQuota = await _quotaService.ReserveProviderRequestAsync(cancellationToken);
+                if (!synthQuota.IsRedisUnavailable && synthQuota.IsAllowed)
+                {
+                    synthesisCalls++;
+                    var synthResult = await _groqClient.SynthesizeAnswerAsync(synthesisRequest, cancellationToken);
+                    if (synthResult.IsSuccess && !string.IsNullOrWhiteSpace(synthResult.Value.Answer))
+                    {
+                        finalStatus = ValidStatuses.Contains(synthResult.Value.Status)
+                            ? synthResult.Value.Status.ToLowerInvariant()
+                            : "answered";
+                        finalAnswer = synthResult.Value.Answer.Trim();
+                        if (synthResult.Value.SupportingFactKeys != null)
+                        {
+                            supportingKeys.AddRange(synthResult.Value.SupportingFactKeys);
+                        }
+                    }
+                    else if (catalogProducts.Count > 0 || matchedFaqs.Count > 0)
+                    {
+                        finalStatus = hasUnresolvedFacts ? "partial" : "answered";
+                        finalAnswer = BuildDeterministicFallbackAnswer(catalogProducts, productFactsBySku, webFacts, matchedFaqs, unresolvedMissingFacts);
+                    }
+                    else
+                    {
+                        LogMetadata(requestId, analysisCalls, webCalls, synthesisCalls, sw.ElapsedMilliseconds, "provider_error");
+                        return Result.Failure<AiConsultantResponseDto>(
+                            Error.Unavailable("Ai.ProviderError", "Dịch vụ AI tạm thời không phản hồi. Vui lòng thử lại sau."));
                     }
                 }
                 else if (catalogProducts.Count > 0 || matchedFaqs.Count > 0)
@@ -551,29 +632,11 @@ public class AskAiConsultantQueryHandler : IRequestHandler<AskAiConsultantQuery,
                 }
                 else
                 {
-                    LogMetadata(requestId, analysisCalls, webCalls, synthesisCalls, sw.ElapsedMilliseconds, "provider_error");
                     return Result.Failure<AiConsultantResponseDto>(
-                        Error.Unavailable("Ai.ProviderError", "Dịch vụ AI tạm thời không phản hồi. Vui lòng thử lại sau."));
+                        synthQuota.IsRedisUnavailable
+                            ? Error.Unavailable("Ai.QuotaUnavailable", "Hệ thống kiểm soát hạn mức AI tạm thời gián đoạn.")
+                            : Error.TooManyRequests("Ai.ProviderLimitExceeded", "Hệ thống AI đã đạt giới hạn phục vụ trong ngày.", synthQuota.RetryAfterSeconds));
                 }
-            }
-            else if (catalogProducts.Count > 0 || matchedFaqs.Count > 0)
-            {
-                finalStatus = hasUnresolvedFacts ? "partial" : "answered";
-                finalAnswer = BuildDeterministicFallbackAnswer(catalogProducts, productFactsBySku, webFacts, matchedFaqs, unresolvedMissingFacts);
-            }
-            else
-            {
-                return Result.Failure<AiConsultantResponseDto>(
-                    synthQuota.IsRedisUnavailable
-                        ? Error.Unavailable("Ai.QuotaUnavailable", "Hệ thống kiểm soát hạn mức AI tạm thời gián đoạn.")
-                        : Error.TooManyRequests("Ai.ProviderLimitExceeded", "Hệ thống AI đã đạt giới hạn phục vụ trong ngày.", synthQuota.RetryAfterSeconds));
-            }
-
-            if (hasUnpublishedPolicyInTurn &&
-                !finalAnswer.Contains("chưa được công bố", StringComparison.OrdinalIgnoreCase) &&
-                !finalAnswer.Contains("chưa công bố", StringComparison.OrdinalIgnoreCase))
-            {
-                finalAnswer = $"{finalAnswer} {CuratedFaqRepository.BuildMixedUnpublishedPolicyNotice()}".Trim();
             }
 
             if (hasUnresolvedFacts && finalStatus == "answered")

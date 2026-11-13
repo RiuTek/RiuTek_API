@@ -67,7 +67,16 @@ public static class ProductSpecFactExtractor
             ["thermalright"] = ["thermalright.com"]
         };
 
+    private static readonly char[] ModelTokenSeparators = [' ', '-', '_', '/', '(', ')'];
     private static readonly string[] StandaloneVariantTokens = ["XT", "XTX", "TI", "SUPER"];
+
+    private static readonly Regex L3LabelBeforeValueRegex = new(
+        @"(?<!\b\d+(?:\.\d+)?\s*MB\s+(?:of\s+)?)(?:\bL3(?:\s*Cache)?\b|\bCache\s*L3\b|\b(?:Intel\s+)?Smart\s*Cache(?:\s*\(\s*L3\s*\))?)\s*(?:[:=\-–—]|\bis\b|\bof\b|\bup\s+to\b)?\s*(?<val>\d+(?:\.\d+)?)\s*MB\b(?!\s*(?:of\s+)?\b(?:L1|L2|Total)\b)",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+    private static readonly Regex L3ValueBeforeLabelRegex = new(
+        @"(?<!\b(?:L1|L2|Total)(?:\s*Cache)?\s*(?:[:=\-–—]|\bis\b|\bof\b|\bup\s+to\b)?\s*)\b(?<val>\d+(?:\.\d+)?)\s*MB\s+(?:of\s+)?(?:(?:Intel\s+)?Smart\s*Cache(?:\s*\(\s*L3\s*\))?|\bL3(?:\s*Cache)?\b|\bCache\s*L3\b)(?!\s*[:=]\s*\d)",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
     private static readonly Dictionary<string, string[]> FactAliases = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -404,7 +413,7 @@ public static class ProductSpecFactExtractor
 
         var host = uri.Host.ToLowerInvariant();
         var tokens = brandAndModel
-            .Split([' ', '-', '_', '/', '(', ')'], StringSplitOptions.RemoveEmptyEntries);
+            .Split(ModelTokenSeparators, StringSplitOptions.RemoveEmptyEntries);
 
         var expectedDomains = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var token in tokens)
@@ -436,7 +445,7 @@ public static class ProductSpecFactExtractor
         }
 
         var rawTokens = brandAndModel
-            .Split([' ', '-', '_', '/', '(', ')'], StringSplitOptions.RemoveEmptyEntries);
+            .Split(ModelTokenSeparators, StringSplitOptions.RemoveEmptyEntries);
 
         var modelTokens = rawTokens
             .Where(tok => tok.Length >= 2 && tok.Any(char.IsDigit))
@@ -503,18 +512,9 @@ public static class ProductSpecFactExtractor
         {
             case "l3cachemb":
             {
-                var hasL3Keyword = Regex.IsMatch(
-                    snippet,
-                    @"(\bL3\b|Smart\s*Cache|Cache\s*L3)",
-                    RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-                var valMatch = Regex.Match(
-                    snippet,
-                    @"\b(\d+(?:\.\d+)?)\s*MB\b",
-                    RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-
-                if (hasL3Keyword && valMatch.Success)
+                if (TryExtractL3CacheMbFromText(snippet, out var normalizedL3Mb, out var signature))
                 {
-                    extractedSignature = $"{valMatch.Groups[1].Value}MB";
+                    extractedSignature = signature;
                     return true;
                 }
                 return false;
@@ -750,5 +750,63 @@ public static class ProductSpecFactExtractor
 
         var snippetText = $"{evidence.SourceTitle}. {evidence.Summary}";
         return TryVerifyFactInSnippet(normalizedFactKey, snippetText, out _);
+    }
+
+    public static bool TryExtractL3CacheMbFromText(
+        string? text,
+        out string normalizedValue,
+        out string signature)
+    {
+        normalizedValue = string.Empty;
+        signature = string.Empty;
+
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        var extractedNumbers = new List<string>();
+
+        foreach (Match match in L3LabelBeforeValueRegex.Matches(text))
+        {
+            if (match.Success && match.Groups["val"].Success)
+            {
+                extractedNumbers.Add(NormalizeNumberToken(match.Groups["val"].Value));
+            }
+        }
+
+        foreach (Match match in L3ValueBeforeLabelRegex.Matches(text))
+        {
+            if (match.Success && match.Groups["val"].Success)
+            {
+                extractedNumbers.Add(NormalizeNumberToken(match.Groups["val"].Value));
+            }
+        }
+
+        var distinctNumbers = extractedNumbers
+            .Where(n => !string.IsNullOrWhiteSpace(n))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (distinctNumbers.Count != 1)
+        {
+            return false;
+        }
+
+        var number = distinctNumbers[0];
+        normalizedValue = $"{number} MB";
+        signature = $"{number}MB";
+        return true;
+    }
+
+    private static string NormalizeNumberToken(string rawNumber)
+    {
+        if (double.TryParse(rawNumber, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed) &&
+            parsed > 0)
+        {
+            return parsed.ToString("0.##", CultureInfo.InvariantCulture);
+        }
+
+        return rawNumber.Trim();
     }
 }
