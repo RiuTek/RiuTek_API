@@ -465,7 +465,8 @@ public class GroqClient : IGroqClient
 
         try
         {
-            var json = JsonSerializer.Serialize(payload, JsonOptions);
+            // Request fields already use Groq's wire names. Preserve JSON Schema keywords.
+            var json = JsonSerializer.Serialize(payload);
             using var request = new HttpRequestMessage(HttpMethod.Post, "chat/completions")
             {
                 Content = new StringContent(json, Encoding.UTF8, "application/json")
