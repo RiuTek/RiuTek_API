@@ -24,4 +24,13 @@ public record AiConsultantResponseDto(
     string Status,
     string Answer,
     IReadOnlyList<AiProductDto> Products,
-    IReadOnlyList<AiSourceDto> Sources);
+    IReadOnlyList<AiSourceDto> Sources,
+    AiBuildDto? Build = null);
+
+public record AiBuildDto(
+    decimal BudgetVnd,
+    decimal TotalVnd,
+    int RecommendedPsuWattage,
+    IReadOnlyList<AiBuildItemDto> Items);
+
+public record AiBuildItemDto(AiProductDto Product, string Component, string Reason, bool AlreadyOwned);

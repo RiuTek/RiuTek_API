@@ -35,7 +35,9 @@ public record GroqStructuredPlan(
     IReadOnlyList<string>? RequiredFacts = null,
     string? ClarificationQuestion = null,
     int? MinPsuWattage = null,
-    int? ExactPsuWattage = null);
+    int? ExactPsuWattage = null,
+    string? BuildUseCase = null,
+    IReadOnlyList<string>? OwnedProducts = null);
 
 public record GroqWebSearchResult(
     string FactKey,

@@ -186,6 +186,13 @@ public class AskAiConsultantQueryHandler : IRequestHandler<AskAiConsultantQuery,
             var plan = planResult.Value;
             var taskType = NormalizeTaskType(plan.TaskType);
 
+            if (taskType == "recommend_build")
+            {
+                var buildResponse = await _mediator.Send(new RecommendAiBuildQuery(plan), cancellationToken);
+                LogMetadata(requestId, analysisCalls, webCalls, synthesisCalls, sw.ElapsedMilliseconds, buildResponse.Status);
+                return Result.Success(buildResponse);
+            }
+
             if (taskType == "out_of_scope")
             {
                 var outOfScopeResponse = new AiConsultantResponseDto(
@@ -1066,7 +1073,7 @@ public class AskAiConsultantQueryHandler : IRequestHandler<AskAiConsultantQuery,
         var normalized = rawTaskType.Trim().ToLowerInvariant();
         return normalized switch
         {
-            "product_info" or "compare" or "recommend" or "faq" or "clarify" or "out_of_scope" => normalized,
+            "product_info" or "compare" or "recommend" or "recommend_build" or "faq" or "clarify" or "out_of_scope" => normalized,
             _ => "product_info"
         };
     }

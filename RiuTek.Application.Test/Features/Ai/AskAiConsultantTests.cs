@@ -423,6 +423,29 @@ public class AskAiConsultantTests
     }
 
     [Fact]
+    public async Task Handle_BuildIntent_DispatchesBuildQueryWithoutFurtherProviderCalls()
+    {
+        var (context, mediatorMock) = SetupDbAndMediator();
+        var plan = new GroqStructuredPlan("recommend_build", [], MaxPrice: 20_000_000, BuildUseCase: "gaming");
+        var buildReply = new AiConsultantResponseDto("answered", "Cấu hình đề xuất", [], [],
+            new AiBuildDto(20_000_000, 19_000_000, 650, []));
+        mediatorMock.Setup(m => m.Send(It.Is<RecommendAiBuildQuery>(query => query.Plan == plan), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(buildReply);
+        var groq = new FakeGroqClient { OnAnalyze = (_, _, _) => Result.Success(plan) };
+        var handler = new AskAiConsultantQueryHandler(mediatorMock.Object, context, new FakeAiRuntimeSettings(),
+            new FakeAiQuotaService(), groq, NullLogger<AskAiConsultantQueryHandler>.Instance);
+
+        var result = await handler.Handle(new AskAiConsultantQuery("Build PC chơi game dưới 20 triệu", null, null, "user:1"),
+            CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Value.Should().BeSameAs(buildReply);
+        groq.AnalyzeCallCount.Should().Be(1);
+        groq.SynthesizeCallCount.Should().Be(0);
+        groq.WebSearchCallCount.Should().Be(0);
+    }
+
+    [Fact]
     public async Task Handle_RecommendWithoutComponentType_AsksInsteadOfSearchingWholeCatalog()
     {
         var (context, mediatorMock) = SetupDbAndMediator();
