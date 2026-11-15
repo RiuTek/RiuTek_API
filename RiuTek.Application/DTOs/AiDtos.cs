@@ -11,7 +11,8 @@ public record AiProductDto(
     string Url,
     decimal PriceVnd,
     bool InStock,
-    bool IsActive);
+    bool IsActive,
+    string? ImageUrl);
 
 public record AiSourceDto(
     string Kind,

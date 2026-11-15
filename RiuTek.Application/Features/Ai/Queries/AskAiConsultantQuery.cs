@@ -1071,7 +1071,8 @@ public class AskAiConsultantQueryHandler : IRequestHandler<AskAiConsultantQuery,
             Url: $"/products/{p.Slug}",
             PriceVnd: p.Price,
             InStock: p.StockQuantity > 0,
-            IsActive: p.IsActive);
+            IsActive: p.IsActive,
+            ImageUrl: p.ImageUrl);
 
     private static List<AiSourceDto> BuildSources(
         IReadOnlyList<ProductDto> catalogProducts,
