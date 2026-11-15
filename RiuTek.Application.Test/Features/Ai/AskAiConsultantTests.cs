@@ -1265,6 +1265,53 @@ public class AskAiConsultantTests
         ev4.Should().BeEmpty();
     }
 
+    [Theory]
+    [InlineData("32 MB", true)]
+    [InlineData("không công bố", false)]
+    public void ExtractVerifiedWebEvidence_BrowserOpenWithLineNumbers_UsesOnlyTheL3Value(
+        string l3Value, bool hasEvidence)
+    {
+        const string amdUrl = "https://www.amd.com/en/products/processors/desktops/ryzen/7000-series/amd-ryzen-5-7600.html";
+
+        // Reduced from the actual browser.open response captured in Postman.
+        var payload = $$"""
+        {
+          "choices": [{
+            "message": {
+              "executed_tools": [{
+                "name": "browser.open",
+                "type": "browser.open",
+                "search_results": {
+                  "results": [{
+                    "title": "www.amd.com - viewing lines [0 - 261] of 261",
+                    "url": "{{amdUrl}}",
+                    "content": "L65: L1 Cache\nL66: \nL67: 384 KB\nL68: \nL69: L2 Cache\nL70: \nL71: 6 MB\nL72: \nL73: L3 Cache\nL74: \nL75: {{l3Value}}\nL76: \nL77: Default TDP\nL78: \nL79: 65W"
+                  }]
+                }
+              }]
+            }
+          }]
+        }
+        """;
+
+        using var json = JsonDocument.Parse(payload);
+        var evidence = GroqClient.ExtractVerifiedWebEvidence(
+            json.RootElement, "AMD Ryzen 5 7600", ["l3CacheMb"], "RT-R5-7600");
+
+        if (hasEvidence)
+        {
+            var fact = evidence.Should().ContainSingle().Subject;
+            fact.FactKey.Should().Be("l3CacheMb");
+            fact.ProductKey.Should().Be("RT-R5-7600");
+            fact.SourceUrl.Should().Be(amdUrl);
+            fact.Summary.Should().Be("AMD Ryzen 5 7600 L3 Cache: 32 MB");
+        }
+        else
+        {
+            evidence.Should().BeEmpty();
+        }
+    }
+
     [Fact]
     public async Task Handle_WhenWebSnippetHasL2AndL3_ForwardsOnly32MbToSynthesisAndReturnsPartialWhenL3HasNoCapacity()
     {

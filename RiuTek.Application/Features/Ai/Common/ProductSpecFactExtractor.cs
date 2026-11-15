@@ -70,12 +70,16 @@ public static class ProductSpecFactExtractor
     private static readonly char[] ModelTokenSeparators = [' ', '-', '_', '/', '(', ')'];
     private static readonly string[] StandaloneVariantTokens = ["XT", "XTX", "TI", "SUPER"];
 
+    private static readonly Regex BrowserLinePrefixRegex = new(
+        @"^L[0-9]+:[ \t]*",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
     private static readonly Regex L3LabelBeforeValueRegex = new(
-        @"(?<!\b\d+(?:\.\d+)?\s*MB\s+(?:of\s+)?)(?:\bL3(?:\s*Cache)?\b|\bCache\s*L3\b|\b(?:Intel\s+)?Smart\s*Cache(?:\s*\(\s*L3\s*\))?)\s*(?:[:=\-–—]|\bis\b|\bof\b|\bup\s+to\b)?\s*(?<val>\d+(?:\.\d+)?)\s*MB\b(?!\s*(?:of\s+)?\b(?:L1|L2|Total)\b)",
+        @"(?<!\b\d+(?:\.\d+)?\s*MB[ \t]+(?:of[ \t]+)?)(?:\bL3(?:\s*Cache)?\b|\bCache\s*L3\b|\b(?:Intel\s+)?Smart\s*Cache(?:\s*\(\s*L3\s*\))?)\s*(?:[:=\-–—]|\bis\b|\bof\b|\bup\s+to\b)?\s*(?<val>\d+(?:\.\d+)?)\s*MB\b(?!\s*(?:of\s+)?\b(?:L1|L2|Total)\b)",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
     private static readonly Regex L3ValueBeforeLabelRegex = new(
-        @"(?<!\b(?:L1|L2|Total)(?:\s*Cache)?\s*(?:[:=\-–—]|\bis\b|\bof\b|\bup\s+to\b)?\s*)\b(?<val>\d+(?:\.\d+)?)\s*MB\s+(?:of\s+)?(?:(?:Intel\s+)?Smart\s*Cache(?:\s*\(\s*L3\s*\))?|\bL3(?:\s*Cache)?\b|\bCache\s*L3\b)(?!\s*[:=]\s*\d)",
+        @"(?<!\b(?:L1|L2|Total)(?:\s*Cache)?\s*(?:[:=\-–—]|\bis\b|\bof\b|\bup\s+to\b)?\s*)\b(?<val>\d+(?:\.\d+)?)\s*MB[ \t]+(?:of[ \t]+)?(?:(?:Intel\s+)?Smart\s*Cache(?:\s*\(\s*L3\s*\))?|\bL3(?:\s*Cache)?\b|\bCache\s*L3\b)(?!\s*[:=]\s*\d)",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
     private static readonly Dictionary<string, string[]> FactAliases = new(StringComparer.OrdinalIgnoreCase)
@@ -765,6 +769,8 @@ public static class ProductSpecFactExtractor
             return false;
         }
 
+        // Browser results can put a numbered line between the label and its value.
+        text = BrowserLinePrefixRegex.Replace(text, string.Empty);
         var extractedNumbers = new List<string>();
 
         foreach (Match match in L3LabelBeforeValueRegex.Matches(text))
