@@ -260,7 +260,7 @@ public class AskAiConsultantQueryHandler : IRequestHandler<AskAiConsultantQuery,
                 {
                     var emptyRecommendResponse = new AiConsultantResponseDto(
                         Status: "answered",
-                        Answer: "Hiện tại RiuTek không tìm thấy linh kiện đang mở bán khớp hoàn toàn với mức ngân sách và tiêu chí kỹ thuật bạn yêu cầu. Bạn có thể cân nhắc nới rộng khoảng giá hoặc thay đổi tiêu chí lọc để có thêm lựa chọn.",
+                        Answer: "Dạ, mình chưa tìm thấy sản phẩm nào ở RiuTek đáp ứng tất cả tiêu chí bạn đưa ra. Bạn muốn mình giữ nguyên ngân sách và thử tìm mẫu tương đương, hay điều chỉnh khoảng giá để có thêm lựa chọn?",
                         Products: [],
                         Sources: [new AiSourceDto("catalog", "Danh mục sản phẩm RiuTek", null, ["priceVnd", "inStock", "isActive"])]);
                     LogMetadata(requestId, analysisCalls, webCalls, synthesisCalls, sw.ElapsedMilliseconds, emptyRecommendResponse.Status);
@@ -539,8 +539,8 @@ public class AskAiConsultantQueryHandler : IRequestHandler<AskAiConsultantQuery,
                     : "insufficient_data";
 
                 var noDataAnswer = noDataStatus == "needs_clarification"
-                    ? "Bạn vui lòng nêu rõ tên hoặc mã sản phẩm cần tra cứu để RiuTek hỗ trợ chính xác nhé."
-                    : "RiuTek không tìm thấy sản phẩm hoặc dữ liệu kỹ thuật đã xác minh cho mẫu linh kiện này trong danh mục hiện tại.";
+                    ? "Dạ, bạn cho mình xin tên hoặc mã linh kiện nhé. Mình sẽ kiểm tra đúng mẫu bạn đang quan tâm."
+                    : "Dạ, mình chưa tìm thấy mẫu này trong danh mục RiuTek hoặc chưa xác minh được thông số bạn hỏi. Bạn muốn mình kiểm tra lại theo mã sản phẩm hay tìm một mẫu tương đương?";
 
                 var insufficientResponse = new AiConsultantResponseDto(
                     Status: noDataStatus,
@@ -648,6 +648,15 @@ public class AskAiConsultantQueryHandler : IRequestHandler<AskAiConsultantQuery,
 
             var responseProducts = catalogProducts.Select(MapToAiProductDto).ToList();
             var responseSources = BuildSources(catalogProducts, allCatalogFactKeys, supportingKeys, matchedFaqs, webFacts);
+
+            if (responseProducts.Count > 0 && (finalStatus is "answered" or "partial") &&
+                !finalAnswer.EndsWith('?'))
+            {
+                var followUp = responseProducts.Any(p => p.IsActive && p.InStock)
+                    ? "Bạn có muốn mình so sánh thêm với mẫu khác hoặc kiểm tra độ phù hợp với cấu hình của bạn không?"
+                    : "Bạn có muốn mình tìm mẫu tương đương đang còn hàng trong cùng tầm giá không?";
+                finalAnswer = $"{finalAnswer}\n\n{followUp}";
+            }
 
             var response = new AiConsultantResponseDto(
                 Status: finalStatus,
@@ -1158,7 +1167,7 @@ public class AskAiConsultantQueryHandler : IRequestHandler<AskAiConsultantQuery,
 
         foreach (var p in catalogProducts)
         {
-            var stockText = p.StockQuantity > 0 ? "còn hàng" : "tạm hết hàng";
+            var stockText = !p.IsActive ? "đã ngừng bán" : p.StockQuantity > 0 ? "còn hàng" : "tạm hết hàng";
             var priceText = string.Format(CultureInfo.InvariantCulture, "{0:N0} VNĐ", p.Price);
             parts.Add($"{p.Name} (SKU: {p.Sku}) hiện có giá {priceText} ({stockText}).");
         }
@@ -1178,7 +1187,7 @@ public class AskAiConsultantQueryHandler : IRequestHandler<AskAiConsultantQuery,
             parts.Add($"Một số thông số kỹ thuật chi tiết ({string.Join(", ", unresolvedMissingFacts)}) hiện chưa có đủ dữ liệu xác minh trong hệ thống.");
         }
 
-        return string.Join(" ", parts);
+        return parts.Count > 0 ? $"Dạ, {string.Join(" ", parts)}" : string.Empty;
     }
 
     private void LogMetadata(

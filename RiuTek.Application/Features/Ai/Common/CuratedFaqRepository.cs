@@ -90,8 +90,8 @@ public static class CuratedFaqRepository
     }
 
     public static string BuildStandaloneUnpublishedPolicyAnswer() =>
-        "Hiện tại RiuTek chưa công bố dữ liệu chính sách được phê duyệt trên hệ thống tư vấn tự động cho nội dung này. Vui lòng liên hệ trực tiếp bộ phận hỗ trợ của RiuTek để được cung cấp thông tin chính xác.";
+        "Dạ, mình chưa có thông tin chính thức từ RiuTek về chính sách bạn hỏi. Bạn muốn mình kiểm tra thêm giá, tình trạng hàng hoặc thông số của sản phẩm nào không?";
 
     public static string BuildMixedUnpublishedPolicyNotice() =>
-        "Lưu ý: Thông tin về chính sách cửa hàng (bảo hành, giao hàng, đổi trả, thanh toán) hiện chưa được công bố trên hệ thống tư vấn tự động của RiuTek.";
+        "Về chính sách bạn hỏi, thông tin này hiện chưa được công bố trong phần tư vấn của RiuTek.";
 }
