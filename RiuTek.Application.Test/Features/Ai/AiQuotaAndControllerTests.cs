@@ -111,7 +111,7 @@ public class AiQuotaAndControllerTests
     }
 
     [Fact]
-    public async Task Ask_WhenInternalTestModeAndCustomerRole_Returns403ProblemDetails()
+    public async Task Ask_WhenGuestAccessIsDisabled_SendsAuthenticatedCustomerIdToHandler()
     {
         var settings = new AiSettings
         {
@@ -119,14 +119,17 @@ public class AiQuotaAndControllerTests
             AllowAnonymous = false,
             Groq = new GroqSettings { ApiKey = "gsk_test_fake_key_not_real" }
         };
-        var customerUser = CreatePrincipal(Guid.NewGuid(), UserRole.Customer);
+        var customerId = Guid.NewGuid();
+        var customerUser = CreatePrincipal(customerId, UserRole.Customer);
         var (controller, senderMock, _) = CreateController(settings, user: customerUser);
+        senderMock.Setup(s => s.Send(It.IsAny<AskAiConsultantQuery>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Result.Success(new AiConsultantResponseDto("answered", "OK", [], [])));
 
         var actionResult = await controller.Ask(new AskAiRequest("Xin chào"), CancellationToken.None);
 
-        var obj = actionResult.Should().BeOfType<ObjectResult>().Subject;
-        obj.StatusCode.Should().Be(StatusCodes.Status403Forbidden);
-        senderMock.Verify(s => s.Send(It.IsAny<AskAiConsultantQuery>(), It.IsAny<CancellationToken>()), Times.Never);
+        actionResult.Should().BeOfType<OkObjectResult>();
+        senderMock.Verify(s => s.Send(It.Is<AskAiConsultantQuery>(query =>
+            query.CustomerId == customerId && query.ClientQuotaKey == $"user:{customerId:D}"), It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]

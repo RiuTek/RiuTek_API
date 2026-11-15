@@ -33,4 +33,4 @@ public record AiBuildDto(
     int RecommendedPsuWattage,
     IReadOnlyList<AiBuildItemDto> Items);
 
-public record AiBuildItemDto(AiProductDto Product, string Component, string Reason, bool AlreadyOwned);
+public record AiBuildItemDto(Guid ProductId, AiProductDto Product, string Component, string Reason, bool AlreadyOwned);

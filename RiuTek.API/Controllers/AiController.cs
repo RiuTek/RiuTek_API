@@ -10,6 +10,7 @@ using RiuTek.Application.Common.Interfaces;
 using RiuTek.Application.Features.Ai.Queries;
 using RiuTek.Core.Common;
 using RiuTek.Core.Constants;
+using RiuTek.Core.Enums;
 using RiuTek.Infrastructure.Security;
 
 namespace RiuTek.API.Controllers;
@@ -50,14 +51,24 @@ public class AiController : ApiControllerBase
                 "Tính năng tư vấn AI hiện đang tắt.");
         }
 
-        if (!_aiSettings.AllowAnonymous)
+        Guid? customerId = null;
+        if (User?.Identity?.IsAuthenticated == true && User.IsInRole(nameof(UserRole.Customer)))
+        {
+            var subject = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? User.FindFirstValue("sub");
+            if (!Guid.TryParse(subject, out var parsedId) || parsedId == Guid.Empty)
+            {
+                return CreateProblemResponse(StatusCodes.Status401Unauthorized, "Ai.Unauthorized", "Phiên đăng nhập không hợp lệ.");
+            }
+            customerId = parsedId;
+        }
+        else if (!_aiSettings.AllowAnonymous)
         {
             if (User?.Identity?.IsAuthenticated != true)
             {
                 return CreateProblemResponse(
                     StatusCodes.Status401Unauthorized,
                     "Ai.Unauthorized",
-                    "Yêu cầu đăng nhập để sử dụng tính năng thử nghiệm nội bộ.");
+                    "Bạn cần đăng nhập để dùng tư vấn AI.");
             }
 
             var authResult = await _authorizationService.AuthorizeAsync(User, null, Policies.ContentManager);
@@ -66,7 +77,7 @@ public class AiController : ApiControllerBase
                 return CreateProblemResponse(
                     StatusCodes.Status403Forbidden,
                     "Ai.Forbidden",
-                    "Tài khoản không có quyền truy cập tính năng thử nghiệm nội bộ.");
+                    "Tài khoản không có quyền dùng tư vấn AI.");
             }
         }
 
@@ -78,13 +89,14 @@ public class AiController : ApiControllerBase
                 "Payload yêu cầu không hợp lệ.");
         }
 
-        var clientQuotaKey = ResolveOrIssueClientQuotaKey();
+        var clientQuotaKey = customerId.HasValue ? $"user:{customerId.Value:D}" : ResolveOrIssueClientQuotaKey();
 
         var query = new AskAiConsultantQuery(
             Question: request.Question ?? string.Empty,
             ProductSlug: request.ProductSlug,
             History: request.History,
-            ClientQuotaKey: clientQuotaKey);
+            ClientQuotaKey: clientQuotaKey,
+            CustomerId: customerId);
 
         var result = await Mediator.Send(query, cancellationToken);
         if (result.IsSuccess)

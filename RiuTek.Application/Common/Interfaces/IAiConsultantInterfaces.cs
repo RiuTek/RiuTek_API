@@ -20,6 +20,7 @@ public record QuotaReservationResult(
 public interface IAiQuotaService
 {
     Task<QuotaReservationResult> ReserveTurnAsync(string clientKey, CancellationToken cancellationToken = default);
+    Task<QuotaReservationResult> ReserveCustomerTurnAsync(CancellationToken cancellationToken = default);
     Task<QuotaReservationResult> ReserveProviderRequestAsync(CancellationToken cancellationToken = default);
     Task<QuotaReservationResult> ReserveWebRequestAsync(CancellationToken cancellationToken = default);
 }

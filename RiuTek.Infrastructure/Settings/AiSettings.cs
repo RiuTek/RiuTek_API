@@ -30,6 +30,7 @@ public class GroqSettings
 public class AiLimitsSettings
 {
     public int TurnsPer15Minutes { get; set; } = 5;
+    public int CustomerTurnsPerDay { get; set; } = 20;
     public int ProviderRequestsPerDay { get; set; } = 100;
     public int WebRequestsPerDay { get; set; } = 20;
 }

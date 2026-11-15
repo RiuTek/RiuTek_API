@@ -19,7 +19,8 @@ public record AskAiConsultantQuery(
     string Question,
     string? ProductSlug,
     IReadOnlyList<ChatMessageDto>? History,
-    string ClientQuotaKey) : IRequest<Result<AiConsultantResponseDto>>;
+    string ClientQuotaKey,
+    Guid? CustomerId = null) : IRequest<Result<AiConsultantResponseDto>>;
 
 public class AskAiConsultantQueryValidator : AbstractValidator<AskAiConsultantQuery>
 {
@@ -134,6 +135,13 @@ public class AskAiConsultantQueryHandler : IRequestHandler<AskAiConsultantQuery,
                     Error.Unavailable("Ai.NotConfigured", "Dịch vụ AI chưa được cấu hình đầy đủ."));
             }
 
+            if (request.CustomerId is Guid customerId && !await _context.Users.AsNoTracking()
+                    .AnyAsync(user => user.Id == customerId && user.IsActive && user.Role == UserRole.Customer, cancellationToken))
+            {
+                return Result.Failure<AiConsultantResponseDto>(Error.Forbidden(
+                    "Ai.AccountUnavailable", "Tài khoản hiện không có quyền dùng tư vấn AI."));
+            }
+
             var question = request.Question.Trim();
             var productSlug = string.IsNullOrWhiteSpace(request.ProductSlug) ? null : request.ProductSlug.Trim();
             var sanitizedHistory = request.History?
@@ -155,6 +163,22 @@ public class AskAiConsultantQueryHandler : IRequestHandler<AskAiConsultantQuery,
                         "Ai.TurnLimitExceeded",
                         "Bạn đã sử dụng hết số lượt hỏi AI trong 15 phút. Vui lòng thử lại sau.",
                         turnQuota.RetryAfterSeconds));
+            }
+
+            if (request.CustomerId.HasValue)
+            {
+                var sharedQuota = await _quotaService.ReserveCustomerTurnAsync(cancellationToken);
+                if (sharedQuota.IsRedisUnavailable)
+                {
+                    return Result.Failure<AiConsultantResponseDto>(
+                        Error.Unavailable("Ai.QuotaUnavailable", "Hệ thống kiểm soát hạn mức AI tạm thời gián đoạn."));
+                }
+                if (!sharedQuota.IsAllowed)
+                {
+                    return Result.Failure<AiConsultantResponseDto>(Error.TooManyRequests(
+                        "Ai.CustomerDailyLimitExceeded", "Tư vấn AI đã hết lượt dành cho khách hàng hôm nay. Bạn vui lòng thử lại sau.",
+                        sharedQuota.RetryAfterSeconds));
+                }
             }
 
             // 2. Reserve provider quota and analyze question

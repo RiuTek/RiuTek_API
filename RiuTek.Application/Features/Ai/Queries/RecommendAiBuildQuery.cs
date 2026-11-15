@@ -171,6 +171,7 @@ public sealed class RecommendAiBuildQueryHandler(
         }
 
         var items = selected.OrderBy(p => Array.IndexOf(BuildSlots, p.ComponentType)).Select(p => new AiBuildItemDto(
+            p.Id,
             new AiProductDto(p.Sku, p.Name, p.Slug, $"/products/{p.Slug}", p.Price, p.StockQuantity > 0, p.IsActive, p.ImageUrl),
             ComponentLabel(p.ComponentType),
             DescribePart(p.Specifications),

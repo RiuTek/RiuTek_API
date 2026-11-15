@@ -71,6 +71,15 @@ return {1, ttl}
         return EvaluateReservationAsync(key, limit, secondsUntilNextUtcDay, "DailyProviderLimitExceeded", cancellationToken);
     }
 
+    public Task<QuotaReservationResult> ReserveCustomerTurnAsync(CancellationToken cancellationToken = default)
+    {
+        var utcNow = DateTime.UtcNow;
+        var key = $"{_redisSettings.InstanceName}ai:quota:customer:{utcNow:yyyyMMdd}";
+        var limit = Math.Max(1, _aiSettings.Limits.CustomerTurnsPerDay);
+        var secondsUntilNextUtcDay = (int)Math.Max(1, Math.Ceiling((utcNow.Date.AddDays(1) - utcNow).TotalSeconds));
+        return EvaluateReservationAsync(key, limit, secondsUntilNextUtcDay, "DailyCustomerTurnLimitExceeded", cancellationToken);
+    }
+
     public Task<QuotaReservationResult> ReserveWebRequestAsync(CancellationToken cancellationToken = default)
     {
         var utcToday = DateTime.UtcNow;

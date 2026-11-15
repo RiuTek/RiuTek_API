@@ -58,6 +58,9 @@ public class AskAiConsultantTests
             return Task.FromResult(new QuotaReservationResult(true, RetryAfterSeconds: 3600));
         }
 
+        public Task<QuotaReservationResult> ReserveCustomerTurnAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult(new QuotaReservationResult(!IsRedisUnavailable, IsRedisUnavailable));
+
         public Task<QuotaReservationResult> ReserveWebRequestAsync(CancellationToken cancellationToken = default)
         {
             if (IsRedisUnavailable)

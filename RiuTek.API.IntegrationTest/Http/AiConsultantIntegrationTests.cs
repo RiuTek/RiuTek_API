@@ -54,13 +54,13 @@ public class AiConsultantIntegrationTests : IAsyncLifetime
         }
     }
 
-    private async Task<string> SeedUserAndGenerateTokenAsync(UserRole role)
+    private async Task<string> SeedUserAndGenerateTokenAsync(UserRole role, bool active = true)
     {
         using var scope = _fixture.Factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
         var jwtGenerator = scope.ServiceProvider.GetRequiredService<IJwtTokenGenerator>();
 
-        var user = new User($"ai-{role}-{Guid.NewGuid():N}@riutek.test", "HashedPw123!", $"Test {role}", role);
+        var user = new User($"ai-{role}-{Guid.NewGuid():N}@riutek.test", "HashedPw123!", $"Test {role}", role) { IsActive = active };
         db.Users.Add(user);
         await db.SaveChangesAsync();
 
@@ -115,7 +115,7 @@ public class AiConsultantIntegrationTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Ask_InternalMode_Enforces401And403AndAllowsContentManager()
+    public async Task Ask_WithGuestAccessDisabled_EnforcesCustomerEligibilityAndSharedQuota()
     {
         await SeedSampleCatalogAsync();
         var fakeGroq = new IntegrationFakeGroqClient();
@@ -150,7 +150,18 @@ public class AiConsultantIntegrationTests : IAsyncLifetime
         using var customerClient = customFactory.CreateClient();
         customerClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", customerToken);
         var custResp = await customerClient.PostAsJsonAsync("/api/v1/ai/ask", new AskAiRequest("i5-14600K giá bao nhiêu?"));
-        custResp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        custResp.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var inactiveToken = await SeedUserAndGenerateTokenAsync(UserRole.Customer, active: false);
+        using var inactiveClient = customFactory.CreateClient();
+        inactiveClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", inactiveToken);
+        var inactiveResp = await inactiveClient.PostAsJsonAsync("/api/v1/ai/ask", new AskAiRequest("i5-14600K giá bao nhiêu?"));
+        inactiveResp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+
+        fakeQuota.AllowCustomerTurn = false;
+        var limited = await customerClient.PostAsJsonAsync("/api/v1/ai/ask", new AskAiRequest("i5-14600K giá bao nhiêu?"));
+        limited.StatusCode.Should().Be(HttpStatusCode.TooManyRequests);
+        limited.Headers.RetryAfter!.Delta.Should().Be(TimeSpan.FromSeconds(120));
 
         var adminToken = await SeedUserAndGenerateTokenAsync(UserRole.Admin);
         using var adminClient = customFactory.CreateClient();
@@ -337,6 +348,11 @@ public class AiConsultantIntegrationTests : IAsyncLifetime
 
     private sealed class IntegrationFakeQuotaService : IAiQuotaService
     {
+        public bool AllowCustomerTurn { get; set; } = true;
+
+        public Task<QuotaReservationResult> ReserveCustomerTurnAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult(new QuotaReservationResult(AllowCustomerTurn, RetryAfterSeconds: 120));
+
         public Task<QuotaReservationResult> ReserveTurnAsync(string clientKey, CancellationToken cancellationToken = default) =>
             Task.FromResult(new QuotaReservationResult(true, RetryAfterSeconds: 900));
 
