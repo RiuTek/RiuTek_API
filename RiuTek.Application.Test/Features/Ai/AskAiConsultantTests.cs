@@ -423,6 +423,65 @@ public class AskAiConsultantTests
     }
 
     [Fact]
+    public async Task Handle_RecommendWithoutComponentType_AsksInsteadOfSearchingWholeCatalog()
+    {
+        var (context, mediatorMock) = SetupDbAndMediator();
+        var groq = new FakeGroqClient
+        {
+            OnAnalyze = (_, _, _) => Result.Success(new GroqStructuredPlan("recommend", [], MaxPrice: 6000000m))
+        };
+        var handler = new AskAiConsultantQueryHandler(
+            mediatorMock.Object, context, new FakeAiRuntimeSettings(), new FakeAiQuotaService(), groq,
+            NullLogger<AskAiConsultantQueryHandler>.Instance);
+
+        var result = await handler.Handle(new AskAiConsultantQuery("Gợi ý linh kiện dưới 6 triệu", null, null, "user:1"),
+            CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Value.Status.Should().Be("needs_clarification");
+        result.Value.Products.Should().BeEmpty();
+        mediatorMock.Verify(m => m.Send(It.IsAny<GetProductsQuery>(), It.IsAny<CancellationToken>()), Times.Never);
+        groq.SynthesizeCallCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Handle_RecommendWithManyMatches_ReturnsOnlyThreeEligibleProducts()
+    {
+        var (context, mediatorMock) = SetupDbAndMediator();
+        var category = new Category("CPU", "cpu", ComponentType.Cpu, "Bộ vi xử lý");
+        context.Categories.Add(category);
+        context.SaveChanges();
+
+        for (var index = 1; index <= 5; index++)
+        {
+            SeedCpuProduct(context, category, name: $"CPU phù hợp {index}", slug: $"eligible-{index}",
+                sku: $"CPU-ELIGIBLE-{index}", price: index * 1000000m);
+        }
+        SeedCpuProduct(context, category, slug: "sold-out", sku: "CPU-OUT", stock: 0, price: 500000m);
+        SeedCpuProduct(context, category, slug: "other-brand", sku: "CPU-OTHER-BRAND", brand: "AMD", price: 500000m);
+        SeedCpuProduct(context, category, slug: "over-budget", sku: "CPU-OVER-BUDGET", price: 7000000m);
+
+        var groq = new FakeGroqClient
+        {
+            OnAnalyze = (_, _, _) => Result.Success(new GroqStructuredPlan("recommend", [],
+                ComponentType: "Cpu", MaxPrice: 6000000m,
+                TechnicalCriteria: new Dictionary<string, string> { ["brand"] = "Intel" }))
+        };
+        var handler = new AskAiConsultantQueryHandler(
+            mediatorMock.Object, context, new FakeAiRuntimeSettings(), new FakeAiQuotaService(), groq,
+            NullLogger<AskAiConsultantQueryHandler>.Instance);
+
+        var result = await handler.Handle(new AskAiConsultantQuery("Gợi ý CPU Intel dưới 6 triệu", null, null, "user:1"),
+            CancellationToken.None);
+
+        string[] expectedSkus = ["CPU-ELIGIBLE-1", "CPU-ELIGIBLE-2", "CPU-ELIGIBLE-3"];
+        result.IsSuccess.Should().BeTrue();
+        result.Value.Products.Select(product => product.Sku).Should().Equal(expectedSkus);
+        groq.LastSynthesisRequest.Should().NotBeNull();
+        groq.LastSynthesisRequest!.CatalogProducts.Select(product => product.Sku).Should().Equal(expectedSkus);
+    }
+
+    [Fact]
     public async Task Handle_WhenMultipleVariantsMatchTarget_ReturnsNeedsClarificationAndZeroWebCalls()
     {
         var (context, mediatorMock) = SetupDbAndMediator();

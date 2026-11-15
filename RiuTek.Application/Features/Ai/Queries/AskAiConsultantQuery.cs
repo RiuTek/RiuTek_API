@@ -70,6 +70,8 @@ public class AskAiConsultantQueryValidator : AbstractValidator<AskAiConsultantQu
 
 public class AskAiConsultantQueryHandler : IRequestHandler<AskAiConsultantQuery, Result<AiConsultantResponseDto>>
 {
+    private const int RecommendationLimit = 3;
+
     private sealed record ProductMissingFactsTarget(
         string ProductKey,
         string BrandAndModel,
@@ -755,7 +757,7 @@ public class AskAiConsultantQueryHandler : IRequestHandler<AskAiConsultantQuery,
             return ([], null);
         }
 
-        var summaryIds = queryResult.Value.Items.Take(5).Select(i => i.Id).ToList();
+        var summaryIds = queryResult.Value.Items.Take(RecommendationLimit).Select(i => i.Id).ToList();
         var products = await _context.Products
             .AsNoTracking()
             .Where(p => summaryIds.Contains(p.Id))
@@ -780,7 +782,8 @@ public class AskAiConsultantQueryHandler : IRequestHandler<AskAiConsultantQuery,
 
         ComponentType? componentType = null;
         if (!string.IsNullOrWhiteSpace(plan.ComponentType) &&
-            Enum.TryParse<ComponentType>(plan.ComponentType.Trim(), ignoreCase: true, out var parsedComp))
+            Enum.TryParse<ComponentType>(plan.ComponentType.Trim(), ignoreCase: true, out var parsedComp) &&
+            Enum.IsDefined(parsedComp))
         {
             componentType = parsedComp;
         }
@@ -983,15 +986,25 @@ public class AskAiConsultantQueryHandler : IRequestHandler<AskAiConsultantQuery,
             (minPrice, maxPrice) = (maxPrice, minPrice);
         }
 
+        if (!componentType.HasValue)
+        {
+            invalidFilterResponse = new AiConsultantResponseDto(
+                Status: "needs_clarification",
+                Answer: "Dạ, bạn đang cần loại linh kiện nào và có ngân sách khoảng bao nhiêu để mình gợi ý mẫu phù hợp?",
+                Products: [],
+                Sources: []);
+            return null;
+        }
+
         return new ProductFilterOptions(
             PageIndex: 1,
-            PageSize: 5,
+            PageSize: RecommendationLimit,
             SearchTerm: searchTerm,
             ComponentType: componentType,
             Brand: brandFilter,
             MinPrice: minPrice,
             MaxPrice: maxPrice,
-            InStock: plan.InStockOnly ?? true,
+            InStock: plan.InStockOnly == false ? null : true,
             IsActive: true,
             SortBy: ProductSortOption.PriceLowToHigh,
             Socket: socket,
