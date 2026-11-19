@@ -18,11 +18,11 @@
 
 ---
 
-RiuTek is a personal e-commerce project that helps customers buy PC components and choose parts for a custom build. This repository contains the backend: catalog and compatibility rules, accounts, checkout, payments and store administration.
+RiuTek is a personal e-commerce project that helps customers buy PC components and choose parts for a custom build. This repository contains the backend for the catalog, hardware compatibility checks, AI shopping assistant, accounts, checkout, payments and store administration.
 
 > **Demo scope** — The application is deployed for portfolio demonstrations. Stripe uses test mode.
 
-[Features](#features) · [Architecture](#architecture) · [Technology](#technology) · [Setup](#run-locally) · [Testing](#build-and-test) · [Deployment](#deployment) · [Roadmap](#roadmap)
+[Features](#features) · [AI assistant](#ai-assistant) · [Architecture](#architecture) · [Technology](#technology) · [Setup](#run-locally) · [Testing](#build-and-test) · [Deployment](#deployment) · [Roadmap](#roadmap)
 
 ## Features
 
@@ -31,6 +31,7 @@ RiuTek is a personal e-commerce project that helps customers buy PC components a
 | **Accounts** | JWT authentication, rotating refresh tokens in HttpOnly cookies, profiles, delivery addresses and Customer/Staff/Admin permissions. |
 | **Catalog** | nested categories, nine component types, structured hardware specifications, keyword search, technical filters, sorting and pagination. |
 | **PC Builder** | anonymous compatibility previews, customer saved configurations, quantity-aware checks, build-to-cart and direct build checkout. Compatibility findings are advisory; price, availability and stock are checked separately when purchasing. |
+| **AI assistant** | Vietnamese product advice grounded in the live catalog, up to three component recommendations, optional manufacturer-source lookup, and one PC configuration based on use and budget. Follow-up requests can keep a CPU, change a GPU or reduce the budget. |
 | **Cart and checkout** | authenticated persistent carts, version checks, checkout of selected cart items, Buy Now for individual products or saved builds, checkout quotes and idempotent order creation. Inactive carts are cleaned up after 30 days. |
 | **Orders and payments** | customer order history/cancellation, staff fulfillment actions, COD and Stripe Checkout in test mode. Signed Stripe webhooks handle payment events and stock restoration where applicable. |
 | **Inventory** | stock movement history and manual adjustments with concurrency checks. Creation, import, checkout, cancellation and payment expiration record their stock changes. |
@@ -38,6 +39,34 @@ RiuTek is a personal e-commerce project that helps customers buy PC components a
 | **Content** | post/comment APIs, purchased-product reviews with ratings and moderation, and homepage banner management. Banner images reuse the R2 upload flow; referenced media is protected from deletion. |
 
 Posts, comments and reviews are implemented as backend APIs; their customer-facing frontend screens are not part of the current web release. PNG export is implemented by the frontend in the browser, without an export API or stored image.
+
+## AI assistant
+
+The storefront's floating chat uses `POST /api/v1/ai/ask`. Customers with active accounts, Staff and Admin can use it while guest access is disabled through `Ai__AllowAnonymous=false`.
+
+```mermaid
+flowchart TD
+    Question[Customer question and recent build context] --> Plan[Groq structured request plan]
+    Plan --> Catalog[Query RiuTek catalog]
+    Catalog --> Build[Allocate a PC budget by intended use]
+    Build --> Check[Run hardware compatibility checks]
+    Check --> Proposal[Return one configuration within budget]
+    Proposal --> Builder[Open in PC Builder for editing]
+    Catalog --> Missing{Requested technical fact missing?}
+    Missing -->|Web lookup enabled| Sources[Check manufacturer evidence]
+    Sources --> Reply[Product advice with prices, stock and sources]
+    Missing -->|No lookup needed or available| Reply
+```
+
+**Product advice.** Groq interprets the question, and the application queries actual catalog records for products, prices and availability. Recommendations are filtered by the understood requirements and limited to three items. Optional web lookup supplies missing technical facts after checking that the evidence matches the requested model. Unresolved facts are reported as such. Store-policy answers depend on approved FAQ entries, which are currently empty.
+
+**PC recommendations.** The application allocates the available budget according to office, gaming or content-creation use, then searches a bounded candidate set and runs the existing compatibility service. Required and already-owned parts are preserved, and owned parts are excluded from the shopping total. Budget ranking uses catalog prices and specifications, with heuristic priorities for CPU, GPU, memory and storage.
+
+**Follow-up changes.** The client sends the previous configuration's product IDs and constraints. The backend resolves those IDs against the database and checks current prices, availability, budget and compatibility again. Keeping a part preserves its exact model and whether the user marked it as already owned. The frontend can open the result as an editable PC Builder draft.
+
+These recommendations use catalog specifications and price tiers. Benchmark-based performance predictions and FPS estimates are future work.
+
+**Usage controls.** Redis reserves quotas atomically. The default limits are 10 questions per account per 15 minutes, 50 customer questions shared across all customer accounts per UTC day, 200 provider requests per UTC day and 30 web lookups per UTC day. A question can consume more than one provider request. Exhausted limits return HTTP `429` with `Retry-After`; unavailable quota storage blocks AI requests. Limits can be overridden through runtime configuration.
 
 ## Architecture
 
@@ -58,7 +87,7 @@ flowchart LR
 | :--- | :--- |
 | `Core` | Entities, component specifications and business rules |
 | `Application` | Commands, queries, validators, DTOs and integration interfaces |
-| `Infrastructure` | EF Core, PostgreSQL, Redis, authentication, Stripe and R2 adapters |
+| `Infrastructure` | EF Core, PostgreSQL, Redis, authentication, Groq, Stripe and R2 adapters |
 | `API` | HTTP contracts, controllers and application startup |
 
 Core does not depend on the outer layers. Application depends on Core; Infrastructure implements the interfaces used by Application. API composes the application and infrastructure services.
@@ -74,10 +103,11 @@ Expected business failures use Result/Error responses. FluentValidation runs in 
 | Database | PostgreSQL, EF Core 10, Npgsql |
 | Authentication | JWT Bearer, BCrypt, refresh-token rotation |
 | Integrations | Redis, Stripe Checkout, Cloudflare R2/S3 API, ClosedXML |
+| AI | GroqCloud HTTP API, structured JSON plans, catalog queries, manufacturer-source verification |
 | Testing | xUnit, FluentAssertions, PostgreSQL Testcontainers |
 | Deployment | Docker, GitHub Actions, Azure Container Registry, Azure App Service |
 
-The database includes pgvector support for future embedding search. AI recommendations and semantic search are not implemented yet.
+The database includes pgvector support for future embedding search. Current AI retrieval uses catalog queries and structured specification filters.
 
 ## Run locally
 
@@ -101,6 +131,7 @@ $env:RedisSettings__Enabled = "false"
 $env:Stripe__Enabled = "false"
 $env:R2__Enabled = "false"
 $env:CartCleanup__Enabled = "false"
+$env:Ai__Enabled = "false"
 
 dotnet restore RiuTek_API.slnx
 dotnet ef database update --project RiuTek.Infrastructure --startup-project RiuTek.API
@@ -122,8 +153,12 @@ Configure these only when enabling the corresponding integration:
 | Redis | RedisSettings__Enabled, RedisSettings__ConnectionString |
 | Stripe test mode | Stripe__Enabled, Stripe__SecretKey, Stripe__WebhookSecret, Stripe__SuccessUrl, Stripe__CancelUrl |
 | Cloudflare R2 | R2__Enabled, R2__ServiceUrl, R2__PublicBaseUrl, R2__BucketName, R2__AccessKeyId, R2__SecretAccessKey |
+| Groq AI | Ai__Enabled, Ai__Groq__ApiKey, Ai__Groq__Model, Ai__AllowAnonymous, Ai__WebSearchEnabled |
+| AI limits | Ai__Limits__TurnsPer15Minutes, Ai__Limits__CustomerTurnsPerDay, Ai__Limits__ProviderRequestsPerDay, Ai__Limits__WebRequestsPerDay |
 
 Keep secrets in runtime environment settings, outside source control. See the configuration classes for optional non-secret limits and timeouts. Never put backend credentials in the frontend's public VITE variables.
+
+AI requires Redis for quota checks and a Groq API key supplied at runtime. Set `Ai__AllowAnonymous=false` for the signed-in experience. Enable web lookup only with a provider model that supports the configured browser-search tool. The Groq key belongs in the backend's Azure environment settings when deployed.
 
 </details>
 
@@ -135,7 +170,7 @@ dotnet test RiuTek.Application.Test/RiuTek.Application.Test.csproj -c Release
 dotnet test RiuTek.API.IntegrationTest/RiuTek.API.IntegrationTest.csproj -c Release
 ```
 
-The integration tests start an isolated PostgreSQL/pgvector container and apply migrations. They do not use the production Supabase database. External services are replaced with test implementations where appropriate.
+The integration tests start an isolated PostgreSQL/pgvector container and apply migrations. They do not use the production Supabase database. External services are replaced with test implementations where appropriate. AI tests cover budget allocation, revisions, owned parts, evidence parsing, account eligibility and quotas, including HTTP revision requests against PostgreSQL with changed catalog prices.
 
 ## Deployment
 
@@ -156,6 +191,7 @@ This is a personal portfolio project. Stripe runs in test mode; the deployed sit
 Planned additions:
 
 - Customer-facing posts, comments and reviews screens, using the existing APIs.
-- AI-assisted build recommendations and semantic product search.
+- Embedding-based semantic product search with pgvector.
+- Benchmark-backed ranking and more detailed application/game-specific PC recommendations.
 - VNPay integration and broader return/refund workflows.
 - Laptop and prebuilt-PC catalog support as independent stocked products, without component-level stock or compatibility rules for those products.
