@@ -38,7 +38,10 @@ public record GroqStructuredPlan(
     int? MinPsuWattage = null,
     int? ExactPsuWattage = null,
     string? BuildUseCase = null,
-    IReadOnlyList<string>? OwnedProducts = null);
+    IReadOnlyList<string>? OwnedProducts = null,
+    string? BuildAction = null,
+    IReadOnlyList<string>? KeepComponents = null,
+    string? UpgradeComponent = null);
 
 public record GroqWebSearchResult(
     string FactKey,

@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Diagnostics;
 using System.Text.RegularExpressions;
+using System.Text.Json;
 using FluentValidation;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
@@ -20,7 +21,8 @@ public record AskAiConsultantQuery(
     string? ProductSlug,
     IReadOnlyList<ChatMessageDto>? History,
     string ClientQuotaKey,
-    Guid? CustomerId = null) : IRequest<Result<AiConsultantResponseDto>>;
+    Guid? CustomerId = null,
+    AiPreviousBuildDto? PreviousBuild = null) : IRequest<Result<AiConsultantResponseDto>>;
 
 public class AskAiConsultantQueryValidator : AbstractValidator<AskAiConsultantQuery>
 {
@@ -32,6 +34,18 @@ public class AskAiConsultantQueryValidator : AbstractValidator<AskAiConsultantQu
 
     public AskAiConsultantQueryValidator()
     {
+        When(x => x.PreviousBuild != null, () =>
+        {
+            RuleFor(x => x.PreviousBuild!.BudgetVnd).GreaterThan(0).LessThanOrEqualTo(1_000_000_000m);
+            RuleFor(x => x.PreviousBuild!.UseCase).Must(value => value is "office" or "gaming" or "creation");
+            RuleFor(x => x.PreviousBuild!.MinRamGb).InclusiveBetween(0, 1_000_000);
+            RuleFor(x => x.PreviousBuild!.MinStorageGb).InclusiveBetween(0, 1_000_000);
+            RuleFor(x => x.PreviousBuild!.KeptComponents).Must(values => values == null ||
+                (values.Count <= 8 && values.All(value => value is "Cpu" or "Motherboard" or "Ram" or "Storage" or "Gpu" or "Psu" or "Case" or "Cooler")));
+            RuleFor(x => x.PreviousBuild!.Items).NotNull().Must(items => items is { Count: > 0 and <= 8 } &&
+                items.All(item => item != null && item.ProductId != Guid.Empty) &&
+                items.Select(item => item.ProductId).Distinct().Count() == items.Count);
+        });
         RuleFor(x => x.Question)
             .NotEmpty()
             .WithMessage("Câu hỏi không được để trống.")
@@ -199,6 +213,31 @@ public class AskAiConsultantQueryHandler : IRequestHandler<AskAiConsultantQuery,
             }
 
             analysisCalls++;
+            if (request.PreviousBuild is { } previousBuild)
+            {
+                var previousIds = previousBuild.Items.Select(item => item.ProductId).ToList();
+                var previousProducts = await _context.Products.AsNoTracking().Where(product => previousIds.Contains(product.Id))
+                    .Select(product => new { product.Id, product.Sku, product.ComponentType }).ToListAsync(cancellationToken);
+                var snapshot = JsonSerializer.Serialize(new
+                {
+                    previous_build = new
+                    {
+                        budget_vnd = previousBuild.BudgetVnd,
+                        use_case = previousBuild.UseCase,
+                        min_ram_gb = previousBuild.MinRamGb,
+                        min_storage_gb = previousBuild.MinStorageGb,
+                        kept_components = previousBuild.KeptComponents,
+                        items = previousProducts.Select(product => new
+                        {
+                            sku = product.Sku,
+                            component = product.ComponentType.ToString(),
+                            already_owned = previousBuild.Items.First(item => item.ProductId == product.Id).AlreadyOwned
+                        })
+                    }
+                });
+                sanitizedHistory = (sanitizedHistory ?? []).TakeLast(3)
+                    .Append(new ChatMessageDto("assistant", snapshot)).ToList();
+            }
             var planResult = await _groqClient.AnalyzeQuestionAsync(question, productSlug, sanitizedHistory, cancellationToken);
             if (planResult.IsFailure)
             {
@@ -212,7 +251,7 @@ public class AskAiConsultantQueryHandler : IRequestHandler<AskAiConsultantQuery,
 
             if (taskType == "recommend_build")
             {
-                var buildResponse = await _mediator.Send(new RecommendAiBuildQuery(plan), cancellationToken);
+                var buildResponse = await _mediator.Send(new RecommendAiBuildQuery(plan, request.PreviousBuild), cancellationToken);
                 LogMetadata(requestId, analysisCalls, webCalls, synthesisCalls, sw.ElapsedMilliseconds, buildResponse.Status);
                 return Result.Success(buildResponse);
             }

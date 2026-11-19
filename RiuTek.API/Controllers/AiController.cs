@@ -96,7 +96,8 @@ public class AiController : ApiControllerBase
             ProductSlug: request.ProductSlug,
             History: request.History,
             ClientQuotaKey: clientQuotaKey,
-            CustomerId: customerId);
+            CustomerId: customerId,
+            PreviousBuild: request.PreviousBuild);
 
         var result = await Mediator.Send(query, cancellationToken);
         if (result.IsSuccess)

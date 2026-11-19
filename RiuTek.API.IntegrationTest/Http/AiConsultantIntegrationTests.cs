@@ -179,6 +179,78 @@ public class AiConsultantIntegrationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Ask_BuildRevision_UsesPostedSnapshotAndRechecksPricesInPostgreSql()
+    {
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            (string Sku, decimal Price, ComponentSpecification Specs)[] parts =
+            [
+                ("BUILD-CPU", 2_000_000, new CpuSpecification { Socket = CpuSocket.AM5, CoreCount = 6, TdpWattage = 65, HasIntegratedGpu = true }),
+                ("BUILD-BOARD", 1_000_000, new MotherboardSpecification { Socket = CpuSocket.AM5, MemoryType = RamType.DDR5, FormFactor = MotherboardFormFactor.ATX }),
+                ("BUILD-RAM", 1_000_000, new RamSpecification { CapacityGb = 16, MemoryType = RamType.DDR5 }),
+                ("BUILD-SSD", 1_000_000, new StorageSpecification { StorageType = StorageType.NVMe_M2, CapacityGb = 1000 }),
+                ("BUILD-GPU", 2_000_000, new GpuSpecification { VramGb = 8, LengthMm = 200, TdpWattage = 160, RecommendedPsuWattage = 550 }),
+                ("BUILD-GPU-UP", 4_000_000, new GpuSpecification { VramGb = 12, LengthMm = 250, TdpWattage = 180, RecommendedPsuWattage = 550 }),
+                ("BUILD-PSU", 1_000_000, new PsuSpecification { Wattage = 650 }),
+                ("BUILD-CASE", 500_000, new CaseSpecification { SupportedFormFactors = [MotherboardFormFactor.ATX], MaxGpuLengthMm = 300, MaxCpuCoolerHeightMm = 160 }),
+                ("BUILD-COOLER", 500_000, new CoolerSpecification { CoolerType = CoolerType.Air, SupportedSockets = [CpuSocket.AM5], HeightMm = 140, MaxTdpRating = 100 })
+            ];
+            foreach (var group in parts.GroupBy(part => part.Specs.ComponentType))
+            {
+                var category = new Category(group.Key.ToString(), $"build-{group.Key.ToString().ToLowerInvariant()}", group.Key, "Build integration");
+                db.Categories.Add(category);
+                foreach (var part in group)
+                    db.Products.Add(new Product(category.Id, part.Sku, part.Sku.ToLowerInvariant(), part.Sku, "Demo", part.Price, 2,
+                        "https://example.com/part.png", group.Key, part.Specs));
+            }
+            await db.SaveChangesAsync();
+        }
+
+        var fakeGroq = new IntegrationFakeGroqClient();
+        await using var factory = _fixture.Factory.WithWebHostBuilder(builder => builder.ConfigureServices(services =>
+        {
+            services.RemoveAll<IAiRuntimeSettings>();
+            services.RemoveAll<IGroqClient>();
+            services.RemoveAll<IAiQuotaService>();
+            services.AddSingleton<IAiRuntimeSettings>(new IntegrationFakeSettings { AllowAnonymous = false });
+            services.AddSingleton<IGroqClient>(fakeGroq);
+            services.AddSingleton<IAiQuotaService>(new IntegrationFakeQuotaService());
+        }));
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", await SeedUserAndGenerateTokenAsync(UserRole.Customer));
+        fakeGroq.OnAnalyze = _ => Result.Success(new GroqStructuredPlan("recommend_build", [], MaxPrice: 9_000_000, BuildUseCase: "gaming"));
+        var first = await client.PostAsJsonAsync("/api/v1/ai/ask", new AskAiRequest("PC chơi game dưới 9 triệu"));
+        first.StatusCode.Should().Be(HttpStatusCode.OK);
+        var initial = (await first.Content.ReadFromJsonAsync<AiConsultantResponseDto>(JsonOptions))!.Build!;
+        initial.Items.Select(item => item.Product.Sku).Should().Contain("BUILD-GPU");
+        var snapshot = new AiPreviousBuildDto(initial.BudgetVnd, initial.UseCase!,
+            initial.Items.Select(item => new AiPreviousBuildItemDto(item.ProductId, item.AlreadyOwned)).ToList());
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var cpu = await db.Products.SingleAsync(part => part.Sku == "BUILD-CPU");
+            cpu.Price = 2_500_000;
+            await db.SaveChangesAsync();
+        }
+        fakeGroq.OnAnalyze = _ => Result.Success(new GroqStructuredPlan("recommend_build", [], MaxPrice: 12_000_000,
+            BuildAction: "revise", KeepComponents: ["Cpu"], UpgradeComponent: "Gpu"));
+        var revised = await client.PostAsJsonAsync("/api/v1/ai/ask", new AskAiRequest("Giữ CPU, nâng GPU, ngân sách 12 triệu", PreviousBuild: snapshot));
+        revised.StatusCode.Should().Be(HttpStatusCode.OK);
+        var updated = (await revised.Content.ReadFromJsonAsync<AiConsultantResponseDto>(JsonOptions))!.Build!;
+        updated.Items.Should().ContainSingle(item => item.Product.Sku == "BUILD-CPU" && item.Product.PriceVnd == 2_500_000 && !item.AlreadyOwned);
+        updated.Items.Select(item => item.Product.Sku).Should().Contain("BUILD-GPU-UP");
+        updated.TotalVnd.Should().Be(11_500_000);
+        fakeGroq.LastHistory.Should().Contain(message => message.Content.Contains("previous_build") && message.Content.Contains("BUILD-CPU"));
+        fakeGroq.WebCalls.Should().Be(0);
+
+        var malformed = await client.PostAsJsonAsync("/api/v1/ai/ask", new AskAiRequest("Giữ CPU", PreviousBuild:
+            snapshot with { Items = [new AiPreviousBuildItemDto(Guid.Empty, false)] }));
+        malformed.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+    }
+
+    [Fact]
     public async Task Ask_PsuWattageMinimumVsExact_FiltersInPostgreSqlBeforePaginationAndExcludesInvalidRows()
     {
         using (var scope = _fixture.Factory.Services.CreateScope())
@@ -366,6 +438,7 @@ public class AiConsultantIntegrationTests : IAsyncLifetime
     private sealed class IntegrationFakeGroqClient : IGroqClient
     {
         public int WebCalls { get; private set; }
+        public IReadOnlyList<ChatMessageDto>? LastHistory { get; private set; }
         public Func<string, Result<GroqStructuredPlan>>? OnAnalyze { get; set; }
 
         public Task<Result<GroqStructuredPlan>> AnalyzeQuestionAsync(
@@ -374,6 +447,7 @@ public class AiConsultantIntegrationTests : IAsyncLifetime
             IReadOnlyList<ChatMessageDto>? history,
             CancellationToken cancellationToken = default)
         {
+            LastHistory = history;
             if (OnAnalyze != null)
             {
                 return Task.FromResult(OnAnalyze(question));

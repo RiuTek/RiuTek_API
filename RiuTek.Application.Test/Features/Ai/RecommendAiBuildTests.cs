@@ -1,5 +1,6 @@
 using FluentAssertions;
 using RiuTek.Application.Common.Interfaces;
+using RiuTek.Application.DTOs;
 using RiuTek.Application.Features.Ai.Queries;
 using RiuTek.Application.Services;
 using RiuTek.Application.Test.Helpers;
@@ -12,6 +13,129 @@ namespace RiuTek.Application.Test.Features.Ai;
 
 public class RecommendAiBuildTests
 {
+    [Theory]
+    [InlineData("gaming", "CPU-OFFICE", "GPU-UPPER", "RAM-16")]
+    [InlineData("creation", "CPU-CREATION", "GPU-FITS", "RAM-32")]
+    public async Task BudgetAllocation_PrioritizesDifferentPartsForTheSameBudget(
+        string useCase, string expectedCpu, string expectedGpu, string expectedRam)
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        await SeedCatalog(context);
+        await AddAlternatives(context);
+        var reply = await new RecommendAiBuildQueryHandler(context, new HardwareCompatibilityService())
+            .Handle(new RecommendAiBuildQuery(new GroqStructuredPlan("recommend_build", [],
+                MaxPrice: 12_000_000, BuildUseCase: useCase)), CancellationToken.None);
+
+        reply.Status.Should().Be("answered");
+        reply.Build!.TotalVnd.Should().BeLessThanOrEqualTo(12_000_000);
+        reply.Build.Items.Select(item => item.Product.Sku).Should().Contain([expectedCpu, expectedGpu, expectedRam]);
+    }
+
+    [Fact]
+    public async Task Revise_KeepCpuUpgradeGpuThenLowerBudget_ReusesExactSnapshotAndRevalidates()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        await SeedCatalog(context);
+        await AddAlternatives(context);
+        var handler = new RecommendAiBuildQueryHandler(context, new HardwareCompatibilityService());
+        var first = await handler.Handle(new RecommendAiBuildQuery(new GroqStructuredPlan("recommend_build", [],
+            MaxPrice: 9_000_000, BuildUseCase: "gaming")), CancellationToken.None);
+        var previous = Previous(first.Build!);
+        var upgradePlan = new GroqStructuredPlan("recommend_build", [], MaxPrice: 12_000_000,
+            BuildAction: "revise", KeepComponents: ["Cpu"], UpgradeComponent: "Gpu");
+
+        var upgraded = await handler.Handle(new RecommendAiBuildQuery(upgradePlan, previous), CancellationToken.None);
+        upgraded.Status.Should().Be("answered");
+        upgraded.Build!.UseCase.Should().Be("gaming");
+        upgraded.Build.Items.Should().ContainSingle(item => item.Product.Sku == "CPU-OFFICE" && !item.AlreadyOwned);
+        upgraded.Build.Items.Should().ContainSingle(item => item.Product.Sku == "GPU-UPPER");
+        upgraded.Build.TotalVnd.Should().Be(upgraded.Build.Items.Sum(item => item.Product.PriceVnd));
+
+        var reduced = await handler.Handle(new RecommendAiBuildQuery(new GroqStructuredPlan("recommend_build", [],
+            MaxPrice: 9_000_000, BuildAction: "revise"), Previous(upgraded.Build)), CancellationToken.None);
+        reduced.Status.Should().Be("answered");
+        reduced.Build!.BudgetVnd.Should().Be(9_000_000);
+        reduced.Build.TotalVnd.Should().BeLessThanOrEqualTo(9_000_000);
+        reduced.Build.Items.Select(item => item.Product.Sku).Should().Contain(["CPU-OFFICE", "GPU-FITS"]);
+    }
+
+    [Fact]
+    public async Task Revise_WhenUpgradeCannotFitBudget_DoesNotReturnTheSameGpuAsAnUpgrade()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        await SeedCatalog(context);
+        await AddAlternatives(context);
+        var handler = new RecommendAiBuildQueryHandler(context, new HardwareCompatibilityService());
+        var first = await handler.Handle(new RecommendAiBuildQuery(new GroqStructuredPlan("recommend_build", [],
+            MaxPrice: 9_000_000, BuildUseCase: "gaming")), CancellationToken.None);
+
+        var revised = await handler.Handle(new RecommendAiBuildQuery(new GroqStructuredPlan("recommend_build", [],
+            BuildAction: "revise", KeepComponents: ["Cpu"], UpgradeComponent: "Gpu"), Previous(first.Build!)), CancellationToken.None);
+        revised.Status.Should().Be("insufficient_data");
+        revised.Build.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Revise_PreservesOwnedPartAndMinimumCapacityAndChecksItsAvailabilityAgain()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        await SeedCatalog(context);
+        await AddAlternatives(context);
+        var handler = new RecommendAiBuildQueryHandler(context, new HardwareCompatibilityService());
+        var first = await handler.Handle(new RecommendAiBuildQuery(new GroqStructuredPlan("recommend_build", [],
+            MaxPrice: 12_000_000, BuildUseCase: "gaming", OwnedProducts: ["CPU-OWNED"],
+            TechnicalCriteria: new Dictionary<string, string> { ["minRamGb"] = "32" })), CancellationToken.None);
+
+        var reduced = await handler.Handle(new RecommendAiBuildQuery(new GroqStructuredPlan("recommend_build", [],
+            MaxPrice: 8_000_000, BuildAction: "revise"), Previous(first.Build!)), CancellationToken.None);
+        reduced.Status.Should().Be("answered");
+        reduced.Build!.Items.Should().ContainSingle(item => item.Product.Sku == "CPU-OWNED" && item.AlreadyOwned);
+        reduced.Build.Items.Select(item => item.Product.Sku).Should().Contain("RAM-32");
+        reduced.Build.TotalVnd.Should().Be(8_000_000);
+
+        var ram = context.Products.Single(product => product.Sku == "RAM-32");
+        ram.IsActive = false;
+        await context.SaveChangesAsync();
+        var unavailable = await handler.Handle(new RecommendAiBuildQuery(new GroqStructuredPlan("recommend_build", [],
+            BuildAction: "revise"), Previous(reduced.Build)), CancellationToken.None);
+        unavailable.Build.Should().BeNull();
+
+        var fresh = await handler.Handle(new RecommendAiBuildQuery(new GroqStructuredPlan("recommend_build", [],
+            MaxPrice: 8_000_000, BuildUseCase: "office", BuildAction: "new"), Previous(first.Build!)), CancellationToken.None);
+        fresh.Status.Should().Be("answered");
+        fresh.Build!.Items.Should().NotContain(item => item.AlreadyOwned);
+        fresh.Build.Items.Select(item => item.Product.Sku).Should().Contain(["CPU-OFFICE", "RAM-16"]);
+    }
+
+    [Fact]
+    public async Task RevisionWithoutSnapshot_RequestsClarification()
+    {
+        await using var context = TestDbContextFactory.CreateInMemoryDbContext();
+        var result = await new RecommendAiBuildQueryHandler(context, new HardwareCompatibilityService())
+            .Handle(new RecommendAiBuildQuery(new GroqStructuredPlan("recommend_build", [],
+                BuildAction: "revise", KeepComponents: ["Cpu"])), CancellationToken.None);
+        result.Status.Should().Be("needs_clarification");
+        result.Build.Should().BeNull();
+    }
+
+    private static AiPreviousBuildDto Previous(AiBuildDto build) => new(build.BudgetVnd, build.UseCase!,
+        build.Items.Select(item => new AiPreviousBuildItemDto(item.ProductId, item.AlreadyOwned)).ToList(), build.MinRamGb, build.MinStorageGb, build.KeptComponents);
+
+    private static async Task AddAlternatives(TestApplicationDbContext context)
+    {
+        var cpu = context.Products.Single(product => product.Sku == "CPU-OFFICE");
+        var gpu = context.Products.Single(product => product.Sku == "GPU-FITS");
+        var ram = context.Products.Single(product => product.Sku == "RAM-16");
+        context.Products.AddRange(
+            new Product(cpu.CategoryId, "CPU creation", "cpu-creation", "CPU-CREATION", "Demo", 4_000_000, 2, cpu.ImageUrl,
+                ComponentType.Cpu, ((CpuSpecification)cpu.Specifications) with { CoreCount = 12 }),
+            new Product(gpu.CategoryId, "GPU upper", "gpu-upper", "GPU-UPPER", "Demo", 4_000_000, 2, gpu.ImageUrl,
+                ComponentType.Gpu, ((GpuSpecification)gpu.Specifications) with { VramGb = 12 }),
+            new Product(ram.CategoryId, "RAM 32", "ram-32", "RAM-32", "Demo", 2_000_000, 2, ram.ImageUrl,
+                ComponentType.Ram, ((RamSpecification)ram.Specifications) with { CapacityGb = 32 }));
+        await context.SaveChangesAsync();
+    }
+
     [Fact]
     public async Task GamingBuild_ReusesOwnedCpuAndSkipsIncompatibleAndUnavailableParts()
     {
@@ -89,7 +213,8 @@ public class RecommendAiBuildTests
     {
         var result = GroqClient.ParseStructuredPlanJson("""
             {"task_type":"recommend_build","build_use_case":"gaming","max_price":20000000,
-             "target_products":["GPU-FITS"],"owned_products":["CPU-OWNED"]}
+             "target_products":["GPU-FITS"],"owned_products":["CPU-OWNED"],
+             "build_action":"revise","keep_components":["Cpu"],"upgrade_component":"Gpu"}
             """);
 
         result.IsSuccess.Should().BeTrue();
@@ -97,6 +222,9 @@ public class RecommendAiBuildTests
         result.Value.MaxPrice.Should().Be(20_000_000);
         result.Value.TargetProducts.Should().Equal("GPU-FITS");
         result.Value.OwnedProducts.Should().Equal("CPU-OWNED");
+        result.Value.BuildAction.Should().Be("revise");
+        result.Value.KeepComponents.Should().Equal("Cpu");
+        result.Value.UpgradeComponent.Should().Be("Gpu");
     }
 
     private static async Task SeedCatalog(TestApplicationDbContext context)

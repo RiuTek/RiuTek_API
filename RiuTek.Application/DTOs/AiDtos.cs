@@ -31,6 +31,20 @@ public record AiBuildDto(
     decimal BudgetVnd,
     decimal TotalVnd,
     int RecommendedPsuWattage,
-    IReadOnlyList<AiBuildItemDto> Items);
+    IReadOnlyList<AiBuildItemDto> Items,
+    string? UseCase = null,
+    int MinRamGb = 0,
+    int MinStorageGb = 0,
+    IReadOnlyList<string>? KeptComponents = null);
+
+public record AiPreviousBuildDto(
+    decimal BudgetVnd,
+    string UseCase,
+    IReadOnlyList<AiPreviousBuildItemDto> Items,
+    int MinRamGb = 0,
+    int MinStorageGb = 0,
+    IReadOnlyList<string>? KeptComponents = null);
+
+public record AiPreviousBuildItemDto(Guid ProductId, bool AlreadyOwned);
 
 public record AiBuildItemDto(Guid ProductId, AiProductDto Product, string Component, string Reason, bool AlreadyOwned);
